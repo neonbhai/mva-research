@@ -265,6 +265,8 @@ def rightmost_equivalent_position(
     if not is_sequence_allele(ref) or not is_sequence_allele(alt):
         return position
     position, ref, alt = trim_parsimoniously(position, ref, alt)
+    if len(ref) == len(alt):
+        return position  # a substitution occupies fixed bases and cannot shift
     for _ in range(MAX_SHIFT_BP):
         if len(ref) > 1 and len(alt) > 1:
             break  # a complex substitution, not a shiftable indel

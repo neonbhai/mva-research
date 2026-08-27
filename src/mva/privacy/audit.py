@@ -282,7 +282,6 @@ PUBLIC_REFERENCE_FIXTURE_PREFIXES: Final[tuple[str, ...]] = (
     "tests/fixtures/gnomad/",
     "tests/fixtures/mane/",
     "tests/fixtures/hpo/",
-    "tests/fixtures/consequence/",
 )
 
 #: A conforming VCF header line has 8 fixed columns before FORMAT/samples.
@@ -322,11 +321,30 @@ def vcf_declares_sample_columns(path: Path) -> bool:
     return True
 
 
+#: Index sidecars. An index holds byte offsets, never records, so it cannot
+#: disclose anything its data file does not — it therefore inherits that file's
+#: status rather than being judged on its own bytes, where the ``#CHROM`` probe
+#: would find nothing and (correctly, but uselessly) fail closed.
+_INDEX_SUFFIXES: Final[tuple[str, ...]] = (".tbi", ".csi", ".idx", ".fai")
+
+
 def _is_sample_free_reference_fixture(repo_root: Path, path: str) -> bool:
-    """ADR 0012: a public reference slice, verified to carry no sample columns."""
-    return _exempt(path, PUBLIC_REFERENCE_FIXTURE_PREFIXES) and not vcf_declares_sample_columns(
-        repo_root / path
-    )
+    """ADR 0012: a public reference slice, verified to carry no sample columns.
+
+    Both halves are required. The prefix says where it lives; the probe says what
+    it is. An index sidecar is resolved to the file it indexes — dropping the
+    suffix — because judging an index on its own bytes would deny the exemption
+    to every legitimate index while granting nothing extra in safety.
+    """
+    if not _exempt(path, PUBLIC_REFERENCE_FIXTURE_PREFIXES):
+        return False
+    target = Path(path)
+    if target.suffix in _INDEX_SUFFIXES:
+        indexed = repo_root / str(target.with_suffix(""))
+        # Only inherit from a data file that actually exists; a stray index with
+        # no companion earns nothing.
+        return indexed.is_file() and not vcf_declares_sample_columns(indexed)
+    return not vcf_declares_sample_columns(repo_root / path)
 
 
 #: The only places a ``!`` negation may re-admit a FILE.

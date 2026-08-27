@@ -22,18 +22,27 @@ LAYERS: dict[str, int] = {
     "errors": 1,
     "determinism": 1,
     "clock": 1,
+    # Allele canonicalisation (minimal representation + left-alignment). Layer 1
+    # because BOTH ingestion and annotation must use the identical rule, and they
+    # are peer stages forbidden to import each other (GP-03). Two copies of this
+    # rule is what let equivalent variants fail to join — which looks exactly
+    # like "novel and ultra-rare" (ADR 0018).
+    "alleles": 1,
     "config": 2,
     "privacy": 3,
     "ingestion": 4,
     "annotation": 4,
     "phenotype": 4,
-    "knowledge": 4,
     "prioritization": 5,
     "mechanisms": 5,
     "interventions": 5,
     "evidence": 6,
     "reporting": 7,
     "pipeline": 8,
+    # The composition root. It was absent, and because both layer tests skip an
+    # unmapped owner it was silently exempt from GP-01/GP-03 entirely — the one
+    # module that imports every stage was the one nothing checked.
+    "orchestrator": 8,
     "cli": 8,
 }
 
@@ -275,4 +284,38 @@ def test_allele_balance_is_read_only_where_it_is_defined() -> None:
         "Raw allele balance read outside its owning modules.\n"
         + "\n".join(violations)
         + ALLELE_BALANCE_REMEDIATION
+    )
+
+
+@pytest.mark.unit
+def test_every_source_module_is_in_the_layer_map() -> None:
+    """An unmapped module must FAIL, not be silently skipped.
+
+    Both layer tests do ``if owner not in LAYERS: continue``. That is a sensible
+    guard for ``__init__``, but it meant the composition root — the one module
+    that imports every stage — was exempt from GP-01 and GP-03 entirely, simply
+    because nobody had added it. A rule that silently excuses whatever it does
+    not recognise is not enforced; it is decorative.
+
+    Remediation when this fails: put the new module in LAYERS at the layer it
+    genuinely belongs to. Do NOT widen an existing layer to accommodate an import
+    that should not exist — that inverts the check into a record of the code's
+    current shape instead of a constraint on it.
+    """
+    owners = {_top_level_package(path) for path in _iter_source_files()}
+    owners.discard("__init__")
+
+    unmapped = sorted(owners - set(LAYERS))
+    assert not unmapped, (
+        "Source modules missing from the enforced layer map:\n"
+        + "\n".join(f"    src/mva/{name}" for name in unmapped)
+        + "\n\nThey are currently exempt from GP-01/GP-03. Add each to LAYERS."
+    )
+
+    phantom = sorted(set(LAYERS) - owners)
+    assert not phantom, (
+        "LAYERS declares owners with no matching source:\n"
+        + "\n".join(f"    {name}" for name in phantom)
+        + "\n\nA phantom entry makes the map look more complete than it is. "
+        "Remove it, or add the module it was reserving a place for."
     )

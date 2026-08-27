@@ -1,0 +1,20 @@
+# mva_synthetic=true — four FABRICATED rows in the NCBI MANE summary layout.
+#
+# The marker is a factual assertion (ADR 0012), so it is worth being precise about
+# what this is: the accession *names* are real, but the rows are not MANE rows.
+# The version suffixes are deliberately wrong (BUB1B is ENST00000287598.12 here,
+# .11 in MANE v1.5) and the MSH2 row is deliberately relabelled "MANE Plus
+# Clinical" when the real release calls it "MANE Select".
+#
+# Both alterations are load-bearing. The wrong suffix proves the join matches on
+# the unversioned accession, which is what makes SnpEff's ENST00000287598.11
+# joinable to MANE at all. The relabelled MSH2 row is the only way to test that
+# "MANE Plus Clinical" is NOT treated as MANE Select — two different claims that
+# a join reading the status column carelessly would conflate.
+#
+# Consequently this file must never be mistaken for, or used as, a MANE release.
+#NCBI_GeneID	Ensembl_Gene	HGNC_ID	symbol	name	RefSeq_nuc	RefSeq_prot	Ensembl_nuc	Ensembl_prot	MANE_status	GRCh38_chr	chr_start	chr_end	chr_strand
+GeneID:701	ENSG00000156970.13	HGNC:1149	BUB1B	BUB1 mitotic checkpoint serine/threonine kinase B	NM_001211.6	NP_001202.4	ENST00000287598.12	ENSP00000287598.7	MANE Select	NC_000015.10	40161060	40222093	+
+GeneID:1080	ENSG00000001626.16	HGNC:1884	CFTR	CF transmembrane conductance regulator	NM_000492.4	NP_000483.3	ENST00000003084.11	ENSP00000003084.6	MANE Select	NC_000007.14	117480025	117668665	+
+GeneID:4436	ENSG00000095002.13	HGNC:7325	MSH2	mutS homolog 2	NM_000251.3	NP_000242.1	ENST00000233146.7	ENSP00000233146.2	MANE Plus Clinical	NC_000002.12	47403067	47709830	+
+GeneID:3043	ENSG00000244734.4	HGNC:4827	HBB	hemoglobin subunit beta	NM_000518.5	NP_000509.1	ENST00000335295.4	ENSP00000333994.3	MANE Select	NC_000011.10	5225464	5229395	-

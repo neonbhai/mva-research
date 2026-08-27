@@ -514,7 +514,7 @@ def test_adapter_and_ingestion_canonicalisation_can_never_disagree(
     record = make_record(position, ref, alt)
 
     for adapter, lookup in ((without_reference, None), (with_reference, reference)):
-        from_adapter = adapter._canonicalise("chr21", position, ref, alt)
+        from_adapter = adapter.canonicalise("chr21", position, ref, alt)
         from_ingestion = trim_and_left_align(record, lookup).coordinate
         assert (from_adapter.position, from_adapter.ref, from_adapter.alt) == (
             from_ingestion.position,

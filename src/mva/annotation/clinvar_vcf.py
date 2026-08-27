@@ -702,13 +702,18 @@ class ClinvarVcfAdapter:
 
     # ------------------------------------------------------------------ internals
 
-    def _canonicalise(self, contig: str, position: int, ref: str, alt: str) -> CanonicalAllele:
+    def canonicalise(self, contig: str, position: int, ref: str, alt: str) -> CanonicalAllele:
         """The single entry point both sides of the join go through.
 
         Delegates to :func:`mva.alleles.canonicalise_allele` — the same function
         :mod:`mva.ingestion.normalise` calls. There is deliberately no trimming or
         shifting logic in this module: a second implementation of the rule is what
         made ``100 AT>AG`` and ``101 T>G`` fail to join in the first place.
+
+        Public so that a test can compare this adapter's representation against the
+        ingestion stage's *directly*, rather than inferring that they agree from a
+        join that happened to succeed. Agreement inferred from a passing join is
+        exactly the evidence that was available while the two disagreed.
         """
         return canonicalise_allele(
             contig=contig,
@@ -754,7 +759,7 @@ class ClinvarVcfAdapter:
             msg = "Variant ID position is not an integer. The value is not echoed (PRIV-09)."
             raise ValueError(msg) from exc
         contig = normalise_contig(contig_token)
-        canonical = self._canonicalise(contig, position, ref.strip().upper(), alt.strip().upper())
+        canonical = self.canonicalise(contig, position, ref.strip().upper(), alt.strip().upper())
         search_end = canonical.position
         if self._reference is not None:
             search_end = max(
@@ -836,7 +841,7 @@ class ClinvarVcfAdapter:
             allele = alt.strip().upper()
             if not allele or allele == _MISSING_VALUE:
                 continue
-            canonical = self._canonicalise(ucsc_contig, position, ref_allele, allele)
+            canonical = self.canonicalise(ucsc_contig, position, ref_allele, allele)
             key = (
                 f"{self._build.value}:{ucsc_contig}:"
                 f"{canonical.position}:{canonical.ref}:{canonical.alt}"
