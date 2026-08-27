@@ -33,6 +33,21 @@ Boundary: `$MVA_WORKSPACE`, an external absolute path (ADR 0006).
 
 ---
 
+## Configuring the workspace
+
+`env.example` in the repo root is the template. Note the filename has **no
+leading dot**: `.gitignore` denies `.env.*` with no negation, so a `.env.example`
+would have to re-open that deny rule — and `cp .env .env.example` is one
+keystroke away from committing real credentials. The repo's own
+`gitignore_negation_safety` check caught exactly that hole during development.
+
+```bash
+cp env.example .env          # .env is denied by .gitignore and stays local
+$EDITOR .env                 # point MVA_WORKSPACE outside the repo
+```
+
+---
+
 ## The scanner must not become the leak
 
 The privacy scanner is run by an agent, and its output enters model context. So
