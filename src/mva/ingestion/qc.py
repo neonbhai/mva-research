@@ -22,15 +22,18 @@ measurements, not predictions), and a timestamp from the injected clock (GP-30).
 from __future__ import annotations
 
 import statistics
-from collections.abc import Sequence
+from array import array
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
 
 from mva.clock import Clock
 from mva.config import QualityThresholds
+from mva.errors import IngestionError
 from mva.ingestion.normalise import REF_ALLELE_MISMATCH_FLAG
-from mva.models.base import AssertionTier
+from mva.models.base import AssertionTier, error_token
+from mva.models.genome import contig_sort_key
 from mva.models.evidence import (
     EvidenceCategory,
     EvidenceDirection,

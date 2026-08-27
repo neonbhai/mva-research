@@ -10,6 +10,7 @@ record it was complaining about.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -578,7 +579,12 @@ def test_backends_produce_identical_records_for_the_fixture() -> None:
     native = _read_fixture(BACKEND_CYVCF2)
 
     assert native.variants == text.variants
-    assert native == text
+    # Every observation must agree. `backend` is the one field that must NOT: it
+    # records which parser ran, and the two do not behave identically on a
+    # malformed line (htslib refuses the file, the text parser counts the line),
+    # so a run has to be able to say which one produced it.
+    assert replace(native, backend=text.backend) == text
+    assert (native.backend, text.backend) == (BACKEND_CYVCF2, BACKEND_TEXT)
 
 
 @pytest.mark.unit

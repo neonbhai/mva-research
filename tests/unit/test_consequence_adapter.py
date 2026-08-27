@@ -1,6 +1,6 @@
 """Unit tests for the real, SnpEff-backed consequence adapter.
 
-Most of these run against a **stub SnpEff** (``tests/fixtures/consequence/stub_snpeff.sh``)
+Most of these run against a **stub SnpEff** (``tests/fixtures/synthetic/consequence/stub_snpeff.sh``)
 rather than the real ~1 GB installation, and that is deliberate rather than a
 compromise. The adapter under test is entirely real; what is faked is the
 counterparty, so that the properties which actually go wrong in a subprocess
@@ -45,7 +45,7 @@ from mva.models.genome import ContigStyle, GenomeBuild
 from mva.models.variant import ConsequenceAnnotation, ImpactSeverity
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FIXTURES = REPO_ROOT / "tests" / "fixtures" / "consequence"
+FIXTURES = REPO_ROOT / "tests" / "fixtures" / "synthetic" / "consequence"
 
 #: Where tools/setup/install_snpeff.sh puts the real installation. Kept out of the
 #: repository: the database is ~1 GB.

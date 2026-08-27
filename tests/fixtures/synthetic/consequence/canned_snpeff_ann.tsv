@@ -1,0 +1,21 @@
+# mva_synthetic=true — fabricated SnpEff ANN strings for unit tests.
+#
+# Drives tools/../tests' stub SnpEff so the adapter's subprocess plumbing, ANN
+# parsing, ordering, omission and privacy behaviour can be tested hermetically,
+# with no JRE and no 600 MB database. The gene symbols and transcript IDs are
+# real-looking but the annotations are invented; nothing here is a patient
+# coordinate and nothing here is biologically valid.
+#
+# Columns: contig<TAB>pos<TAB>ref<TAB>alt<TAB>ANN payload (as it appears after 'ANN=').
+# The ERROR_CHROMOSOME_NOT_FOUND rows are copied verbatim from real SnpEff 5.4c
+# output for an unknown contig: a 16-field entry with no gene and no feature.
+# A site absent from this file is returned by the stub with no ANN field at all,
+# which is how "the tool knows nothing" is exercised (GP-14).
+contig	pos	ref	alt	ann
+15	40200000	C	T	T|stop_gained|HIGH|BUB1B|ENSG00000156970|transcript|ENST00000287598|protein_coding|9/23|c.1051C>T|p.Arg351*|1180/3639|1051/3195|351/1064||,T|stop_gained|HIGH|BUB1B|ENSG00000156970|transcript|ENST00000412359|protein_coding|9/22|c.1051C>T|p.Arg351*|1100/2900|1051/2800|351/933||,T|non_coding_transcript_exon_variant|MODIFIER|BUB1B-PAK6|ENSG00000288626|transcript|ENST00000672080|retained_intron|3/6|n.412C>T||||||
+7	117559590	A	G	G|missense_variant&splice_region_variant|MODERATE|CFTR|ENSG00000001626|transcript|ENST00000003084|protein_coding|11/27|c.1521A>G|p.Ile507Met|1653/6132|1521/4443|507/1480||
+2	47403000	G	GA	GA|frameshift_variant|HIGH|MSH2|ENSG00000095002|transcript|ENST00000233146|protein_coding|3/16|c.646dupA|p.Ile216fs|900/2800|646/2805|216/934||
+11	5227002	T	A	A|intron_variant|MODIFIER|HBB|ENSG00000244734|transcript|ENST00000335295|protein_coding|1/2|c.92+10T>A||||||
+19	1000000	C	G	G|intergenic_region|MODIFIER|GENEA-GENEB|GENEA-GENEB|intergenic_region|GENEA-GENEB|||||||||
+1	100	A	T	T||MODIFIER|||||||||||||ERROR_CHROMOSOME_NOT_FOUND
+3	200	A	T	T||MODIFIER|||||||||||||ERROR_CHROMOSOME_NOT_FOUND

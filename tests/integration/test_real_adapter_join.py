@@ -124,10 +124,21 @@ def make_record(contig: str, position: int, ref: str, alt: str) -> VariantRecord
 
 
 def _release_records(adapter: ClinvarVcfAdapter) -> list[list[str]]:
-    """Raw columns for every ClinVar record over BUB1B."""
+    """Raw columns for every ClinVar record over BUB1B, read independently.
+
+    Opened separately rather than through the adapter's own handle: this is the
+    control side of the comparison, and it must not share the code path it exists
+    to check.
+    """
+    import pysam
+
     contig, start, end = BUB1B_REGION
     index_contig = adapter.contig_map[contig]
-    return [line.split("\t", 8) for line in adapter._tabix.fetch(index_contig, start - 1, end)]
+    handle = pysam.TabixFile(str(adapter.vcf_path))
+    try:
+        return [line.split("\t", 8) for line in handle.fetch(index_contig, start - 1, end)]
+    finally:
+        handle.close()
 
 
 # ---------------------------------------------------------------------------
