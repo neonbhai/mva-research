@@ -11,10 +11,10 @@ general scoring rather than a special case.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from tests.conftest import read_golden_tsv
 
 from mva.config import CaseConfig, Workspace
 from mva.models.pair import InheritanceModel
@@ -23,20 +23,24 @@ from mva.orchestrator import execute_pipeline
 pytestmark = [pytest.mark.golden, pytest.mark.integration]
 
 
-@pytest.fixture(scope="module")
-def _expected_ranking() -> list[dict[str, str]]:
-    return read_golden_tsv("expected_ranking.tsv")
+@pytest.fixture
+def expected_ranking(
+    golden: Callable[[str], list[dict[str, str]]],
+) -> list[dict[str, str]]:
+    return golden("expected_ranking.tsv")
 
 
-@pytest.fixture(scope="module")
-def _expected_drugs() -> list[dict[str, str]]:
-    return read_golden_tsv("expected_drug_outcomes.tsv")
+@pytest.fixture
+def expected_drugs(
+    golden: Callable[[str], list[dict[str, str]]],
+) -> list[dict[str, str]]:
+    return golden("expected_drug_outcomes.tsv")
 
 
 def test_synthetic_causal_pair_ranks_first(
     synthetic_config: CaseConfig,
     synthetic_workspace: Workspace,
-    _expected_ranking: list[dict[str, str]],
+    expected_ranking: list[dict[str, str]],
 ) -> None:
     """The known compound-heterozygous answer must rank #1.
 
@@ -47,7 +51,7 @@ def test_synthetic_causal_pair_ranks_first(
     result = execute_pipeline(synthetic_config, synthetic_workspace)
     assert result.ranked_pairs, "pipeline produced no ranked candidates"
 
-    expected = _expected_ranking[0]
+    expected = expected_ranking[0]
     top = result.ranked_pairs[0]
 
     assert top.rank == 1
@@ -102,7 +106,7 @@ def test_in_cis_pair_does_not_rank_first(
 def test_wrong_direction_drug_is_rejected(
     synthetic_config: CaseConfig,
     synthetic_workspace: Workspace,
-    _expected_drugs: list[dict[str, str]],
+    expected_drugs: list[dict[str, str]],
 ) -> None:
     """The headline Track 2 criterion.
 
@@ -115,7 +119,7 @@ def test_wrong_direction_drug_is_rejected(
 
     expected_rejected = {
         row["drug_id"]: row["expected_primary_reason"]
-        for row in _expected_drugs
+        for row in expected_drugs
         if row["expected_outcome"] == "rejected"
     }
     assert "SYNTH-DRUG-B" in expected_rejected

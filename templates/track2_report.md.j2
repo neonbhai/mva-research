@@ -1,0 +1,157 @@
+{% macro drug_block(drug) -%}
+### {{ drug.name }} (`{{ drug.drug_id }}`)
+
+- Approved name: {{ drug.approved_name }} · approval status: {{ drug.approval_status }} · qualifies as repurposing: {{ drug.is_repurposable }}
+- Intervention class: {{ drug.intervention_class }}
+- Heuristic score: {{ drug.score }}{% if drug.rank %} · rank {{ drug.rank }}{% endif %}
+
+- Target is a node in this mechanism: {{ drug.target_in_mechanism }}
+- Rationale: {{ drug.rationale }}
+
+The eight mandatory questions:
+
+{% for question in drug.questions %}
+{{ question.number }}. **{{ question.question }}** {{ question.answer }}
+{% endfor %}
+
+{% if drug.safety_concerns %}
+Safety concerns:
+
+{% for concern in drug.safety_concerns %}
+- `{{ concern.concern_id }}` ({{ concern.severity }}, observed in {{ concern.population }}){% if concern.is_disqualifying %} — **DISQUALIFYING**{% endif %}: {{ concern.description }}
+{% endfor %}
+{% else %}
+Safety concerns: none recorded. An empty list means none was recorded, not that none exists (GP-14).
+{% endif %}
+
+{% if drug.evidence %}
+Evidence cited:
+
+{% for item in drug.evidence %}
+- `{{ item.evidence_id }}` {{ item.marker }} {{ item.claim }} — {{ item.strength }} / {{ item.evidence_type }}, source {{ item.source }}. Limitations: {{ item.limitations }}
+{% endfor %}
+{% endif %}
+{% if drug.contradictions %}
+Contradicting evidence (retained — GP-19):
+
+{% for item in drug.contradictions %}
+- `{{ item.evidence_id }}` {{ item.marker }} **{{ item.claim }}** — {{ item.strength }} / {{ item.evidence_type }}. Limitations: {{ item.limitations }}
+{% endfor %}
+{% endif %}
+{%- endmacro %}
+# {{ title }}
+
+> {{ not_medical_advice }}
+
+- Generated: {{ generated_at }}
+- Mechanism: `{{ mechanism.mechanism_id }}` ({{ mechanism.gene_symbol }})
+- Candidates presented: {{ disease_modifying | length }} disease-modifying with agreeing direction, {{ direction_undetermined | length }} with an undeterminable direction, {{ symptomatic | length }} symptomatic/supportive. Rejected: {{ rejected_count }}.
+
+## Read this first
+
+**Developmental window.** {{ mechanism.developmental_window_caveat }}
+
+{{ uncalibrated_weights }}
+
+**The chain is only as strong as its weakest link.** {% if mechanism.inferred_links %}The following links are inferred rather than directly demonstrated, and every hypothesis below inherits their uncertainty:
+
+{% for link in mechanism.inferred_links %}
+- {{ link }}
+{% endfor %}
+{% else %}
+Every link in this mechanism is directly demonstrated in a relevant system.
+{% endif %}
+
+{% if mechanism.unsourced_links %}
+These links cite no evidence at all and are recorded as gaps, not asserted (GP-10):
+
+{% for link in mechanism.unsourced_links %}
+- {{ link }}
+{% endfor %}
+{% endif %}
+
+## Mechanism at a glance
+
+**Summary.** {{ mechanism.summary }}
+
+- Therapeutic target node: `{{ mechanism.target_node_id }}` — {{ mechanism.target_label }} (patient state: {{ mechanism.target_state }})
+- Disease direction: {{ mechanism.disease_direction }}
+- **Required correction: {{ mechanism.required_correction }}**
+- Fully demonstrated chain: {{ mechanism.is_fully_demonstrated }}
+
+{% if mechanism.uncertainties %}
+Uncertainties:
+
+{% for uncertainty in mechanism.uncertainties %}
+- {{ uncertainty }}
+{% endfor %}
+{% endif %}
+
+{% if pair %}
+## Anchoring variant pair
+
+- Pair: `{{ pair.pair_id }}` in {{ pair.gene_symbol }} ({{ pair.inheritance_model }})
+- Variants: {{ pair.variant_ids | join(", ") }}
+- Phase: {{ pair.phase_status }}
+- Composite score: {{ pair.composite_score }}
+- Flags: {% if pair.flags %}{{ pair.flags | join(", ") }}{% else %}none{% endif %}
+
+
+A drug hypothesis that is not anchored to a ranked variant pair is not grounded in
+anything; this is the pair this report is anchored to.
+{% endif %}
+
+## Disease-modifying candidates — direction AGREES
+
+These act on a node in the mechanism, in the direction the mechanism requires.
+
+{% if disease_modifying %}
+{% for drug in disease_modifying %}
+{{ drug_block(drug) }}
+{% endfor %}
+{% else %}
+None. No disease-modifying candidate survived the direction check.
+{% endif %}
+
+## Direction CANNOT BE DETERMINED — not presented as agreement
+
+`directions_agree is None` means the sign of the effect is unknown or genuinely
+context-dependent. That is not agreement and is never counted as support
+(GP-16, ASSUMPTION-DRUG-02). These candidates are listed separately so they can
+never be read as endorsed.
+
+{% if direction_undetermined %}
+{% for drug in direction_undetermined %}
+{{ drug_block(drug) }}
+{% endfor %}
+{% else %}
+None in this category.
+{% endif %}
+
+## Symptomatic, supportive, surveillance and preventive measures
+
+**These do not correct the disease mechanism.** They are kept in a separate
+section because presenting symptom management as mechanism correction is a
+category error (ASSUMPTION-DRUG-04). Nothing here is disease-modifying.
+
+{% if symptomatic %}
+{% for drug in symptomatic %}
+{{ drug_block(drug) }}
+{% endfor %}
+{% else %}
+None in this category.
+{% endif %}
+
+{{ rejection_record }}
+
+{% if mechanism_block %}
+---
+
+{{ mechanism_block }}
+{% endif %}
+
+## Caveats and limitations
+
+{% for caveat in caveats %}
+- {{ caveat }}
+{% endfor %}

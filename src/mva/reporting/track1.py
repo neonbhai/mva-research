@@ -272,6 +272,14 @@ def build_submission_rows(
         raise ValueError(msg)
 
     ordered = sorted(pairs, key=lambda pair: pair.sort_key())
+    ordered, subsumed = _drop_subsumed(ordered)
+    if subsumed:
+        # Counts only, never coordinates (GP-41).
+        _LOG.info(
+            "Dropped %d candidate row(s) whose variants are already covered by a "
+            "higher-ranked candidate.",
+            subsumed,
+        )
     rows = [_row_for_pair(pair, proband_id) for pair in ordered]
     # Stable sort: candidates whose EPCR collides after rounding keep the
     # score-then-position order established above.
@@ -288,6 +296,37 @@ def build_submission_rows(
             len(rows) - max_rows,
         )
     return tuple(rows[:max_rows])
+
+
+def _drop_subsumed(
+    ordered: Sequence[CandidatePair],
+) -> tuple[list[CandidatePair], int]:
+    """Remove candidates already fully covered by a higher-ranked candidate.
+
+    The ranked list legitimately contains single-variant hypotheses carved out of
+    a pair — a lone high-impact heterozygote is a real alternative under a
+    dominant or de-novo model, so prioritisation is right to emit it. But once the
+    *pair* has been submitted, the single-variant row adds nothing the scorer can
+    use: F-max unions variants across rows (``predicted_variants |= row.variants``),
+    so a subset row contributes no new variant, and rank points go to the first
+    full match. It only consumes one of the ten available rows, which would
+    otherwise carry a different gene's hypothesis.
+
+    So: drop a candidate whose variant set is a subset of an already-kept
+    candidate's. Strictly a submission-shaping step — nothing is removed from the
+    ranked list, the dossier or the evidence store (GP-13, GP-19).
+    """
+    kept: list[CandidatePair] = []
+    kept_sets: list[frozenset[str]] = []
+    dropped = 0
+    for pair in ordered:
+        variants = frozenset(pair.variant_ids)
+        if any(variants <= seen for seen in kept_sets):
+            dropped += 1
+            continue
+        kept.append(pair)
+        kept_sets.append(variants)
+    return kept, dropped
 
 
 def render_submission_csv(rows: Sequence[SubmissionRow]) -> str:

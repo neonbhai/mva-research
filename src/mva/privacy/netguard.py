@@ -140,11 +140,46 @@ def hook_installed() -> bool:
 def _ref_cache_root() -> Path:
     """Where htslib may cache reference sequences: inside the workspace if we have one."""
     try:
-        return resolve_workspace().root / "ref_cache"
+        return resolve_workspace().root
     except (ConfigError, OSError):
         # No workspace configured yet (WorkspaceError subclasses ConfigError). A
         # process-local temp cache still keeps htslib away from the EBI endpoint.
         return Path(tempfile.gettempdir()) / "mva-ref-cache"
+
+
+def reference_cache_env(workspace_root: Path) -> dict[str, str]:
+    """The htslib environment that keeps CRAM reference resolution local.
+
+    ``REF_PATH=/dev/null`` is the important half. htslib's *default* REF_PATH ends
+    in the EBI URL template, so leaving it unset means "look locally, then ask the
+    internet"; setting it to a path that resolves nothing means "look locally, then
+    give up", which is the behaviour we want on the patient-data path.
+
+    ``REF_CACHE`` uses htslib's ``%2s/%2s/%s`` expansion over the MD5 hex digest, so
+    any sequence that *is* resolved locally is cached inside the workspace rather
+    than in ``~/.cache``, where it would sit outside the privacy boundary.
+    """
+    cache = workspace_root / "ref_cache"
+    # A read-only cache root is a degradation, not a privacy failure: REF_PATH alone
+    # already suppresses the remote lookup.
+    with contextlib.suppress(OSError):
+        cache.mkdir(parents=True, exist_ok=True)
+    return {"REF_PATH": "/dev/null", "REF_CACHE": f"{cache.as_posix()}/%2s/%2s/%s"}
+
+
+def configure_reference_cache(workspace_root: Path) -> None:
+    """Apply :func:`reference_cache_env` to this process, permanently.
+
+    For the composition root, which sets it once at startup and never unwinds it.
+    :class:`OfflineProfile` applies the same variables but restores the previous
+    values on exit, because a context manager that silently mutated the process
+    environment for good would be a trap.
+
+    This is the only control in this module that constrains C code, and it is
+    therefore the only one that constrains ``pysam``/``htslib`` — the audit hook
+    does not see anything libhts does.
+    """
+    os.environ.update(reference_cache_env(workspace_root))
 
 
 class OfflineProfile:
@@ -174,17 +209,8 @@ class OfflineProfile:
         self._previous_armed = _armed
         self._previous_strict = _strict_mode
 
-        cache_root = _ref_cache_root()
-        # A read-only cache root is a degradation, not a privacy failure: REF_PATH
-        # alone already suppresses the remote lookup.
-        with contextlib.suppress(OSError):
-            cache_root.mkdir(parents=True, exist_ok=True)
-
-        # REF_PATH is consulted first by htslib; pointing it at /dev/null removes
-        # the implicit EBI URL that would otherwise be appended to the search path.
-        self._set_env("REF_PATH", "/dev/null")
-        # REF_CACHE uses htslib's %2s/%2s/%s expansion over the MD5 hex digest.
-        self._set_env("REF_CACHE", f"{cache_root.as_posix()}/%2s/%2s/%s")
+        for key, value in reference_cache_env(_ref_cache_root()).items():
+            self._set_env(key, value)
 
         _armed = True
         _strict_mode = self._strict

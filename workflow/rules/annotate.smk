@@ -8,18 +8,18 @@
 
 
 rule annotate:
-    """Normalised variants + phenotype -> annotated variants and a HPO profile.
+    """Normalised variants + phenotype -> annotated variant records.
 
-    Two artifacts because they are separately hashable and separately classified:
-    the annotated variants are SENSITIVE, the phenotype profile is the term set
-    the ranking stage consumes.
+    Consequences and frequencies are LISTS on the record, not a single chosen
+    transcript (ASSUMPTION-TRANSCRIPT-01), and a variant with no frequency data
+    is recorded as having none rather than as rare (GP-14). The phenotype profile
+    is built in the same stage and travels in the evidence store.
     """
     input:
         variants=NORMALISED_VARIANTS,
         phenotype=INPUT_PHENOTYPE,
     output:
         variants=ANNOTATED_VARIANTS,
-        profile=PHENOTYPE_PROFILE,
     log:
         f"{LOG_DIR}/annotate.log",
     conda:

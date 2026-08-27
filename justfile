@@ -3,8 +3,16 @@
 
 set shell := ["bash", "-uc"]
 
-# Workspace for the synthetic demo. Overridable: `just demo WORKSPACE=/path`.
-DEMO_WORKSPACE := justfile_directory() + "/.demo-workspace"
+# Workspace for the synthetic demo.
+#
+# Deliberately OUTSIDE the repository (ADR 0006). The privacy audit's
+# `workspace_containment` check fails an in-repo workspace, and it is right to:
+# a workspace inside the tree is one `git add -A` from being committed. Running
+# the demo the same way a real case must be run keeps the honest path the
+# default path. Override with: just demo DEMO_ROOT=/some/other/dir
+DEMO_ROOT := env_var_or_default("TMPDIR", "/tmp")
+DEMO_WORKSPACE := DEMO_ROOT / "mva-research-demo"
+DET_WORKSPACE := DEMO_ROOT / "mva-research-demo-det"
 
 default:
     @just --list
@@ -82,33 +90,40 @@ privacy-audit-staged:
 
 # Run the synthetic case end to end and write all artifacts.
 demo: clean-demo
-    @mkdir -p "{{DEMO_WORKSPACE}}/inputs"
-    @cp tests/fixtures/synthetic/synthetic_case.vcf "{{DEMO_WORKSPACE}}/inputs/"
-    @cp tests/fixtures/synthetic/synthetic_phenotype.tsv "{{DEMO_WORKSPACE}}/inputs/"
+    @just _seed-workspace "{{DEMO_WORKSPACE}}"
     uv run mva run all \
         --config config/synthetic-case.yaml \
         --defaults config/default.yaml \
-        --workspace "{{DEMO_WORKSPACE}}" \
-        --allow-workspace-in-repo
+        --workspace "{{DEMO_WORKSPACE}}"
     @echo ""
     @echo "  demo artifacts: {{DEMO_WORKSPACE}}/runs/"
+
+# Copy the synthetic inputs into a workspace. Synthetic fixtures only.
+_seed-workspace WS:
+    @mkdir -p "{{WS}}/inputs"
+    @cp tests/fixtures/synthetic/synthetic_case.vcf "{{WS}}/inputs/"
+    @cp tests/fixtures/synthetic/synthetic_phenotype.tsv "{{WS}}/inputs/"
 
 # Show what the demo produced.
 demo-artifacts:
     @find "{{DEMO_WORKSPACE}}/runs" -type f 2>/dev/null | sort || echo "no demo run found; try: just demo"
 
+# Show the privacy audit from the most recent demo run.
+demo-audit:
+    @cat "{{DEMO_WORKSPACE}}"/runs/*/privacy/privacy_audit.md 2>/dev/null || echo "no demo run found; try: just demo"
+
 # Prove determinism: run the demo twice and compare artifact hashes.
 demo-determinism:
+    @just _seed-workspace "{{DET_WORKSPACE}}"
     uv run mva verify determinism \
         --config config/synthetic-case.yaml \
         --defaults config/default.yaml \
-        --workspace "{{DEMO_WORKSPACE}}-det" \
-        --allow-workspace-in-repo
+        --workspace "{{DET_WORKSPACE}}"
 
 # Remove the demo workspace.
 clean-demo:
-    @rm -rf "{{DEMO_WORKSPACE}}" "{{DEMO_WORKSPACE}}-det"
-    @echo "demo workspace removed"
+    @rm -rf "{{DEMO_WORKSPACE}}" "{{DET_WORKSPACE}}"
+    @echo "demo workspace removed: {{DEMO_WORKSPACE}}"
 
 # ---------------------------------------------------------------- workflow
 

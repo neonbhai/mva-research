@@ -47,6 +47,7 @@ from mva.prioritization.filters import apply_hard_filters, apply_soft_flags
 from mva.prioritization.pairing import generate_pairs
 from mva.prioritization.ranking import assign_discriminating_experiments, rank_pairs
 from mva.prioritization.scoring import score_pair
+from mva.privacy.audit import run_audit
 from mva.reporting.dossier import build_candidate_dossier
 from mva.reporting.track1 import build_submission_rows, render_submission_csv
 from mva.reporting.track2 import (
@@ -356,6 +357,8 @@ def _finish(
         profile=profile,
     )
 
+    _write_privacy_audit(context, repo_root=repo_root)
+
     manifest = build_run_manifest(context, repo_root=repo_root)
     write_provenance_manifest(context, manifest)
     # Rebuild after the provenance artifact registers itself, so the manifest we
@@ -375,6 +378,30 @@ def _finish(
         ranked_pairs=tuple(ranked),
         mechanism=mechanism,
     )
+
+
+def _write_privacy_audit(context: RunContext, *, repo_root: Path) -> None:
+    """Run the privacy audit over the repo and the workspace, and record it.
+
+    Written as part of every run rather than as a separate manual step: an audit
+    you have to remember to run is one you will forget on the run that mattered.
+    The report contains paths, line numbers and counts only — never matched
+    content (GP-41).
+    """
+    report = run_audit(repo_root, workspace=context.workspace.root)
+    context.write_text_artifact(
+        "privacy/privacy_audit.md",
+        report.to_markdown(),
+        kind=ArtifactKind.PRIVACY_AUDIT,
+        stage="privacy",
+        row_count=len(report.results),
+    )
+    if not report.passed:
+        context.warnings.append(
+            "Privacy audit FAILED for this run: "
+            f"{', '.join(report.failed_checks)}. See privacy/privacy_audit.md. "
+            "Do not export or share any artifact from this run until it passes."
+        )
 
 
 def _persist_evidence(
@@ -408,6 +435,9 @@ def _persist_evidence(
             _graph_edges(ranked=ranked, mechanism=mechanism, accepted=accepted, rejected=rejected)
         )
         counts = store.counts()
+        # The Parquet export is the artifact determinism is asserted on; the
+        # DuckDB file is a storage-engine container. See verify_determinism.
+        exported = store.export_parquet(db_path.parent / "parquet")
 
     context.register_artifact(
         kind=ArtifactKind.EVIDENCE_DB,
@@ -416,6 +446,14 @@ def _persist_evidence(
         row_count=sum(counts.values()),
         notes=canonical_json(counts),
     )
+    for table in sorted(exported):
+        context.register_artifact(
+            kind=ArtifactKind.EVIDENCE_DB,
+            path=exported[table],
+            stage="evidence",
+            row_count=counts.get(table),
+            notes=f"Parquet export of table {table!r}.",
+        )
 
 
 def _graph_edges(

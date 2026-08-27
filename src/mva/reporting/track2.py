@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 
 from mva.clock import Clock
 from mva.models import (
+    AssertionTier,
     CandidatePair,
     DrugHypothesis,
     EvidenceItem,
@@ -149,7 +150,9 @@ def build_mechanism_report(
 ) -> str:
     """Render the mechanism chain, link by link, with its weak points named."""
     checker = AssertionChecker(resolver, strict=True)
-    return render_template("mechanism_report.md.j2", _mechanism_context(mechanism, resolver, checker, clock))
+    return render_template(
+        "mechanism_report.md.j2", _mechanism_context(mechanism, resolver, checker, clock)
+    )
 
 
 def build_drug_report(
@@ -331,7 +334,9 @@ def _mechanism_glance(
             )
         ),
         "inferred_links": [_link_summary(link) for link in mechanism.inferred_links],
-        "unsourced_links": [_link_summary(link) for link in mechanism.links if not link.evidence_ids],
+        "unsourced_links": [
+            _link_summary(link) for link in mechanism.links if not link.evidence_ids
+        ],
         "is_fully_demonstrated": mechanism.is_fully_demonstrated,
         "uncertainties": list(mechanism.uncertainties),
     }
@@ -342,17 +347,19 @@ def _summary_assertion(
     resolver: AssertionResolver,
     checker: AssertionChecker,
 ) -> str:
-    """The mechanism's headline claim, gated by GP-10."""
+    """The mechanism's headline claim, gated by GP-10.
+
+    An unsourced mechanism summary is refused outright. This is the sentence the
+    entire Track 2 report hangs from; if it cites nothing, there is nothing below
+    it worth rendering.
+    """
     items = resolver.resolve(mechanism.supporting_evidence_ids)
-    tier = weakest_tier(items) if items else TIER_MARKERS  # placeholder replaced below
-    if not items:
-        # No evidence: the checker refuses it, with a message naming the remedy.
-        checker.check(Assertion(text=mechanism.summary, tier=next(iter(TIER_MARKERS))))
-    assert not isinstance(tier, dict)  # narrowed by the branch above, which raises
     return checker.check(
         Assertion(
             text=mechanism.summary,
-            tier=tier,
+            # SPECULATION is the placeholder for the no-evidence case; the checker
+            # raises before it can ever be rendered.
+            tier=weakest_tier(items) if items else AssertionTier.SPECULATION,
             evidence_ids=tuple(sorted(mechanism.supporting_evidence_ids)),
         )
     ).rendered()
@@ -520,18 +527,13 @@ def _drug_rationale(
     )
     if not drug.evidence_ids and not require_rationale:
         return f"{claim} [UNSOURCED — recorded as a gap, not asserted]"
-    tier = weakest_tier(evidence) if evidence else _lowest_tier()
     return checker.check(
-        Assertion(text=claim, tier=tier, evidence_ids=tuple(sorted(drug.evidence_ids)))
+        Assertion(
+            text=claim,
+            tier=weakest_tier(evidence) if evidence else AssertionTier.SPECULATION,
+            evidence_ids=tuple(sorted(drug.evidence_ids)),
+        )
     ).rendered()
-
-
-def _lowest_tier() -> "AssertionTierAlias":
-    """The tier used when a claim has no resolvable evidence — it never renders,
-    because the checker raises first, but the value must be well-defined."""
-    from mva.models import AssertionTier
-
-    return AssertionTier.SPECULATION
 
 
 def _direction_verdict(drug: DrugHypothesis) -> str:
@@ -553,9 +555,10 @@ def _direction_verdict(drug: DrugHypothesis) -> str:
     )
 
 
-def _drug_questions(drug: DrugHypothesis, mechanism: MechanismHypothesis) -> list[dict[str, object]]:
+def _drug_questions(
+    drug: DrugHypothesis, mechanism: MechanismHypothesis
+) -> list[dict[str, object]]:
     """The eight mandatory questions, as labelled fields."""
-    pharmacokinetics = drug.pharmacokinetics
     paediatric = drug.pediatric_evidence
     node_label = next(
         (node.label for node in mechanism.nodes if node.node_id == drug.target_node_id),
@@ -583,7 +586,6 @@ def _drug_questions(drug: DrugHypothesis, mechanism: MechanismHypothesis) -> lis
         _instability_answer(drug),
         drug.proposed_validation_experiment,
     )
-    del pharmacokinetics
     return [
         {"number": index, "question": question, "answer": answer}
         for index, (question, answer) in enumerate(zip(DRUG_QUESTIONS, answers, strict=True), 1)
@@ -685,9 +687,9 @@ def _caveats(mechanism: MechanismHypothesis) -> list[str]:
     ]
     if not mechanism.is_fully_demonstrated:
         caveats.append(
-            f"{len(mechanism.inferred_links)} of {len(mechanism.links)} mechanism links are "
-            "inferred rather than directly demonstrated. Every drug hypothesis below "
-            "inherits that uncertainty (ASSUMPTION-MECHANISM-01)."
+            "Mechanism links inferred rather than directly demonstrated: "
+            f"{len(mechanism.inferred_links)} of {len(mechanism.links)}. Every drug "
+            "hypothesis below inherits that uncertainty (ASSUMPTION-MECHANISM-01)."
         )
     return caveats
 

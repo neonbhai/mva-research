@@ -1,0 +1,99 @@
+# Candidate dossier
+
+> **SENSITIVE ARTIFACT.** This document contains patient-derived genotypes and
+> quality metrics. It stays in the external workspace, is never committed, and is
+> never a candidate for public export (GP-40, GP-43).
+
+> **Not a diagnosis and not medical advice.** This is a ranked set of research
+> hypotheses produced by a deterministic pipeline. Every candidate requires
+> orthogonal confirmation and clinical review.
+
+- Generated: {{ generated_at }}
+- Candidates ranked: {{ total_candidates }}
+- Candidates detailed below: {{ shown }} (top {{ top_n }})
+{% if truncation_notice %}
+- {{ truncation_notice }}
+{% endif %}
+
+Every rendered claim carries the tier of its **weakest** citation:
+
+{% for entry in tier_legend %}
+- `{{ entry.marker }}` — {{ entry.tier }}
+{% endfor %}
+
+A claim with no citation is not rendered as a claim (GP-10). Where a question has
+no supporting evidence, the answer is a readout of pipeline state and says so.
+
+---
+
+{% for candidate in candidates %}
+## Rank {{ candidate.rank }} — {{ candidate.gene_symbol }} ({{ candidate.pair_id }})
+
+- Inheritance model: {{ candidate.inheritance_model }}{% if not candidate.is_pair %} (single-variant proposal){% endif %}
+
+- Phase: {{ candidate.phase_status }}{% if candidate.phase_disqualifying %} — **in cis: incompatible with a compound-heterozygous recessive mechanism**{% endif %}
+
+- Composite score: {{ candidate.composite_score }} · submitted EPCR: {{ candidate.epcr }}
+- Flags: {% if candidate.flags %}{{ candidate.flags | join(", ") }}{% else %}none{% endif %}
+
+- Supporting evidence items cited: {{ candidate.supporting_count }} · contradicting: {{ candidate.contradictions | length }} · blocking open questions: {{ candidate.blocking_count }}
+- Rank rationale: {{ candidate.rank_rationale }}
+
+### Score vector
+
+The composite is a weighted combination of the components below and is never
+reported instead of them. The weights are uncalibrated heuristics.
+
+{{ candidate.score_table }}
+
+### Variants
+
+{{ candidate.variants_table }}
+
+### The nine questions
+
+{% for question in candidate.questions %}
+#### {{ question.id }}. {{ question.question }}
+
+{{ question.answer }}
+
+*Basis: {{ question.basis }}. Citations: {{ question.citations }}.*
+
+{% if question.evidence %}
+{% for item in question.evidence %}
+- `{{ item.evidence_id }}` {{ item.marker }} {{ item.claim }} — {{ item.strength }} / {{ item.evidence_type }}, source {{ item.source }}. Limitations: {{ item.limitations }}
+{% endfor %}
+
+{% endif %}
+{% endfor %}
+
+### Contradicting evidence (retained, never discarded — GP-19)
+
+{% if candidate.contradictions %}
+{% for item in candidate.contradictions %}
+- `{{ item.evidence_id }}` {{ item.marker }} **{{ item.claim }}** — {{ item.strength }} / {{ item.evidence_type }}, source {{ item.source }}. Limitations: {{ item.limitations }}
+{% endfor %}
+{% else %}
+- None recorded. Absence of a recorded contradiction is not evidence of consistency (GP-14).
+{% endif %}
+
+### Open questions
+
+{% if candidate.open_questions %}
+{% for question in candidate.open_questions %}
+- **{{ question.question_id }}**{% if question.blocking %} (BLOCKING){% endif %}: {{ question.question }}
+  - Why it matters: {{ question.why_it_matters }}
+  - Resolving test: {{ question.resolving_test }}
+{% endfor %}
+{% else %}
+- None recorded.
+{% endif %}
+
+---
+
+{% endfor %}
+## Caveats
+
+{% for caveat in caveats %}
+- {{ caveat }}
+{% endfor %}

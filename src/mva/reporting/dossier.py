@@ -76,6 +76,10 @@ NO_EVIDENCE_BASIS = (
     "statement above is a readout of pipeline state, not a sourced claim"
 )
 
+#: The question whose evidence is the contradiction set rather than a supporting
+#: category. Named rather than hard-coded at the use site so the coupling is visible.
+CONTRADICTION_QUESTION_ID = "Q7"
+
 _SCORE_HEADERS = ("Component", "Score")
 _VARIANT_HEADERS = (
     "Variant",
@@ -181,7 +185,14 @@ def _candidate_context(
     answers = _answers(pair, contradicting)
     questions: list[dict[str, object]] = []
     for question_id, question, category in DOSSIER_QUESTIONS:
-        items = tuple(by_category.get(category, ())) if category is not None else ()
+        if question_id == CONTRADICTION_QUESTION_ID:
+            # Q7 is the one question whose evidence is the contradicting set. Citing
+            # it here is what makes the answer carry the [contradicted] marker.
+            items: tuple[EvidenceItem, ...] = contradicting
+        elif category is not None:
+            items = tuple(by_category.get(category, ()))
+        else:
+            items = ()
         questions.append(
             _question_context(question_id, question, answers[question_id], items, checker)
         )
@@ -383,11 +394,13 @@ def _answer_consequence(pair: CandidatePair) -> str:
             )
             continue
         worst = variant.worst_impact_for_gene(pair.gene_symbol)
-        terms = sorted({term for csq in consequences for term in csq.consequence_terms})
-        hgvs = sorted({csq.hgvs_p or csq.hgvs_c or csq.transcript_id for csq in consequences})
+        terms = ", ".join(sorted({term for csq in consequences for term in csq.consequence_terms}))
+        hgvs = ", ".join(
+            sorted({csq.hgvs_p or csq.hgvs_c or csq.transcript_id for csq in consequences})
+        )
         parts.append(
             f"Variant {label}: worst impact {worst.value if worst else NOT_RECORDED} across "
-            f"{len(consequences)} transcript(s); terms {terms}; {hgvs}."
+            f"{len(consequences)} transcript(s); consequence terms: {terms}; {hgvs}."
         )
     parts.append(
         "Severity is taken across all transcripts, not the canonical one alone "

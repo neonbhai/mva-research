@@ -710,3 +710,99 @@ def test_every_component_rationale_reaches_the_final_narrative() -> None:
         assert label in pair.rationale
     assert "neutral default" in pair.rationale
     assert len(pair.supporting_evidence) + len(pair.contradicting_evidence) >= len(COMPONENT_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# GP-19 regression: contradiction semantics
+#
+# Added by the lead engineer during integration. A low component score is weak
+# support, not evidence against. Conflating the two floods the dossier's
+# contradiction section with noise, which is precisely how a reader learns to
+# ignore it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_low_component_score_is_not_a_contradiction() -> None:
+    """A weak component must not be recorded as evidence AGAINST the candidate.
+
+    Regression guard: a candidate with nothing genuinely opposing it must report
+    `has_contradictions is False`, even when several of its component scores are
+    low. Only `collect_contradictions` findings — in-cis phase, common allele
+    frequency, population homozygotes — count as contradictions, and those are the
+    only things that feed the subtracted penalty.
+    """
+    from mva.models.evidence import EvidenceDirection
+
+    # A rare, high-impact, good-quality pair with nothing opposing it, but with
+    # deliberately low phenotype and mechanism inputs.
+    variants = (
+        make_variant(position=40_200_000, ref="C", alt="T"),
+        make_variant(position=40_210_500, ref="G", alt="A"),
+    )
+    pair = generate_pairs(variants)[0]
+    scored = score_pair(
+        pair,
+        phenotype_score=0.0,
+        mechanism_score=0.0,
+        weights=ScoringWeights(),
+        phase_weights=PhaseWeights(),
+        frequency=FrequencyThresholds(),
+        quality=QualityThresholds(),
+        clock=FixedClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    assert scored.scores.contradiction_penalty == 0.0
+    assert not any(
+        item.direction is EvidenceDirection.CONTRADICTS for item in scored.contradicting_evidence
+    ), (
+        "a low component score was emitted as CONTRADICTS; reserve that direction "
+        "for genuine opposing evidence (GP-19)"
+    )
+
+
+@pytest.mark.unit
+def test_genuine_contradiction_is_still_recorded_and_penalised() -> None:
+    """The counterpart: real opposing evidence must survive AND carry a penalty."""
+    from mva.models.evidence import EvidenceDirection
+
+    variants = tuple(
+        apply_soft_flags(
+            (
+                make_variant(
+                    position=40_205_000,
+                    ref="A",
+                    alt="G",
+                    allele_frequency=0.12,
+                    impact=ImpactSeverity.MODERATE,
+                    consequence_terms=("missense_variant",),
+                ),
+                make_variant(
+                    position=40_206_000,
+                    ref="T",
+                    alt="C",
+                    allele_frequency=0.09,
+                    impact=ImpactSeverity.MODERATE,
+                    consequence_terms=("missense_variant",),
+                ),
+            ),
+            frequency=FrequencyThresholds(),
+            quality=QualityThresholds(),
+        )
+    )
+    pair = generate_pairs(variants)[0]
+    scored = score_pair(
+        pair,
+        phenotype_score=0.5,
+        mechanism_score=0.5,
+        weights=ScoringWeights(),
+        phase_weights=PhaseWeights(),
+        frequency=FrequencyThresholds(),
+        quality=QualityThresholds(),
+        clock=FixedClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    assert scored.scores.contradiction_penalty > 0.0
+    assert any(
+        item.direction is EvidenceDirection.CONTRADICTS for item in scored.contradicting_evidence
+    ), "a common-variant pair recorded no contradicting evidence"

@@ -40,7 +40,12 @@ from mva.privacy.export import (
     export_public_artifact,
     gate_public_export,
 )
-from mva.privacy.netguard import OfflineProfile, arm_audit_hook, is_armed
+from mva.privacy.netguard import (
+    OfflineProfile,
+    arm_audit_hook,
+    configure_reference_cache,
+    is_armed,
+)
 from mva.privacy.patterns import RULES, Rule, rule_by_id, sniff_binary
 from mva.privacy.redact import (
     GenomicRedactionFilter,
@@ -61,6 +66,7 @@ __all__ = [
     "Rule",
     "arm_audit_hook",
     "classify_path",
+    "configure_reference_cache",
     "export_public_artifact",
     "gate_public_export",
     "install_redaction",

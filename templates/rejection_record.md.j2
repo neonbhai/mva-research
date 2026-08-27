@@ -1,0 +1,36 @@
+## Rejection record
+
+Every candidate considered and rejected, with its reason. Rejections are
+persisted, never silently dropped (GP-19): the discarded set is where the
+contraindicated compounds are, and a pipeline whose rejections are invisible
+cannot be audited.
+
+- Generated: {{ generated_at }}
+- Rejected candidates: {{ count }}
+
+{% if rejected %}
+{% for drug in rejected %}
+### {{ drug.name }} (`{{ drug.drug_id }}`) — REJECTED
+
+- Reasons: {{ drug.reasons | join(", ") }}
+- Intervention class: {{ drug.intervention_class }} · approval status: {{ drug.approval_status }}
+- Target: {{ drug.target }} (mechanism node `{{ drug.target_node_id }}`)
+- Direction: {{ drug.direction_verdict }}
+- Rationale: {{ drug.rationale }}
+{% if drug.safety_concerns %}
+- Safety concerns:
+{% for concern in drug.safety_concerns %}
+  - {{ concern }}
+{% endfor %}
+{% endif %}
+- What would have to change:
+{% for condition in drug.reversal_conditions %}
+  - {{ condition }}
+{% endfor %}
+
+{% endfor %}
+{% else %}
+No candidate was rejected in this run. That is unusual enough to be worth
+checking: it means either the candidate set was already filtered upstream, or the
+direction and safety gates were never exercised.
+{% endif %}
