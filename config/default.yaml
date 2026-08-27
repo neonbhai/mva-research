@@ -1,0 +1,52 @@
+# Default tunables shared by all cases.
+#
+# EVERY weight and threshold below is a documented HEURISTIC, chosen by reasoning
+# about a severe paediatric recessive disorder. None is calibrated against a
+# labelled dataset and none carries a claim of clinical validity.
+#
+# Changing any value requires (GP-32):
+#   1. a decision record in docs/decisions/
+#   2. a test covering the new behaviour
+#   3. an explicit before/after comparison
+#   4. no silent re-baselining of golden expectations
+
+weights:
+  # Analytical validity carries the largest weight: a variant that is not
+  # analytically real cannot be causal, however attractive its biology.
+  analytical_validity: 0.20
+  rarity: 0.18
+  molecular_consequence: 0.18
+  inheritance_consistency: 0.16
+  phenotype_similarity: 0.14
+  mechanistic_relevance: 0.08
+  evidence_quality: 0.06
+  # Subtracted from the weighted sum. Deliberately larger than the smallest
+  # positive weights so contradicting evidence can actually move a candidate.
+  contradiction_penalty_weight: 0.25
+
+phase_weights:
+  # In-cis is near-disqualifying, not disqualifying: short-read phasing can be
+  # wrong, and deleting the candidate outright would violate GP-13.
+  trans_confirmed: 1.00
+  trans_likely: 0.85
+  unknown: 0.55          # the expected state for a proband-only VCF
+  cis_likely: 0.10
+  cis_confirmed: 0.02
+
+frequency:
+  ultra_rare: 0.00001
+  rare: 0.0001
+  low_frequency: 0.001
+  max_plausible_recessive: 0.01
+  # Mid-range, not 1.0: absence of frequency data is not evidence of rarity (GP-14).
+  absent_frequency_score: 0.5
+
+quality:
+  min_depth: 10
+  min_genotype_quality: 20
+  min_allele_balance_het: 0.25
+  max_allele_balance_het: 0.75
+  # Below the het band but above this floor, a call is flagged 'possible_mosaic'
+  # rather than 'low_allele_balance'. In a mosaic aneuploidy disorder, skewed
+  # allele balance may be signal rather than artifact.
+  mosaic_allele_balance_floor: 0.10

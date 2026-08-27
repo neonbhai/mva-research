@@ -1,0 +1,79 @@
+# Versioned index of the local knowledge tables this pipeline is allowed to read.
+#
+# GENERATED FILE - do not hand-edit. Regenerate after ANY table change with:
+#
+#   uv run python -c "from pathlib import Path; \
+#     from mva.annotation import render_manifest_yaml; \
+#     Path('knowledge/manifests/knowledge.yaml').write_text( \
+#       render_manifest_yaml(Path('knowledge')), encoding='utf-8')"
+#
+# `path` is relative to the knowledge root (this file lives at
+# <knowledge_root>/manifests/knowledge.yaml). Every sha256 is verified before any
+# table is read: `load_default_adapters` refuses to annotate against bytes that no
+# longer match what the manifest pins, and names the offending file.
+#
+# `synthetic: true` on every entry is a fact, not a placeholder. Each table here is
+# fabricated for the demo case - fictional genes, invented allele frequencies - and
+# is NOT biologically valid (GP-20). A real resource is added with synthetic: false,
+# its true release version and a retrieval date, via the offline, public-only
+# acquisition step described in knowledge/adapters/README.md.
+generated_by: mva.annotation.local_tables.compute_manifest
+manifest_version: 1
+paths_relative_to: knowledge
+tables:
+  consequences:
+    description: SYNTHETIC consequence annotations, keyed by canonical variant ID.
+    name: consequences
+    path: public/consequences.tsv
+    retrieved: '2026-08-27'
+    sha256: 11df5dba77ccf27900e3649c96b08e6c0580058f32d039e87bd08620be458596
+    synthetic: true
+    version: synthetic-v0.0
+  drug_catalog:
+    description: SYNTHETIC drug catalogue for the demo case. Every agent is FICTIONAL.
+    name: drug_catalog
+    path: public/drug_catalog.tsv
+    retrieved: '2026-08-27'
+    sha256: 8673ac190921ad5fad15ca115cd7b96e05d9ac06bef322384eda02526a16a6b4
+    synthetic: true
+    version: synthetic-v0.0
+  frequencies:
+    description: 'SYNTHETIC population frequencies. Stands in for gnomAD (docs/maturity-ledger.md: annotation = synthetic-substitute).'
+    name: frequencies
+    path: public/frequencies.tsv
+    retrieved: '2026-08-27'
+    sha256: cb3760c1277cde468ef525be421affad189adce0825db8c9c8d266e597f03ac0
+    synthetic: true
+    version: synthetic-v0.0
+  gene_panel:
+    description: SYNTHETIC gene panel with mechanism class and inheritance prior.
+    name: gene_panel
+    path: public/gene_panel.tsv
+    retrieved: '2026-08-27'
+    sha256: 47b62647a30e20a91527afd0cc18df7b4f506330ddf21be2a7ac8cab11f11037
+    synthetic: true
+    version: synthetic-v0.0
+  gene_phenotype:
+    description: SYNTHETIC gene-to-phenotype associations for the demo case.
+    name: gene_phenotype
+    path: public/gene_phenotype.tsv
+    retrieved: '2026-08-27'
+    sha256: 2cd8481041bcd5748ad1373b93ec01ee4795528bf9c3e50c3ffe28fe2d70def5
+    synthetic: true
+    version: synthetic-v0.0
+  mechanism_meta:
+    description: 'Mechanism-level metadata: the therapeutic target node and the REQUIRED direction of correction.'
+    name: mechanism_meta
+    path: public/mechanism_meta.tsv
+    retrieved: '2026-08-27'
+    sha256: c4f3f7c1d45da6d78fe4db82bc893fb683236eb68c463760a78584720badd91b
+    synthetic: true
+    version: synthetic-v0.0
+  mechanisms:
+    description: SYNTHETIC mechanism chain for the demo gene SYNTHKIN1.
+    name: mechanisms
+    path: public/mechanisms.tsv
+    retrieved: '2026-08-27'
+    sha256: 523c4eb13ca938df445f645510d64cc8fe9ab0e969eece246ffa3ee27897b89a
+    synthetic: true
+    version: synthetic-v0.0

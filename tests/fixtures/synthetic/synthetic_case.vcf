@@ -1,0 +1,28 @@
+##fileformat=VCFv4.2
+##mva_synthetic=true
+##mva_synthetic_note=FULLY SYNTHETIC. Fabricated coordinates, fabricated genes, no patient-derived data.
+##reference=GRCh38
+##contig=<ID=chr3,length=198295559>
+##contig=<ID=chr7,length=159345973>
+##contig=<ID=chr11,length=135086622>
+##contig=<ID=chr15,length=101991189>
+##FILTER=<ID=PASS,Description="All filters passed">
+##FILTER=<ID=LowQual,Description="Low quality variant call">
+##INFO=<ID=SYNTH,Number=0,Type=Flag,Description="Synthetic record">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Allelic depths">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SYNTH_PROBAND01
+chr15	40200000	.	C	T	820.5	PASS	SYNTH	GT:DP:AD:GQ	0/1:45:23,22:99
+chr15	40201000	.	C	A	540.2	PASS	SYNTH	GT:DP:AD:GQ:PS	1|0:40:21,19:95:40201000
+chr15	40201050	.	T	G	515.8	PASS	SYNTH	GT:DP:AD:GQ:PS	1|0:39:20,19:93:40201000
+chr15	40205000	.	A	G	910.0	PASS	SYNTH	GT:DP:AD:GQ	0/1:52:26,26:99
+chr15	40206000	.	T	C	880.1	PASS	SYNTH	GT:DP:AD:GQ	1/1:48:1,47:99
+chr15	40210500	.	G	A	760.4	PASS	SYNTH	GT:DP:AD:GQ	0/1:38:18,20:98
+chr15	40211000	.	G	GAT	310.6	LowQual	SYNTH	GT:DP:AD:GQ	0/1:4:3,1:8
+chr11	5000000	.	A	G,GT	455.0	PASS	SYNTH	GT:DP:AD:GQ	1/2:44:2,21,21:97
+chr7	55000000	.	C	G	690.3	PASS	SYNTH	GT:DP:AD:GQ	0/1:41:20,21:99
+chr7	55001000	.	A	T	672.9	PASS	SYNTH	GT:DP:AD:GQ	0/1:43:22,21:99
+chr3	10000000	.	G	A	120.4	PASS	SYNTH	GT:DP:AD:GQ	0/1:33:17,16:88

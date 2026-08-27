@@ -1,0 +1,10 @@
+# mva_synthetic=true  FULLY SYNTHETIC phenotype profile. No patient-derived data.
+# HPO identifiers are real public ontology terms; the profile itself is fabricated.
+hpo_id	label	status	onset	provenance	extraction_confidence	notes
+HP:0000252	Microcephaly	observed	congenital	synthetic_fixture	0.98	Fabricated observation
+HP:0001511	Intrauterine growth retardation	observed	antenatal	synthetic_fixture	0.95	Fabricated observation
+HP:0200024	Premature chromatid separation	observed	congenital	synthetic_fixture	0.99	Cytogenetic hallmark in this synthetic case
+HP:0001305	Dandy-Walker malformation	observed	congenital	synthetic_fixture	0.90	Fabricated observation
+HP:0000518	Cataract	excluded	unknown	synthetic_fixture	0.92	Explicitly assessed and ABSENT -- real negative evidence
+HP:0002667	Nephroblastoma	not_assessed	unknown	synthetic_fixture	1.00	NOT ASSESSED -- carries no evidential weight either way
+HP:0001250	Seizure	uncertain	infantile	synthetic_fixture	0.55	Equivocal report; must not count as present

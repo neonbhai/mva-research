@@ -1,0 +1,9 @@
+# Golden expectation for Track 2 drug triage on the synthetic mechanism.
+# Changing this file requires a decision record (GP-32).
+drug_id	name	expected_outcome	expected_primary_reason
+SYNTH-DRUG-A	Synthexostat	accepted_top_ranked	
+SYNTH-DRUG-B	Synthinib	rejected	wrong_direction
+SYNTH-DRUG-C	Synthophore	rejected	not_approved
+SYNTH-DRUG-D	Synthazepam	accepted_symptomatic_only	
+SYNTH-DRUG-E	Synthaxel	accepted_direction_undetermined	
+SYNTH-DRUG-F	Synthramide	rejected	target_not_in_mechanism

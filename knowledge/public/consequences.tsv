@@ -1,0 +1,17 @@
+# SYNTHETIC consequence annotations, keyed by canonical variant ID.
+# Stands in for a real VEP/SnpEff run (see docs/maturity-ledger.md: annotation = synthetic-substitute).
+# Genes prefixed SYNTH* are FICTIONAL and exist only for the demo case.
+variant_id	gene_symbol	gene_id	transcript_id	transcript_biotype	is_canonical	is_mane_select	consequence_terms	impact	hgvs_c	hgvs_p	exon	protein_position	amino_acids	splice_ai_delta_max	cadd_phred	revel
+GRCh38:chr15:40200000:C:T	SYNTHKIN1	SYNTHG0001	SYNTHT0001.1	protein_coding	1	1	stop_gained	high	c.742C>T	p.Arg248Ter	6/14	248	R/*	0.02	41.0	
+GRCh38:chr15:40200000:C:T	SYNTHKIN1	SYNTHG0001	SYNTHT0002.1	protein_coding	0	0	stop_gained	high	c.610C>T	p.Arg204Ter	5/12	204	R/*	0.02	41.0	
+GRCh38:chr15:40201000:C:A	SYNTHOTH3	SYNTHG0003	SYNTHT0010.1	protein_coding	1	1	missense_variant	moderate	c.311C>A	p.Ala104Asp	3/9	104	A/D	0.01	22.4	0.41
+GRCh38:chr15:40201050:T:G	SYNTHOTH3	SYNTHG0003	SYNTHT0010.1	protein_coding	1	1	missense_variant	moderate	c.361T>G	p.Cys121Gly	3/9	121	C/G	0.01	24.9	0.55
+GRCh38:chr15:40205000:A:G	SYNTHKIN1	SYNTHG0001	SYNTHT0001.1	protein_coding	1	1	synonymous_variant	low	c.1101A>G	p.Pro367=	9/14	367	P	0.00	1.2	
+GRCh38:chr15:40206000:T:C	SYNTHKIN1	SYNTHG0001	SYNTHT0001.1	protein_coding	1	1	missense_variant	moderate	c.1288T>C	p.Ser430Pro	10/14	430	S/P	0.01	9.8	0.09
+GRCh38:chr15:40210500:G:A	SYNTHKIN1	SYNTHG0001	SYNTHT0001.1	protein_coding	1	1	splice_donor_variant,missense_variant	high	c.1990G>A	p.Gly664Ser	13/14	664	G/S	0.91	32.6	0.86
+GRCh38:chr15:40211000:G:GAT	SYNTHKIN1	SYNTHG0001	SYNTHT0001.1	protein_coding	1	1	frameshift_variant	high	c.2050_2051insAT	p.Val684fs	14/14	684	V/X	0.03	35.1	
+GRCh38:chr11:5000000:A:G	SYNTHMUL4	SYNTHG0004	SYNTHT0020.1	protein_coding	1	1	missense_variant	moderate	c.88A>G	p.Thr30Ala	1/5	30	T/A	0.00	14.2	0.22
+GRCh38:chr11:5000000:A:GT	SYNTHMUL4	SYNTHG0004	SYNTHT0020.1	protein_coding	1	1	frameshift_variant	high	c.88_89insT	p.Thr30fs	1/5	30	T/X	0.00	28.0	
+GRCh38:chr7:55000000:C:G	SYNTHMET2	SYNTHG0002	SYNTHT0005.1	protein_coding	1	1	missense_variant	moderate	c.455C>G	p.Pro152Arg	4/11	152	P/R	0.02	26.1	0.62
+GRCh38:chr7:55001000:A:T	SYNTHMET2	SYNTHG0002	SYNTHT0005.1	protein_coding	1	1	missense_variant	moderate	c.812A>T	p.Asp271Val	7/11	271	D/V	0.01	25.3	0.58
+GRCh38:chr3:10000000:G:A	SYNTHSOL5	SYNTHG0005	SYNTHT0030.1	protein_coding	1	1	intron_variant	modifier	c.100+45G>A			 	 	0.01	2.1	
