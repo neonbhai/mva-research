@@ -362,6 +362,14 @@ def privacy_audit(
     this command's own output is a disclosure vector, because an agent runs it.
     """
     from mva.privacy.audit import run_audit
+    from mva.privacy.redact import install_redaction
+
+    # Armed here, by the composition root, and NOT by the audit. The
+    # log_redaction_probe check now asserts the state it finds before installing
+    # anything, so a command that logs without arming GP-42 is reported as the
+    # defect it is. That only works if every entry point arms it — including this
+    # one, which logs while it shells out to git.
+    install_redaction()
 
     try:
         report = run_audit(repo.resolve(), workspace=workspace, staged_only=staged, strict=strict)

@@ -20,7 +20,7 @@ requiring pre-clinical validation.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Self
+from typing import Any, Self
 
 from pydantic import Field, computed_field, model_validator
 
@@ -299,6 +299,23 @@ class DrugHypothesis(FrozenModel):
             )
             raise ValueError(msg)
         return self
+
+    def revalidated_copy(self, **updates: Any) -> Self:
+        """A copy with ``updates`` applied that re-runs **every** validator.
+
+        ``model_copy(update=...)`` does not validate: pydantic writes the new values
+        straight into the instance. On this model that is a hole in a safety
+        invariant rather than a performance nicety — a wrong-direction hypothesis
+        can be copied into ``rejected=False``, which the constructor refuses, and the
+        result then matches no report section at all and vanishes from the output
+        instead of being flagged.
+
+        So every in-pipeline update goes through here. ``model_copy`` belongs only in
+        a test that is deliberately constructing the state a validator forbids.
+        """
+        fields: dict[str, Any] = {name: getattr(self, name) for name in type(self).model_fields}
+        fields.update(updates)
+        return type(self)(**fields)
 
     def sort_key(self) -> tuple[int, float, str]:
         """Rejected candidates always sort after accepted ones, then by score desc."""

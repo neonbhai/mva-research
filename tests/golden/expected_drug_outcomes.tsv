@@ -1,9 +1,17 @@
 # Golden expectation for Track 2 drug triage on the synthetic mechanism.
-# Changing this file requires a decision record (GP-32).
+# Changing this file requires a decision record (GP-32) and a matching update to
+# the hash lock in tests/golden/test_locked_files.py, in the SAME commit.
+#
+# SYNTH-DRUG-E was re-baselined from accepted to rejected by ADR 0011: an
+# unassessed chromosomal-instability risk is disqualifying for a disease-modifying
+# agent in this disease context. SYNTH-DRUG-G was added at the same time to keep
+# the "direction undetermined is not disagreement" lesson (ASSUMPTION-DRUG-02),
+# which E had been the only carrier of.
 drug_id	name	expected_outcome	expected_primary_reason
 SYNTH-DRUG-A	Synthexostat	accepted_top_ranked	
 SYNTH-DRUG-B	Synthinib	rejected	wrong_direction
 SYNTH-DRUG-C	Synthophore	rejected	not_approved
 SYNTH-DRUG-D	Synthazepam	accepted_symptomatic_only	
-SYNTH-DRUG-E	Synthaxel	accepted_direction_undetermined	
+SYNTH-DRUG-E	Synthaxel	rejected	oncogenic_risk
 SYNTH-DRUG-F	Synthramide	rejected	target_not_in_mechanism
+SYNTH-DRUG-G	Synthemod	accepted_direction_undetermined	

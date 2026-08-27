@@ -41,9 +41,10 @@ from mva.models.evidence import (
 )
 from mva.models.pair import CIS_STATES, ComponentScores, InheritanceModel, OpenQuestion, PhaseStatus
 from mva.models.variant import (
+    ConsequenceAnnotation,
     FilterStatus,
+    FrequencySelection,
     ImpactSeverity,
-    PopulationFrequency,
     VariantRecord,
     Zygosity,
 )
@@ -90,6 +91,13 @@ _METRIC_FLOOR = 0.15
 _ALLELE_BALANCE_ARTIFACT_MULTIPLIER = 0.40
 #: Allele balance in the mosaic window: down-weighted, not dismissed.
 _MOSAIC_MULTIPLIER = 0.75
+#: Allele fraction ABOVE the het band. Mosaicism lowers the alternate fraction and
+#: can never raise it, so this is not a mosaic window and must not be reported as
+#: one (ASSUMPTION-MOSAIC-01). What it indicates is allelic imbalance — dropout of
+#: the reference allele, a mapping artifact, or a homozygote mis-called as a het —
+#: which puts the GENOTYPE in doubt while leaving the site itself credible. Hence
+#: a penalty heavier than the mosaic window and lighter than the artifact floor.
+_HIGH_ALLELE_BALANCE_MULTIPLIER = 0.60
 #: Allele balance unknowable.
 _ALLELE_BALANCE_UNKNOWN_MULTIPLIER = 0.85
 #: Applied when an upstream stage flagged the call for a reason we cannot re-derive.
@@ -152,6 +160,15 @@ _INHERITANCE_MIXED_PAIR = 0.60
 #: second allele, dominant needs segregation or de-novo status. Kept, not
 #: deleted (GP-13), but scored for what it is.
 _INHERITANCE_SINGLE_UNKNOWN = 0.20
+#: A mitochondrial call. Mid-range and explicitly NOT the homozygous score: mtDNA
+#: has no second gene copy for a call to account for, and heteroplasmy level —
+#: the thing that actually decides whether an mtDNA variant matters — is not
+#: measured anywhere in this pipeline (docs/tech-debt.md).
+_INHERITANCE_MITOCHONDRIAL = 0.50
+#: A call whose allele fraction is consistent with somatic mosaicism. Mid-range
+#: because the model is representable and untested here: the fraction of affected
+#: cells, and whether the sampled tissue is the affected one, are both unknown.
+_INHERITANCE_MOSAIC = 0.50
 _INHERITANCE_OTHER = 0.50
 
 # ---------------------------------------------------------------------------
@@ -211,6 +228,50 @@ def _clamp(value: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _allele_balance_penalty(
+    variant: VariantRecord, quality: QualityThresholds
+) -> tuple[float, str | None]:
+    """Multiplier and note for a heterozygous call's allele fraction.
+
+    Uses ``VariantRecord.allele_fraction``, never ``Genotype.allele_balance``: on
+    a record split from a multiallelic site the raw balance divides by the SITE's
+    reference depth and excludes the reads carrying the other ALT, so a textbook
+    compound het at ``AD=2,21,21`` reads 0.91 and gets penalised for the shape of
+    its VCF line rather than for anything about the call.
+
+    Band order is load-bearing. The ABOVE-band case is tested first and has its
+    own multiplier, because it must never fall through to the mosaic window:
+    somatic mosaicism dilutes the alternate allele and cannot concentrate it, so
+    a high fraction is allelic imbalance or a mis-genotyped homozygote. Reporting
+    it as "possible mosaicism" put that sentence in the dossier for a call whose
+    alternate fraction was 0.95 (ASSUMPTION-MOSAIC-01).
+    """
+    fraction = variant.allele_fraction
+    if fraction is None:
+        return _ALLELE_BALANCE_UNKNOWN_MULTIPLIER, (
+            "allele balance unknowable from the recorded depths"
+        )
+    if fraction > quality.max_allele_balance_het:
+        # The wording deliberately avoids the word "mosaic": a note about a
+        # high fraction must not be greppable, or readable, as a mosaic finding.
+        return _HIGH_ALLELE_BALANCE_MULTIPLIER, (
+            f"allele fraction {fraction:.2f} above the {quality.max_allele_balance_het:.2f} "
+            "het ceiling, which indicates allelic imbalance, reference-allele dropout or a "
+            "homozygote called as a heterozygote — a somatic low-fraction finding would sit "
+            "below the het band, never above it"
+        )
+    if fraction >= quality.min_allele_balance_het:
+        return 1.0, None
+    if fraction >= quality.mosaic_allele_balance_floor:
+        return _MOSAIC_MULTIPLIER, (
+            f"allele fraction {fraction:.2f} below the het band but within the mosaic "
+            "window, so treated as possible mosaicism rather than noise"
+        )
+    return _ALLELE_BALANCE_ARTIFACT_MULTIPLIER, (
+        f"allele fraction {fraction:.2f} below the mosaic floor"
+    )
+
+
 def _variant_analytical_validity(
     variant: VariantRecord, quality: QualityThresholds
 ) -> tuple[float, list[str]]:
@@ -240,21 +301,11 @@ def _variant_analytical_validity(
         score *= max(_METRIC_FLOOR, gq / quality.min_genotype_quality)
         notes.append(f"GQ {gq} below the required {quality.min_genotype_quality}")
 
-    balance = genotype.allele_balance
     if genotype.is_heterozygous:
-        if balance is None:
-            score *= _ALLELE_BALANCE_UNKNOWN_MULTIPLIER
-            notes.append("allele balance unknowable from the recorded depths")
-        elif not (quality.min_allele_balance_het <= balance <= quality.max_allele_balance_het):
-            if balance >= quality.mosaic_allele_balance_floor:
-                score *= _MOSAIC_MULTIPLIER
-                notes.append(
-                    f"allele balance {balance:.2f} outside the het band but within the "
-                    "mosaic window, so treated as possible mosaicism rather than noise"
-                )
-            else:
-                score *= _ALLELE_BALANCE_ARTIFACT_MULTIPLIER
-                notes.append(f"allele balance {balance:.2f} below the mosaic floor")
+        multiplier, note = _allele_balance_penalty(variant, quality)
+        score *= multiplier
+        if note is not None:
+            notes.append(note)
 
     if FLAG_LOW_QUALITY_CALL in variant.qc_flags and score >= 0.9:
         score *= _UPSTREAM_FLAG_MULTIPLIER
@@ -316,11 +367,18 @@ def _rarity_from_frequency(allele_frequency: float, frequency: FrequencyThreshol
 
 def _variant_rarity(
     variant: VariantRecord, frequency: FrequencyThresholds
-) -> tuple[float, PopulationFrequency | None]:
-    observed = variant.max_allele_frequency()
-    if observed is None:
-        return frequency.absent_frequency_score, None
-    return _rarity_from_frequency(observed.allele_frequency, frequency), observed
+) -> tuple[float, FrequencySelection]:
+    """Rarity for one variant, plus the frequency row it was judged on.
+
+    Populations whose cohort is smaller than ``frequency.min_allele_number`` may
+    not set the maximum; they are returned in the selection so the rationale can
+    name them (ADR 0010). When none is large enough there is no adequately
+    powered observation, which is scored as absence of data, not as rarity.
+    """
+    selection = variant.select_max_allele_frequency(min_allele_number=frequency.min_allele_number)
+    if selection.observed is None:
+        return frequency.absent_frequency_score, selection
+    return _rarity_from_frequency(selection.observed.allele_frequency, frequency), selection
 
 
 def score_rarity(pair: PairCandidate, frequency: FrequencyThresholds) -> tuple[float, str]:
@@ -332,12 +390,13 @@ def score_rarity(pair: PairCandidate, frequency: FrequencyThresholds) -> tuple[f
     cohort is usually poorly covered there, not rare (GP-14).
     """
     scored = [(variant, *_variant_rarity(variant, frequency)) for variant in pair.variants]
-    variant, score, observed = min(scored, key=lambda item: (item[1], item[0].variant_id))
+    variant, score, selection = min(scored, key=lambda item: (item[1], item[0].variant_id))
+    observed = selection.observed
     if observed is None:
         detail = (
-            f"{variant.variant_id} has no population-frequency record and is scored at the "
-            f"configured neutral {frequency.absent_frequency_score:.2f}; absence of "
-            "frequency data is not evidence of rarity (GP-14)"
+            f"{variant.variant_id} has no adequately powered population-frequency record "
+            f"and is scored at the configured neutral {frequency.absent_frequency_score:.2f}; "
+            "absence of frequency data is not evidence of rarity (GP-14)"
         )
     else:
         detail = (
@@ -347,6 +406,10 @@ def score_rarity(pair: PairCandidate, frequency: FrequencyThresholds) -> tuple[f
             f"{frequency.rare:.3g} / max-plausible-recessive "
             f"{frequency.max_plausible_recessive:.3g}"
         )
+    # An excluded cohort is stated, never silently dropped: the reader has to be
+    # able to see which population the guard set aside and disagree with it.
+    if selection.has_exclusions:
+        detail += f"; {selection.describe_exclusions()} (ADR 0010)"
     return score, f"Rarity {score:.2f}: {detail}."
 
 
@@ -373,6 +436,29 @@ def _best_spliceai(variant: VariantRecord, gene: str) -> float | None:
     return max(values) if values else None
 
 
+def _term_for_impact(
+    consequences: tuple[ConsequenceAnnotation, ...], impact: ImpactSeverity
+) -> str:
+    """The consequence term to NAME alongside an impact class.
+
+    It must come from a transcript that actually carries that impact. Taking
+    ``min()`` over every term of the gene sorts alphabetically, not by severity,
+    so a ``stop_gained`` + ``intron_variant`` variant rendered as
+    "intron_variant (HIGH impact)" — the score was right and the sentence a
+    clinician reads was not.
+
+    Among the transcripts that do carry the worst impact, a loss-of-function term
+    is preferred (it is the most specific thing that can be said), and ties break
+    alphabetically so the rendered text is stable across runs (GP-30).
+    """
+    worst = [csq for csq in consequences if csq.impact is impact]
+    if not worst:
+        return "unknown"
+    terms = sorted({csq.most_severe_term for csq in worst})
+    lof = [term for term in terms if term in LOF_TERMS]
+    return lof[0] if lof else terms[0]
+
+
 def _variant_consequence(variant: VariantRecord, gene: str) -> tuple[float, str]:
     impact = variant.worst_impact_for_gene(gene)
     if impact is None:
@@ -384,9 +470,7 @@ def _variant_consequence(variant: VariantRecord, gene: str) -> tuple[float, str]
 
     terms = {term for csq in variant.consequences_for_gene(gene) for term in csq.consequence_terms}
     lof = sorted(terms & LOF_TERMS)
-    most_severe = min(
-        (csq.most_severe_term for csq in variant.consequences_for_gene(gene)), default="unknown"
-    )
+    most_severe = _term_for_impact(variant.consequences_for_gene(gene), impact)
     if lof:
         uplift += _LOF_UPLIFT
         parts.append(f"loss-of-function term {lof[0]}")
@@ -455,6 +539,17 @@ def _inheritance_base(pair: PairCandidate) -> tuple[float, str]:
             return _INHERITANCE_COMPOUND_HET, "two heterozygous alleles in one gene"
         case InheritanceModel.HOMOZYGOUS_RECESSIVE | InheritanceModel.X_LINKED_RECESSIVE:
             return _INHERITANCE_HOMOZYGOUS, "a single call accounting for both gene copies"
+        case InheritanceModel.MITOCHONDRIAL:
+            return _INHERITANCE_MITOCHONDRIAL, (
+                "a mitochondrial-genome call, where dosage is per-cell heteroplasmy "
+                "rather than two gene copies and no heteroplasmy fraction was measured"
+            )
+        case InheritanceModel.MOSAIC:
+            return _INHERITANCE_MOSAIC, (
+                "a call whose allele fraction is consistent with somatic mosaicism, so "
+                "the fraction of affected cells and the relevance of the sampled tissue "
+                "are both unestablished"
+            )
         case InheritanceModel.UNKNOWN if pair.is_pair:
             return _INHERITANCE_MIXED_PAIR, "two alleles of mixed zygosity, model undetermined"
         case InheritanceModel.UNKNOWN:
@@ -568,7 +663,7 @@ def collect_contradictions(
         )
 
     for variant in sorted(pair.variants, key=lambda v: v.variant_id):
-        observed = variant.max_allele_frequency()
+        observed = variant.max_allele_frequency(min_allele_number=frequency.min_allele_number)
         if FLAG_COMMON_VARIANT in variant.qc_flags and observed is not None:
             found.append(
                 Contradiction(

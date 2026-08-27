@@ -18,6 +18,15 @@ which is almost never "someone published a VCF on purpose":
 * the workspace is a **symlink** into the repo, or a symlink in the repo points
   out into the workspace (``workspace_containment``, ``symlink_escape``);
 * it is in a file whose extension says nothing (``content_scan``);
+* it is in the FILE NAME rather than the file — a sequencing filename is
+  routinely the MRN, the NHS number or the accession, so paths are scanned as
+  well as scanned-for, and every path is redacted before it reaches the report
+  (``_path_findings``, :func:`redact_path`);
+* it is inside a gzip member, where every plaintext rule is blind
+  (``_scan_gzip_member``);
+* it is under an allowlisted prefix, where softening a finding used to be
+  automatic. It is not: see :data:`PATH_DOWNGRADABLE_RULES` and
+  :data:`DECLARED_SYNTHETIC_DOWNGRADABLE_RULES`;
 * a real file was dropped into the synthetic-fixture directory, where the
   ``.gitignore`` negations deliberately re-admit files
   (``synthetic_fixtures_marked``);
@@ -33,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from bisect import bisect_right
@@ -44,7 +54,9 @@ from typing import Any, Final, cast
 from mva.config import (
     CLOUD_SYNCED_HOME_DIRS,
     CLOUD_SYNCED_MARKERS,
+    path_is_within,
 )
+from mva.errors import PrivacyViolationError
 from mva.privacy.classify import is_sensitive_extension
 from mva.privacy.patterns import (
     BINARY_SEVERITY,
@@ -55,31 +67,83 @@ from mva.privacy.patterns import (
     Severity,
     correlation_id,
     decode_lossy,
+    decode_scrubbed,
+    gunzip_capped,
     read_capped,
     sniff_binary,
 )
-from mva.privacy.redact import GenomicRedactionFilter, install_redaction
+from mva.privacy.redact import (
+    install_redaction,
+    redact_text,
+    redaction_installed,
+    unfiltered_handlers,
+)
 
 # ---------------------------------------------------------------------------
 # Policy constants
 # ---------------------------------------------------------------------------
 
-#: Tracked files here are asserted synthetic/public and audited by other checks.
-TRACKED_EXEMPT_PREFIXES: Final[tuple[str, ...]] = (
-    "tests/fixtures/synthetic/",
-    "knowledge/public/",
-)
+#: Tracked files here may carry a patient-data EXTENSION without failing
+#: ``git_tracked_sensitive``. Only the synthetic fixture directory qualifies: it is
+#: the one place ``.gitignore`` deliberately re-admits ``.vcf``/``.ped``/``.bed``,
+#: and it is the one place with a marker check (``synthetic_fixtures_marked``)
+#: standing behind the exemption. ``knowledge/public/`` used to be here too and is
+#: not any more — it holds curated public TSVs, none of which has a sensitive
+#: extension, so the exemption bought nothing and would have waved through a
+#: ``knowledge/public/proband.vcf``.
+TRACKED_EXEMPT_PREFIXES: Final[tuple[str, ...]] = ("tests/fixtures/synthetic/",)
 
-#: Files whose *content* legitimately looks like genomic data. Findings inside
-#: these are recorded at `warn` rather than suppressed, because visibility is the
-#: point; the guarantee that they really are synthetic comes from
-#: ``synthetic_fixtures_marked`` and from curation review of knowledge/.
+#: Paths where genomic-looking CONTENT can be legitimate. Being on this list is
+#: not by itself permission to look like patient data — see
+#: :func:`_resolve_context` for exactly which rules it can soften and under what
+#: additional condition.
 CONTENT_ALLOWLIST_PREFIXES: Final[tuple[str, ...]] = (
     "tests/fixtures/synthetic/",
     "knowledge/public/",
     "knowledge/manifests/",
     "tests/golden/",
 )
+
+#: The ONLY rules an allowlisted path may soften on the strength of its path
+#: alone. Both are the documented false-positive-prone rules: a public coordinate
+#: table really is VCF-shaped, and a public ontology table really is full of HPO
+#: identifiers. Nothing else is on this list, and the omissions are the point.
+#:
+#: Until this existed, ``_resolve_context`` downgraded EVERY ``fail`` to ``warn``
+#: for any path under the four allowlisted prefixes. That is an unconditional
+#: bypass: a complete, real VCF committed to ``knowledge/public/variants.tsv`` or
+#: ``tests/golden/expected.csv`` produced twelve rule hits, every one of them
+#: downgraded, and the audit reported ``passed=True``. ``vcf_header``,
+#: ``vcf_chrom_line``, ``genotype_field``, ``fastq_record``, ``sam_rg_sample``,
+#: ``fasta_record`` and ``plink_ped_line`` have near-zero false-positive risk and
+#: are precisely what a real file trips.
+PATH_DOWNGRADABLE_RULES: Final[frozenset[str]] = frozenset({"vcf_data_line", "hpo_term"})
+
+#: Rules an allowlisted path may soften ONLY when the file also carries a verified
+#: synthetic declaration (see :func:`declares_synthetic`). This is what keeps
+#: ``tests/fixtures/synthetic/synthetic_case.vcf`` — a deliberately VCF-shaped
+#: fixture — from failing the audit forever, without extending the same courtesy
+#: to an undeclared file that merely happens to sit in the same directory.
+DECLARED_SYNTHETIC_DOWNGRADABLE_RULES: Final[frozenset[str]] = frozenset(
+    {
+        "vcf_header",
+        "vcf_chrom_line",
+        "genotype_field",
+        "fastq_record",
+        "sam_rg_sample",
+        "fasta_record",
+        "plink_ped_line",
+    }
+)
+
+#: Byte markers a file uses to declare itself synthetic. Accepted only in the head
+#: of the file (:data:`SYNTHETIC_MARKER_BYTES`), never buried in the body.
+SYNTHETIC_MARKERS: Final[tuple[bytes, ...]] = (b"mva_synthetic=true", b"SYNTH_", b"SYNTH-")
+
+#: How far into a file a synthetic marker is looked for. A declaration is a header,
+#: not a needle: allowing it anywhere in 8 MiB meant any file containing the
+#: substring ``SYNTH_`` once, at any depth, counted as declared.
+SYNTHETIC_MARKER_BYTES: Final[int] = 4096
 
 #: Prefixes where an HPO identifier is a CONSTANT rather than a phenotype profile:
 #: reviewed source, its tests, docs and prompt briefs. This downgrade is specific
@@ -157,6 +221,59 @@ _GIT: Final[str] = shutil.which("git") or "git"
 #: and this report is an artifact that may be committed.
 WORKSPACE_LABEL: Final[str] = "$MVA_WORKSPACE"
 
+#: Path labels that are structural, not filesystem paths, and are emitted verbatim.
+_LITERAL_PATH_LABELS: Final[frozenset[str]] = frozenset({".", "<logging>", WORKSPACE_LABEL})
+
+#: A digit run long enough to be an identifier rather than a version or a year.
+#: Sequencing filenames routinely ARE the identifier — an MRN, an NHS number, a
+#: hospital accession — and until now the report printed them verbatim.
+_PATH_IDENTIFIER_RUN: Final = re.compile(r"(?<!\d)\d{7,}(?!\d)")
+
+#: File-name suffixes are shapes, not values, so they survive redaction. Anything
+#: that does not look like a plain extension does not.
+_SAFE_SUFFIX: Final = re.compile(r"\.[A-Za-z0-9]{1,8}\Z")
+
+
+def redact_path(path: str) -> str:
+    """Redact a path before it is written into a report.
+
+    GP-41 says the audit emits "paths and counts, never matched content". That is
+    sound right up to the point where the path IS the content. Sequencing
+    filenames carry MRNs, NHS numbers, accessions and surnames as a matter of
+    routine — ``data/NHS9999999999_Faketon.vcf`` is an ordinary filename, not a
+    contrived one — and this report is ``cat``-ed by the justfile, written into
+    every run as a ``DERIVED_SAFE`` artifact, and read into a model context.
+    Emitting ``finding.path`` verbatim defeated every other control in the package.
+
+    A component is rewritten when it carries anything rule-detectable or an
+    identifier-length digit run. The whole component goes, not just the matched
+    span, because the surviving remainder of ``NHS9999999999_Faketon`` is the half
+    that names a person. What is kept is the directory chain (structure), the
+    extension chain (shape) and a per-run correlation ID, which is enough to tell
+    two findings apart and to point at "the one file in this directory", and not
+    enough to reconstruct anything.
+    """
+    if path in _LITERAL_PATH_LABELS or not path:
+        return path
+    return "/".join(_redact_component(part) for part in path.split("/"))
+
+
+def _redact_component(component: str) -> str:
+    if not component or component in {".", ".."}:
+        return component
+    cleaned = _PATH_IDENTIFIER_RUN.sub("0", redact_text(component))
+    if cleaned == component:
+        return component
+    suffixes = _safe_suffixes(component)
+    tag = correlation_id(component.encode("utf-8", errors="surrogateescape"))
+    return f"<REDACTED:path:{tag}>{''.join(suffixes)}"
+
+
+def _safe_suffixes(component: str) -> list[str]:
+    """The trailing extension chain, at most two deep, and only if it looks like one."""
+    suffixes = [s for s in Path(component).suffixes[-2:] if _SAFE_SUFFIX.fullmatch(s)]
+    return suffixes
+
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -220,7 +337,7 @@ class AuditReport:
                 continue
             lines += ["", f"## {result.name}", ""]
             for finding in result.findings:
-                location = finding.path
+                location = redact_path(finding.path)
                 if finding.line is not None:
                     location = f"{location}:{finding.line}"
                 bits = [f"- `{finding.severity}` `{location}`"]
@@ -255,7 +372,7 @@ class AuditReport:
                     "findings": [
                         {
                             "check": f.check,
-                            "path": f.path,
+                            "path": redact_path(f.path),
                             "line": f.line,
                             "rule_id": f.rule_id,
                             "span_len": f.span_len,
@@ -349,6 +466,67 @@ def _line_of(offsets: Sequence[int], position: int) -> int:
     return bisect_right(offsets, position - 1) + 1
 
 
+#: Sample columns of a VCF ``#CHROM`` line, and ``@RG SM:`` values, must ALL carry
+#: a synthetic prefix for a file to count as declared synthetic. A marker comment
+#: is a claim; the sample names are the part a real export would have got wrong.
+_VCF_CHROM_SAMPLES: Final = re.compile(
+    rb"^#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO(?:\tFORMAT((?:\t[^\t\r\n]+)+))?",
+    re.MULTILINE,
+)
+_RG_SAMPLE_VALUE: Final = re.compile(rb"^@RG[ \t](?:[!-~]+[ \t])*SM:([!-~]+)", re.MULTILINE)
+
+#: Sample-name prefixes that mark a fabricated subject.
+_SYNTHETIC_SAMPLE_PREFIXES: Final[tuple[bytes, ...]] = (b"SYNTH_", b"SYNTH-", b"SYNTHETIC")
+
+
+def synthetic_marker_present(data: bytes) -> bool:
+    """Does the HEAD of these bytes carry a synthetic declaration?"""
+    head = data[:SYNTHETIC_MARKER_BYTES]
+    return any(marker in head for marker in SYNTHETIC_MARKERS)
+
+
+def unmarked_sample_names(data: bytes) -> int:
+    """How many VCF sample columns / ``@RG SM:`` values are NOT synthetic-prefixed.
+
+    A declaration in a comment is unverifiable prose. A sample name is not: it is
+    the field a real sequencing centre fills in with an accession or a patient's
+    initials, and it is the field a genuinely fabricated fixture controls. So the
+    marker is only believed when every subject named in the file is named as a
+    fabricated one.
+    """
+    unmarked = 0
+    for match in _VCF_CHROM_SAMPLES.finditer(data):
+        columns = match.group(1)
+        if not columns:
+            continue
+        unmarked += sum(
+            1
+            for sample in columns.split(b"\t")
+            if sample and not sample.startswith(_SYNTHETIC_SAMPLE_PREFIXES)
+        )
+    unmarked += sum(
+        1
+        for match in _RG_SAMPLE_VALUE.finditer(data)
+        if not match.group(1).startswith(_SYNTHETIC_SAMPLE_PREFIXES)
+    )
+    return unmarked
+
+
+def declares_synthetic(data: bytes) -> bool:
+    """Whether a file credibly declares itself fabricated.
+
+    Both halves are required, and each closes a different hole:
+
+    * a marker in the first :data:`SYNTHETIC_MARKER_BYTES` bytes — a declaration
+      is a header. Accepting ``SYNTH_`` anywhere in 8 MiB meant a real call set
+      with one incidental ``SYNTH_`` token, at any depth, counted as declared;
+    * every named subject carries a synthetic sample prefix — which is what a real
+      exported VCF or BAM header cannot satisfy without someone deliberately
+      rewriting its sample columns.
+    """
+    return synthetic_marker_present(data) and unmarked_sample_names(data) == 0
+
+
 def _resolve_context(
     *,
     rule_id: str,
@@ -357,6 +535,7 @@ def _resolve_context(
     matched_ids: set[str],
     distinct_hpo: int,
     allowlisted: bool,
+    synthetic_declared: bool,
     hpo_is_constant: bool,
 ) -> tuple[Severity, str]:
     """Refine a rule's isolated severity using whole-file context.
@@ -365,6 +544,14 @@ def _resolve_context(
     argue about: it is where a `warn` becomes a `fail`, and where a documented
     false-positive class is held down. Every branch states its reason in the
     returned note, so the report explains its own severities.
+
+    The allowlist is deliberately NOT a blanket downgrade. It softens
+    :data:`PATH_DOWNGRADABLE_RULES` on the strength of the path, and
+    :data:`DECLARED_SYNTHETIC_DOWNGRADABLE_RULES` only when the file also passes
+    :func:`declares_synthetic`. Everything else — every ``magic:*`` container hit
+    included — keeps full strength wherever it is found, because a rule with
+    near-zero false-positive risk firing inside an allowlisted directory is not
+    noise, it is the exact event the audit exists to catch.
     """
     severity: Severity = base_severity
     note = description
@@ -382,10 +569,20 @@ def _resolve_context(
         note = f"{note} {distinct_hpo} distinct term(s) in this file."
         if over_threshold and hpo_is_constant:
             note = f"{note} Held at warn: reviewed source/docs, where HPO IDs are constants."
-    if allowlisted and severity == "fail":
-        severity = "warn"
-        note = f"{note} Downgraded: path is on the audited public/synthetic allowlist."
-    return severity, note
+
+    if severity != "fail" or not allowlisted:
+        return severity, note
+    if rule_id in PATH_DOWNGRADABLE_RULES:
+        return "warn", f"{note} Downgraded: path is on the audited public/synthetic allowlist."
+    if synthetic_declared and rule_id in DECLARED_SYNTHETIC_DOWNGRADABLE_RULES:
+        return "warn", (
+            f"{note} Downgraded: allowlisted path AND the file declares itself synthetic "
+            "(marker in the head, all sample names synthetic-prefixed)."
+        )
+    return severity, (
+        f"{note} NOT downgraded despite the allowlisted path: this rule is only "
+        "softened for a file that declares itself synthetic, and this one does not."
+    )
 
 
 def scan_bytes(
@@ -395,6 +592,7 @@ def scan_bytes(
     path_label: str,
     allowlisted: bool = False,
     hpo_is_constant: bool = False,
+    _gzip_depth: int = 0,
 ) -> list[Finding]:
     """Apply the rule battery to one buffer and return content-free findings.
 
@@ -413,6 +611,7 @@ def scan_bytes(
     offsets = _line_offsets(data)
     spans_by_rule: dict[str, list[tuple[int, int]]] = {}
     distinct_hpo = 0
+    synthetic_declared = allowlisted and declares_synthetic(data)
 
     for rule in RULES:
         spans: list[tuple[int, int]] = []
@@ -444,6 +643,7 @@ def scan_bytes(
             matched_ids=matched_ids,
             distinct_hpo=distinct_hpo,
             allowlisted=allowlisted,
+            synthetic_declared=synthetic_declared,
             hpo_is_constant=hpo_is_constant,
         )
         total = len(spans)
@@ -462,9 +662,6 @@ def scan_bytes(
 
     kind = sniff_binary(data[:HEAD_BYTES])
     if kind is not None:
-        severity = BINARY_SEVERITY[kind]
-        if allowlisted and severity == "fail":
-            severity = "warn"
         findings.append(
             Finding(
                 check=check,
@@ -472,14 +669,86 @@ def scan_bytes(
                 line=None,
                 rule_id=f"magic:{kind}",
                 span_len=None,
-                severity=severity,
+                severity=BINARY_SEVERITY[kind],
+                # A magic-byte hit is NEVER downgraded by the allowlist. There is
+                # no false-positive story for "these four bytes are a BAM": an
+                # aligned read set inside tests/fixtures/synthetic/ is a leak in
+                # exactly the way it is anywhere else.
                 detail=(
                     f"Container identified from magic bytes as {kind!r}. "
-                    "Extension checks are defeated by a rename; this is not."
+                    "Extension checks are defeated by a rename; this is not. "
+                    "Container hits are never softened by the path allowlist."
                 ),
             )
         )
+
+    findings.extend(
+        _scan_gzip_member(
+            data,
+            check=check,
+            path_label=path_label,
+            allowlisted=allowlisted,
+            hpo_is_constant=hpo_is_constant,
+            gzip_depth=_gzip_depth,
+        )
+    )
     return findings
+
+
+#: How deep a gzip-in-gzip chain is followed before giving up. One level covers
+#: every real case (``sample.vcf.gz``); the bound exists so a nested bomb cannot
+#: recurse.
+_MAX_GZIP_DEPTH: Final[int] = 2
+
+
+def _scan_gzip_member(
+    data: bytes,
+    *,
+    check: str,
+    path_label: str,
+    allowlisted: bool,
+    hpo_is_constant: bool,
+    gzip_depth: int,
+) -> list[Finding]:
+    """Inflate a gzip member and run the whole battery over the plaintext.
+
+    Every rule matches plaintext, so ``sample.vcf.gz`` — the form variant callers
+    actually write — matched nothing at all: not the header, not the ``#CHROM``
+    line, not one genotype. BGZF at least tripped the container sniffer (at
+    ``warn``, because every bgzipped public resource has that header); plain gzip
+    tripped nothing whatsoever. Compression is not a privacy control, and treating
+    it as an opaque blob made it one.
+
+    Line numbers are reported in the DECOMPRESSED stream, which is the only place
+    a line number means anything, and the detail says so.
+    """
+    if gzip_depth >= _MAX_GZIP_DEPTH:
+        return []
+    plain = gunzip_capped(data, MAX_SCAN_BYTES)
+    if plain is None:
+        return []
+    return [
+        Finding(
+            check=finding.check,
+            path=finding.path,
+            line=finding.line,
+            rule_id=finding.rule_id,
+            span_len=finding.span_len,
+            severity=finding.severity,
+            detail=(
+                f"{finding.detail} Found INSIDE a gzip member; the line number is "
+                "an offset into the decompressed stream."
+            ),
+        )
+        for finding in scan_bytes(
+            plain,
+            check=check,
+            path_label=path_label,
+            allowlisted=allowlisted,
+            hpo_is_constant=hpo_is_constant,
+            _gzip_depth=gzip_depth + 1,
+        )
+    ]
 
 
 def scan_file(
@@ -611,6 +880,10 @@ def check_git_staged_sensitive(repo_root: Path, *, strict: bool = False) -> Chec
     paths = sorted(_split_nul(out))
     findings: list[Finding] = []
     for path in paths:
+        # The pre-commit hook runs this subset, so the path rule has to be here
+        # too: a filename that IS the identifier is committable without the file
+        # containing a single byte of genomic content.
+        findings.extend(_path_findings(path, check=name))
         allowlisted = _exempt(path, CONTENT_ALLOWLIST_PREFIXES)
         if is_sensitive_extension(Path(path)) and not _exempt(path, TRACKED_EXEMPT_PREFIXES):
             findings.append(
@@ -789,10 +1062,12 @@ def check_workspace_containment(
 ) -> CheckResult:
     """GP-40: the patient workspace must resolve outside the repository.
 
-    Symlinks are resolved first. A workspace that is a symlink into the repo tree
-    passes a naive string comparison and fails this one, which is the entire point:
-    data written through the link lands inside the repo and is one ``git add -A``
-    from being committed and permanently recoverable.
+    Containment is decided by :func:`mva.config.path_is_within`, which compares
+    filesystem identity rather than resolved strings. A workspace that is a
+    symlink into the repo tree passes a naive string comparison and fails this
+    one — and so, now, does a workspace spelled in a different CASE from the
+    repository, which on APFS is the same directory and which ``Path.resolve()``
+    reports as unrelated.
 
     The absolute path is never echoed — the workspace directory name is itself
     disclosive — so findings report the relationship, not the location.
@@ -807,7 +1082,7 @@ def check_workspace_containment(
         )
     repo = repo_root.resolve()
     findings: list[Finding] = []
-    if resolved == repo or resolved.is_relative_to(repo):
+    if path_is_within(resolved, repo):
         findings.append(
             Finding(
                 check=name,
@@ -921,6 +1196,38 @@ def _scannable_paths(repo_root: Path) -> list[str]:
     return sorted(seen)
 
 
+def _path_findings(path: str, *, check: str) -> list[Finding]:
+    """Run the battery over the PATH ITSELF, not only over the bytes it names.
+
+    No rule had ever been applied to a path component, which left the commonest
+    real-world carrier untouched: the identifier is in the filename long before it
+    is in the file. A committed ``data/<accession>_<surname>.txt`` carries no
+    genomic content and passed every content rule.
+
+    The emitted finding is redacted like every other path (:func:`redact_path`),
+    so reporting the problem does not reproduce it.
+    """
+    detected = redact_path(path) != path
+    if not detected:
+        return []
+    return [
+        Finding(
+            check=check,
+            path=path,
+            line=None,
+            rule_id="path_identifier",
+            span_len=None,
+            severity="fail",
+            detail=(
+                "The PATH carries an identifier: a keyword-anchored PHI token or a "
+                "run of >=7 digits in a name component. Sequencing filenames are "
+                "routinely the MRN, the NHS number or the accession. Rename the "
+                "file to a case-local alias before it is committed."
+            ),
+        )
+    ]
+
+
 def check_content_scan(repo_root: Path, *, strict: bool = False) -> CheckResult:
     """The rule battery over every file git would let you commit."""
     name = "content_scan"
@@ -936,6 +1243,7 @@ def check_content_scan(repo_root: Path, *, strict: bool = False) -> CheckResult:
         if any(part in SKIP_DIR_NAMES for part in Path(path).parts):
             continue
         scanned += 1
+        findings.extend(_path_findings(path, check=name))
         findings.extend(
             scan_file(
                 candidate,
@@ -968,7 +1276,6 @@ def check_synthetic_fixtures_marked(repo_root: Path, *, strict: bool = False) ->
     if not root.is_dir():
         return _result(name, [], "No synthetic fixture directory present.", strict=strict)
 
-    markers = (b"mva_synthetic=true", b"SYNTH_", b"SYNTH-")
     findings: list[Finding] = []
     checked = 0
     for candidate in sorted(root.rglob("*")):
@@ -977,10 +1284,13 @@ def check_synthetic_fixtures_marked(repo_root: Path, *, strict: bool = False) ->
         checked += 1
         label = candidate.relative_to(repo_root).as_posix()
         try:
-            head = read_capped(candidate, MAX_SCAN_BYTES)
+            data = read_capped(candidate, MAX_SCAN_BYTES)
         except OSError:
-            head = b""
-        if not any(marker in head for marker in markers):
+            data = b""
+        plain = gunzip_capped(data, MAX_SCAN_BYTES)
+        if plain is not None:
+            data = plain
+        if not synthetic_marker_present(data):
             findings.append(
                 Finding(
                     check=name,
@@ -990,9 +1300,32 @@ def check_synthetic_fixtures_marked(repo_root: Path, *, strict: bool = False) ->
                     span_len=None,
                     severity="fail",
                     detail=(
-                        "No synthetic marker found. Add `mva_synthetic=true` (a VCF "
-                        "header line, a leading comment) or use SYNTH_-prefixed sample "
-                        "IDs. If the file is not synthetic it must not be here at all."
+                        "No synthetic marker in the first "
+                        f"{SYNTHETIC_MARKER_BYTES} bytes. Add `mva_synthetic=true` as "
+                        "a VCF header line or a leading comment. A declaration is a "
+                        "header, not a needle: accepting the marker anywhere in the "
+                        "file meant one incidental occurrence at any depth counted. "
+                        "If the file is not synthetic it must not be here at all."
+                    ),
+                )
+            )
+            continue
+        unmarked = unmarked_sample_names(data)
+        if unmarked:
+            findings.append(
+                Finding(
+                    check=name,
+                    path=label,
+                    line=None,
+                    rule_id=None,
+                    span_len=None,
+                    severity="fail",
+                    detail=(
+                        f"Declares itself synthetic, but {unmarked} named subject(s) "
+                        "(VCF sample column or @RG SM: value) do not carry a SYNTH_ "
+                        "prefix. The marker comment is a claim; the sample names are "
+                        "the field a real export cannot satisfy by accident. Sample "
+                        "names are counted, never emitted."
                     ),
                 )
             )
@@ -1020,8 +1353,13 @@ def check_notebook_output_purity(repo_root: Path, *, strict: bool = False) -> Ch
         if not candidate.is_file():
             continue
         try:
-            document = cast(dict[str, Any], json.loads(read_capped(candidate, MAX_SCAN_BYTES)))
-        except (ValueError, UnicodeDecodeError) as exc:
+            # decode_scrubbed, not bytes-into-json: json.loads on bytes raises a
+            # UnicodeDecodeError whose str() embeds the offending bytes, and that
+            # string travels to the terminal, the CI log and a model context. The
+            # guard only protects anything if real decodes are routed through it.
+            text = decode_scrubbed(read_capped(candidate, MAX_SCAN_BYTES), path=candidate)
+            document = cast(dict[str, Any], json.loads(text))
+        except (ValueError, PrivacyViolationError) as exc:
             findings.append(
                 Finding(
                     check=name,
@@ -1120,6 +1458,12 @@ def check_log_redaction_probe(*, strict: bool = False) -> CheckResult:
     ``Handler.handle`` before ``emit`` — so this measures the real pipeline while
     keeping the canaries off the terminal, out of the log file, and out of any
     model context reading this run.
+
+    The state of the pipeline is recorded BEFORE anything is installed, across the
+    whole logger registry rather than the root logger alone. Both were defects in
+    their own right: a probe that installs the control it measures can only report
+    success, and a probe that inspects only ``root.handlers`` reports "clean" for
+    the library-attached handler that is the actual leak.
     """
     name = "log_redaction_probe"
     canaries = canary_payloads()
@@ -1148,12 +1492,13 @@ def check_log_redaction_probe(*, strict: bool = False) -> CheckResult:
 
         cast(Any, handler).emit = _capture_for(handler)
 
+    # ASSERT, THEN install. The probe used to call install_redaction() before
+    # measuring anything, which made it structurally incapable of reporting the
+    # one failure it exists to report: that the application never armed GP-42.
+    # It measured a stack it had just repaired and always found it clean.
+    armed_before = redaction_installed()
+    unfiltered = unfiltered_handlers()
     install_redaction()
-    unfiltered = [
-        type(handler).__name__
-        for handler in root.handlers
-        if not any(isinstance(f, GenomicRedactionFilter) for f in handler.filters)
-    ]
 
     logger = logging.getLogger("mva.privacy.audit.canary")
     logger.setLevel(logging.NOTSET)
@@ -1203,6 +1548,24 @@ def check_log_redaction_probe(*, strict: bool = False) -> CheckResult:
                 detail="No handler output captured; the probe was inconclusive.",
             )
         )
+    if not armed_before:
+        findings.append(
+            Finding(
+                check=name,
+                path="<logging>",
+                line=None,
+                rule_id=None,
+                span_len=None,
+                severity="fail",
+                detail=(
+                    "Log redaction was NOT armed when the audit started. The "
+                    "composition root must call mva.privacy.redact.install_redaction() "
+                    "before any stage runs; every record logged before that point "
+                    "left the process unscrubbed. The probe has armed it now, which "
+                    "does nothing for the records already written."
+                ),
+            )
+        )
     findings.extend(
         Finding(
             check=name,
@@ -1211,7 +1574,12 @@ def check_log_redaction_probe(*, strict: bool = False) -> CheckResult:
             rule_id=None,
             span_len=None,
             severity="warn",
-            detail=f"Root handler {handler_name} carries no GenomicRedactionFilter.",
+            detail=(
+                f"Handler {handler_name} carried no GenomicRedactionFilter when the "
+                "audit started. Counted across the whole logger registry, not just "
+                "the root: a handler a library attached to its own logger is never "
+                "consulted by the root and was previously invisible here."
+            ),
         )
         for handler_name in unfiltered
     )

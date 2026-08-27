@@ -33,6 +33,7 @@ from mva.models.drug import RejectionReason
 from mva.models.mechanism import (
     CORRECTIVE_DIRECTION,
     DOWNWARD_DIRECTIONS,
+    NULL_DIRECTIONS,
     UNSIGNED_DIRECTIONS,
     UPWARD_DIRECTIONS,
     EffectDirection,
@@ -159,15 +160,29 @@ def check_direction(*, required: EffectDirection, observed: EffectDirection) -> 
         )
 
     if agrees is False:
+        # A measured null and an inverted sign are both disagreements, but they are
+        # not the same finding and must not be described as if they were: a demonstrated
+        # `no_change` does not "push the target in the disease direction", it establishes
+        # that the agent does not move the target at all.
+        if observed in NULL_DIRECTIONS:
+            rationale = (
+                f"DISQUALIFYING: the mechanism requires {required.value} ({required_sign}) at "
+                f"the target, and the agent was measured to produce {observed.value} on it. A "
+                "demonstrated null is an established, signed finding rather than an open "
+                "question: it is evidence that this agent does not make the required "
+                "correction, and it must not be filed as an undetermined direction."
+            )
+        else:
+            rationale = (
+                f"DISQUALIFYING: the mechanism requires {required.value} ({required_sign}) at "
+                f"the target but the agent acts {observed.value} ({observed_sign}). It pushes "
+                "the target in the disease direction."
+            )
         return DirectionVerdict(
             agrees=False,
             required=required,
             observed=observed,
-            rationale=(
-                f"DISQUALIFYING: the mechanism requires {required.value} ({required_sign}) at "
-                f"the target but the agent acts {observed.value} ({observed_sign}). It pushes "
-                "the target in the disease direction."
-            ),
+            rationale=rationale,
             rejection_reason=RejectionReason.WRONG_DIRECTION,
         )
 

@@ -121,15 +121,27 @@ _VCF_CHROM_LINE: Final = re.compile(
 # Five tab-separated VCF columns followed by a sixth field boundary. The trailing
 # \t is load-bearing: it forces at least CHROM/POS/ID/REF/ALT/QUAL, which a
 # two-column coordinate list cannot satisfy.
+#
+# CHROM is a free-form contig NAME, not a human chromosome number. Restricting it
+# to `(?:chr)?(1..22|X|Y|MT)` meant a VCF called against RefSeq accessions
+# (`NC_000012.12`), against a patched assembly (`chr12_KI270834v1_alt`) or against
+# any non-human reference was invisible to this rule. The discriminating power of
+# the rule was never in CHROM: it is in REF/ALT being nucleotide alphabets in
+# fixed tab-delimited positions.
 _VCF_DATA_LINE: Final = re.compile(
-    rb"^(?:chr)?(?:[0-9]{1,2}|[XYxy]|MT|M)\t[0-9]{1,12}\t"
+    rb"^[A-Za-z0-9_.\-]{1,32}\t[0-9]{1,12}\t"
     rb"(?:\.|rs[0-9]+|[A-Za-z0-9_:.\-]{1,64})\t"
     rb"[ACGTNacgtn]{1,200}\t"
     rb"(?:[ACGTNacgtn,.*]{1,200}|<[A-Za-z0-9:_]{1,20}>)\t",
     re.MULTILINE,
 )
 
-_GENOTYPE_FIELD: Final = re.compile(rb"\tGT(?::[A-Z]{1,4})*\t[0-9.]+[/|][0-9.]+")
+# FORMAT keys are alphanumeric, not alphabetic: Mutect2 emits `GT:AD:AF:F1R2:F2R1`
+# and `[A-Z]{1,4}` rejected `F1R2`, so a somatic call set matched nothing. The
+# allele pair is also optional-repeating rather than mandatory-paired, because a
+# haploid call (chrY, chrM, a hemizygous male X) is written as a single allele
+# with no `/` or `|` at all and was therefore invisible.
+_GENOTYPE_FIELD: Final = re.compile(rb"\tGT(?::[A-Z0-9]{1,4})*\t[0-9.]+(?:[/|][0-9.]+)*")
 
 # A FASTQ record is recognised structurally, not by extension: header line,
 # >=25nt of a homogeneous nucleotide alphabet, separator, >=25 quality chars.
@@ -141,9 +153,32 @@ _FASTQ_RECORD: Final = re.compile(
 
 # @RG SM: carries the sample name a sequencing centre actually used, which in
 # practice is a hospital accession or the proband's initials plus a date.
-_SAM_RG_SAMPLE: Final = re.compile(rb"^@RG\t(?:[^\t\n]*\t)*SM:([!-~]+)", re.MULTILINE)
+# The field separator is `[ \t]` rather than `\t`: the SAM spec is tab-delimited,
+# but header lines survive round-trips through editors, `tr`, log excerpts and
+# `samtools view -H | column` as space-delimited text, and the sample name is
+# just as disclosive there.
+_SAM_RG_SAMPLE: Final = re.compile(rb"^@RG[ \t](?:[!-~]+[ \t])*SM:([!-~]+)", re.MULTILINE)
 
-_HPO_TERM: Final = re.compile(rb"\bHP:\d{7}\b")
+# Both renderings of an HPO identifier: the canonical `HP:0000001` and the OBO/OWL
+# underscore form `HP_0000001` used in ontology dumps, RDF exports and file names.
+_HPO_TERM: Final = re.compile(rb"\bHP[:_]\d{7}\b")
+
+# A FASTA record: a `>` description line followed by a long homogeneous nucleotide
+# run. Patient consensus sequences, extracted read sets and reference slices all
+# arrive in this shape, and no rule recognised it at all before.
+_FASTA_RECORD: Final = re.compile(
+    rb"^>[ -~]{0,300}\r?\n(?:[ACGTNUacgtnu]{40,}\r?\n?)",
+    re.MULTILINE,
+)
+
+# A PLINK .ped body line: FID IID PAT MAT SEX PHENO then allele pairs. Whitespace
+# delimited (PLINK accepts spaces or tabs), so the VCF rules never saw it, and the
+# genotype matrix it carries is exactly as disclosive as a VCF.
+_PLINK_PED_LINE: Final = re.compile(
+    rb"^[!-~]{1,64}[ \t]+[!-~]{1,64}[ \t]+[!-~]{1,64}[ \t]+[!-~]{1,64}[ \t]+"
+    rb"[012][ \t]+(?:-9|[012])(?:[ \t]+[ACGTNacgtn0]){6,}",
+    re.MULTILINE,
+)
 
 # Keyword-anchored ONLY. A bare \d{7,10} run is deliberately NOT matched: it
 # collides with every genomic POS in every VCF, every gnomAD allele count and
@@ -153,19 +188,29 @@ _HPO_TERM: Final = re.compile(rb"\bHP:\d{7}\b")
 # separator and an alphanumeric token does. (No worked example is spelled out
 # here: a live one would make this file trip its own scanner, which is both
 # correct behaviour and a permanent false alarm.)
+#: The separator between a PHI keyword and its value. `,` and TAB are in the class
+#: because the commonest way a phenotype/identifier table reaches this repository
+#: is as a CSV or TSV, where the delimiter IS the separator: a two-column
+#: keyword/value row was invisible while only `[:=#]` was accepted, which made the
+#: keyed rules blind to the single most likely carrier format. (As elsewhere in
+#: this file, no worked example is written out — a live one would make the module
+#: trip its own scanner, which is correct behaviour and a permanent false alarm.)
+_KEYED_SEP: Final[bytes] = rb"[ \t]{0,4}[:=#,\t][ \t]{0,4}"
+
 _MRN: Final = re.compile(
     rb"(?i:\bMRN\b"
     rb"|\bmedical[ _-]record[ _-](?:number|no\.?|id)\b"
     rb"|\bNHS[ _-]number\b"
     rb"|\bpatient[ _-]?id\b"
     rb"|\bhospital[ _-]?(?:number|no\.?|id)\b)"
-    rb"[ \t]{0,4}[:=#][ \t]{0,4}(?![A-Za-z]+\b)[A-Za-z0-9][A-Za-z0-9\-]{3,31}\b"
+    + _KEYED_SEP
+    + rb"(?![A-Za-z]+\b)[A-Za-z0-9][A-Za-z0-9\-]{3,31}\b"
 )
 
 _DOB: Final = re.compile(
     rb"(?i:\bDOB\b|\bdate[ _-]of[ _-]birth\b|\bbirth[ _-]?date\b|\bdate[ _-]born\b)"
-    rb"[ \t]{0,4}[:=#][ \t]{0,4}"
-    rb"[0-9]{1,4}[/\-.][0-9]{1,2}[/\-.][0-9]{1,4}"
+    + _KEYED_SEP
+    + rb"[0-9]{1,4}[/\-.][0-9]{1,2}[/\-.][0-9]{1,4}"
 )
 
 # A bare ISO date is WARN and nothing more: every provenance manifest, changelog
@@ -181,8 +226,31 @@ _ISO_DATE_BARE: Final = re.compile(
 _PERSON_NAME_KEYED: Final = re.compile(
     rb"(?i:(?:patient|proband|child|subject|mother|father)"
     rb"[ _-]?(?:surname|first[ _-]?name|last[ _-]?name|name))"
-    rb"[ \t]{0,4}[:=#][ \t]{0,4}[A-Z][A-Za-z'\-]{1,30}\b"
+    + _KEYED_SEP
+    + rb"[A-Z][A-Za-z'\-]{1,30}\b"
 )
+
+# ---------------------------------------------------------------------------
+# Redaction-only patterns
+#
+# These are NOT in RULES and therefore never run in the audit's content scan.
+# They exist because :func:`mva.privacy.redact.redact_text` was blind to this
+# project's OWN canonical renderings — the exact strings other modules
+# interpolate into log lines and exception messages — while being unusable as
+# audit rules: a bare `0/1` token occurs in every ratio, fraction and code
+# comment in the tree, so scanning for it would bury the report.
+# ---------------------------------------------------------------------------
+
+#: `GRCh38:chr12:9999999:C:T` — the canonical variant_id this project builds and
+#: then puts in messages ("no evidence for {variant_id}"). Position plus alleles
+#: is an identifying genotype observation.
+_VARIANT_ID: Final = re.compile(
+    rb"GRCh3[78]:chr[^:\s]{1,32}:\d{1,12}:[ACGTN*.]{1,64}:[ACGTN*.]{1,64}"
+)
+
+#: A bare called genotype token (`0/1`, `1|0`, `./.`). The lookarounds keep it to
+#: a single allele on each side, so `50/50` and `1/2/2020` do not match.
+_GENOTYPE_TOKEN: Final = re.compile(rb"(?<![\d/|.])[0-9.][/|][0-9.](?![\d/|])")
 
 
 RULES: Final[tuple[Rule, ...]] = (
@@ -209,10 +277,12 @@ RULES: Final[tuple[Rule, ...]] = (
         severity="warn",
         description="Tab-structured CHROM/POS/ID/REF/ALT record line.",
         false_positive_risk=(
-            "HIGH in isolation. Public coordinate tables (ClinVar exports, gnomAD "
-            "extracts, our own knowledge/public/*.tsv) match legitimately. This is "
-            "why the rule is `warn`; mva.privacy.audit promotes it to `fail` only "
-            "when the same file also matches vcf_header or genotype_field."
+            "HIGH in isolation, and higher since CHROM was widened to any contig "
+            "name: public coordinate tables (ClinVar exports, gnomAD extracts, our "
+            "own knowledge/public/*.tsv) match legitimately, and so does any TSV "
+            "whose 4th and 5th columns are nucleotide alphabets. This is why the "
+            "rule is `warn`; mva.privacy.audit promotes it to `fail` only when the "
+            "same file also matches vcf_header or genotype_field."
         ),
     ),
     Rule(
@@ -221,8 +291,11 @@ RULES: Final[tuple[Rule, ...]] = (
         severity="fail",
         description="A FORMAT/GT column paired with an actual called genotype.",
         false_positive_risk=(
-            "Low. Requires literal tabs around a GT-led format string and a "
-            "phased or unphased allele pair."
+            "Low. Requires literal tabs around a GT-led FORMAT string followed by "
+            "a called allele. Accepting alphanumeric FORMAT keys (F1R2, F2R1) and "
+            "a single haploid allele widens it slightly: a TSV column literally "
+            "named GT followed by a numeric column now matches. That is a rare "
+            "shape, and the missed somatic and haploid call sets were not."
         ),
     ),
     Rule(
@@ -242,7 +315,9 @@ RULES: Final[tuple[Rule, ...]] = (
         description="SAM/BAM @RG read-group line carrying an SM: sample identifier.",
         false_positive_risk=(
             "Very low, and the payload is severe: SM: values are real hospital "
-            "sample or accession IDs written by the sequencing centre."
+            "sample or accession IDs written by the sequencing centre. Accepting a "
+            "space as the field separator adds only lines that begin `@RG ` at "
+            "column 0 and carry an SM: token."
         ),
     ),
     Rule(
@@ -251,7 +326,8 @@ RULES: Final[tuple[Rule, ...]] = (
         severity="fail",
         description="Human Phenotype Ontology term identifier.",
         false_positive_risk=(
-            "HIGH in isolation. The public ontology tables under knowledge/public/, "
+            "HIGH in isolation, for both the `HP:` and the OBO `HP_` rendering. "
+            "The public ontology tables under knowledge/public/, "
             "test fixtures and code constants all contain HPO IDs legitimately. "
             "mva.privacy.audit only fails a NON-allowlisted file carrying >=3 "
             "DISTINCT terms, on the reasoning that three co-occurring phenotypes "
@@ -266,7 +342,10 @@ RULES: Final[tuple[Rule, ...]] = (
         false_positive_risk=(
             "Low, and deliberately so. The rule is anchored on the keyword and "
             "MUST NOT match a bare \\d{7,10} run, which would collide with every "
-            "genomic POS and make the scanner unusable."
+            "genomic POS and make the scanner unusable. `,` and TAB are accepted "
+            "as separators so a two-column CSV/TSV row matches; the cost is that "
+            "the same keyword followed by a comma and a value in prose matches "
+            "too, which is the correct trade."
         ),
     ),
     Rule(
@@ -274,7 +353,11 @@ RULES: Final[tuple[Rule, ...]] = (
         pattern=_DOB,
         severity="fail",
         description="Keyword-anchored date of birth.",
-        false_positive_risk="Low; requires an explicit DOB-style keyword and a separator.",
+        false_positive_risk=(
+            "Low; requires an explicit DOB-style keyword, a separator (now "
+            "including `,` and TAB, so a CSV/TSV column pair matches) and a "
+            "day/month/year triple."
+        ),
     ),
     Rule(
         rule_id="iso_date_bare",
@@ -293,8 +376,33 @@ RULES: Final[tuple[Rule, ...]] = (
         severity="fail",
         description="A relationship/role keyword bound to a capitalised personal name.",
         false_positive_risk=(
-            "Low. Requires keyword + explicit separator + a capitalised token, so "
-            "'patient name field' in prose does not match."
+            "Low. Requires keyword + explicit separator (including `,` and TAB, so "
+            "a CSV/TSV column pair matches) + a capitalised token, so 'patient "
+            "name field' in prose does not match."
+        ),
+    ),
+    Rule(
+        rule_id="fasta_record",
+        pattern=_FASTA_RECORD,
+        severity="fail",
+        description="FASTA description line followed by >=40nt of nucleotide alphabet.",
+        false_positive_risk=(
+            "Low. A `>`-led line at column 0 followed by a 40-character run drawn "
+            "only from ACGTNU does not occur in prose, code or markdown. A PUBLIC "
+            "reference FASTA matches too, and that is intended: a reference slice "
+            "belongs in the workspace or a cache, never committed to this repo."
+        ),
+    ),
+    Rule(
+        rule_id="plink_ped_line",
+        pattern=_PLINK_PED_LINE,
+        severity="fail",
+        description="PLINK .ped body line: six pedigree fields followed by allele pairs.",
+        false_positive_risk=(
+            "Low. Requires six whitespace-separated fields with a PLINK sex code "
+            "and phenotype code in positions 5 and 6, then at least six "
+            "single-character allele tokens. The payload is a family structure "
+            "plus a genotype matrix, which is as disclosive as a VCF."
         ),
     ),
 )
@@ -317,9 +425,44 @@ def rule_by_id(rule_id: str) -> Rule:
 #: is warn-only precisely because it is dominated by false positives.
 REDACTION_EXEMPT_RULES: Final[frozenset[str]] = frozenset({"iso_date_bare"})
 
+#: Rules that redact but never appear in an audit finding.
+#:
+#: The split exists because the two jobs have opposite cost functions. An audit
+#: rule that fires on a legitimate file costs a red build and eventually gets the
+#: audit switched off, so audit rules must be specific. A redaction rule that
+#: fires spuriously costs one unreadable token in a log line, so redaction rules
+#: should be greedy. These two are unusable as audit rules — every fraction and
+#: ratio in the tree is a `0/1` — and mandatory as redaction rules, because they
+#: are the canonical forms THIS project builds and then interpolates into log
+#: messages and exception text.
+REDACTION_ONLY_RULES: Final[tuple[Rule, ...]] = (
+    Rule(
+        rule_id="variant_id",
+        pattern=_VARIANT_ID,
+        severity="fail",
+        description="This project's canonical build:chrom:pos:ref:alt variant identifier.",
+        false_positive_risk=(
+            "Not applicable: redaction-only. A build-qualified coordinate with "
+            "both alleles is an identifying observation wherever it appears."
+        ),
+    ),
+    Rule(
+        rule_id="genotype_token",
+        pattern=_GENOTYPE_TOKEN,
+        severity="fail",
+        description="A bare called genotype token such as 0/1, 1|0 or ./.",
+        false_positive_risk=(
+            "HIGH, which is why it is redaction-only and never an audit rule: a "
+            "prose fraction like 1/2 matches. In a log line that is an acceptable "
+            "loss; in the audit report it would be unusable noise."
+        ),
+    ),
+)
+
 #: Rules applied by :func:`mva.privacy.redact.redact_text`.
-REDACTION_RULES: Final[tuple[Rule, ...]] = tuple(
-    rule for rule in RULES if rule.rule_id not in REDACTION_EXEMPT_RULES
+REDACTION_RULES: Final[tuple[Rule, ...]] = (
+    tuple(rule for rule in RULES if rule.rule_id not in REDACTION_EXEMPT_RULES)
+    + REDACTION_ONLY_RULES
 )
 
 #: Rules that are threshold- or context-gated by the audit rather than absolute.
@@ -397,6 +540,43 @@ def read_capped(path: Path, limit: int = MAX_SCAN_BYTES) -> bytes:
     """Read at most ``limit`` bytes. Always binary; never decodes."""
     with path.open("rb") as handle:
         return handle.read(limit)
+
+
+#: Bound on how many gzip members :func:`gunzip_capped` will walk. A BGZF file is
+#: a chain of ~64 KiB members; the header and the first records — which is all the
+#: rules need — are in the first few.
+_MAX_GZIP_MEMBERS: Final[int] = 64
+
+
+def gunzip_capped(data: bytes, limit: int = MAX_SCAN_BYTES) -> bytes | None:
+    """Inflate a gzip/BGZF byte string, capped, or return ``None``.
+
+    Every rule in this module matches plaintext, so a gzipped VCF — the form
+    variant callers actually emit — matched nothing at all: not the header, not
+    the ``#CHROM`` line, not a single genotype. Magic-byte sniffing caught BGZF
+    and rated it ``warn`` (every bgzipped public resource has that header), and
+    plain gzip was not caught at all.
+
+    Returns ``None`` for non-gzip input and for a stream that fails to inflate; a
+    truncated or corrupt member is a normal condition when only a capped prefix
+    was read, and is not something to raise about. Output is bounded by ``limit``
+    and by :data:`_MAX_GZIP_MEMBERS`, so a decompression bomb cannot exhaust
+    memory here.
+    """
+    if data[:2] != b"\x1f\x8b":
+        return None
+    out = bytearray()
+    remaining = data
+    for _ in range(_MAX_GZIP_MEMBERS):
+        obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            out += obj.decompress(remaining, max(0, limit - len(out)))
+        except zlib.error:
+            break
+        if len(out) >= limit or not obj.eof or not obj.unused_data:
+            break
+        remaining = obj.unused_data
+    return bytes(out) if out else None
 
 
 def decode_scrubbed(data: bytes, *, path: Path) -> str:

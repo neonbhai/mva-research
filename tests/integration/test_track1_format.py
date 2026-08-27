@@ -329,7 +329,11 @@ def test_write_submission_round_trips_to_disk(tmp_path: Path) -> None:
     rows = build_submission_rows(
         [_pair(pair_id="P1", gene="FAKEGENE1", composite=0.8)], proband_id=ACCEPTED_PROBAND_ID
     )
-    path = write_submission(rows, tmp_path / "nested" / "submission.csv")
+    # The filename is load-bearing, not incidental: write_submission now acts on
+    # the public-export gate's verdict, and the gate's allowlist is deny-by-default
+    # (mva.privacy.export.PUBLIC_EXPORT_ALLOWLIST). A submission written under any
+    # other name is refused and deleted.
+    path = write_submission(rows, tmp_path / "nested" / "track1_submission.csv")
     text = path.read_text(encoding="utf-8")
     assert text == render_submission_csv(rows)
     ok, errors = validate_submission(text)

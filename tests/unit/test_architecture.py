@@ -208,3 +208,71 @@ def test_no_naive_datetime_now() -> None:
         "`clock.now()`. Determinism tests compare two runs byte-for-byte; an "
         "embedded wall-clock timestamp makes that impossible."
     )
+
+
+# ---------------------------------------------------------------------------
+# The allele-balance lint. A review finding promoted into a rule (CLAUDE.md).
+# ---------------------------------------------------------------------------
+
+#: Files entitled to read the raw ``Genotype.allele_balance``.
+ALLELE_BALANCE_OWNERS: frozenset[str] = frozenset(
+    {
+        "models/variant.py",  # defines it, and defines the site-aware fraction over it
+        "ingestion/qc.py",  # reports it alongside the fraction in its evidence payload
+        # The two below RENDER the raw measured field verbatim into an artifact
+        # column; neither applies the heterozygous band to it, so neither can
+        # produce the misjudgement this lint exists to prevent. They are still
+        # showing a reader 0.913 where the site fraction is 0.477, which is
+        # tracked as TD-16 — the fix is to render both numbers, and it belongs to
+        # whoever owns those packages.
+        "evidence/store.py",
+        "reporting/dossier.py",
+    }
+)
+
+_ALLELE_BALANCE_READ = "allele_balance"
+
+ALLELE_BALANCE_REMEDIATION = (
+    "\n\nRemediation: read `VariantRecord.allele_fraction`, not "
+    "`genotype.allele_balance`. On a record decomposed from a multiallelic site "
+    "the raw balance is alt/(ref+alt) over the SITE's reference depth and "
+    "excludes the reads carrying the other ALT: a textbook compound heterozygote "
+    "at AD=2,21,21 reads 0.913 instead of 0.477, gets flagged `low_quality_call` "
+    "and `possible_mosaic`, and loses ~0.18 of composite to the shape of its VCF "
+    "line. `mva.ingestion.qc` was written to fix exactly this, and two "
+    "prioritisation stages then undid it by re-deriving the wrong quantity from "
+    "the raw attribute. The lint exists because the fix is invisible at the call "
+    "site — both spellings compile, both return a float, and only one is right. "
+    "If a new module genuinely needs the raw per-allele balance, add it to "
+    "ALLELE_BALANCE_OWNERS in this file with a comment saying why "
+    "(ASSUMPTION-MOSAIC-02)."
+)
+
+
+@pytest.mark.unit
+def test_allele_balance_is_read_only_where_it_is_defined() -> None:
+    """The site-aware allele fraction is the only quantity the het band is applied to.
+
+    Structural rather than conventional: an attribute read is easy to write by
+    accident and impossible to spot in review, which is how this regressed once
+    already. Every exemption in ``ALLELE_BALANCE_OWNERS`` carries the reason it
+    is there, so widening the set is a visible decision rather than a diff.
+    """
+    violations: list[str] = []
+    for path in _iter_source_files():
+        relative = path.relative_to(SRC).as_posix()
+        if relative in ALLELE_BALANCE_OWNERS:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == _ALLELE_BALANCE_READ:
+                violations.append(
+                    f"  {path.relative_to(SRC.parent.parent)}:{node.lineno} — "
+                    f"reads `.{_ALLELE_BALANCE_READ}`"
+                )
+
+    assert not violations, (
+        "Raw allele balance read outside its owning modules.\n"
+        + "\n".join(violations)
+        + ALLELE_BALANCE_REMEDIATION
+    )

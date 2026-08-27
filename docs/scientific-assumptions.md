@@ -25,10 +25,25 @@ because short-read phasing calls can be wrong (GP-13).
 
 ### ASSUMPTION-INHERITANCE-01 — Compound-het is a prior, not a constraint
 The challenge's ground truth is a clinically validated compound-heterozygous
-pair, which makes biallelic recessive the right prior. The architecture still
-represents homozygous-recessive, de-novo dominant, X-linked, mitochondrial and
-mosaic models, and single-variant candidates share the same ranked list. A prior
-that becomes a filter stops being a prior.
+pair, which makes biallelic recessive the right prior. Single-variant candidates
+share the same ranked list rather than being filtered out. A prior that becomes
+a filter stops being a prior.
+
+`InheritanceModel` is the **vocabulary of the domain, not a list of things this
+pipeline infers**, and the difference is worth stating plainly. From a
+proband-only VCF, `mva.prioritization.pairing` actually produces six of its nine
+members: `COMPOUND_HETEROZYGOUS`, `HOMOZYGOUS_RECESSIVE`, `X_LINKED_RECESSIVE`,
+`MITOCHONDRIAL` (any `chrM` call — mtDNA dosage is per-cell heteroplasmy, not
+two gene copies), `MOSAIC` (a call carrying `possible_mosaic`) and `UNKNOWN`.
+
+The other three are **unreachable by construction**, each because it needs data
+this pipeline never receives: `DE_NOVO_DOMINANT` requires trio genotypes;
+`AUTOSOMAL_DOMINANT` and `X_LINKED_DOMINANT` require segregation in affected
+relatives or de-novo status, without which a lone heterozygote is scored
+`UNKNOWN` rather than promoted. The exclusion list lives in code as
+`UNPRODUCED_INHERITANCE_MODELS`, with the reason attached to each member, and a
+test asserts that every enum member is either produced by the pipeline or on
+that list — so this paragraph cannot quietly become false.
 
 ### ASSUMPTION-MOSAIC-01 — Skewed allele balance may be signal
 In a mosaic aneuploidy disorder, a heterozygous call with allele balance below
@@ -36,6 +51,33 @@ the usual band may reflect genuine somatic mosaicism rather than an artifact. We
 flag `possible_mosaic` in preference to `low_allele_balance` above a configured
 floor, so mosaic candidates are not down-ranked as noise. This is a deliberate
 sensitivity/specificity trade specific to this disease context.
+
+**The mosaic window is one-sided, and the band order is load-bearing.**
+Mosaicism dilutes the alternate allele across a fraction of cells; it can never
+concentrate it. An allele fraction *above* `max_allele_balance_het` is therefore
+allelic imbalance, reference-allele dropout, or a homozygote mis-called as a
+heterozygote — never mosaicism. Both the QC stage and the scoring stage test the
+above-band case **first** and give it its own multiplier and its own note. A
+scoring copy that tested "outside the band" before "above the ceiling" reported
+an allele fraction of 0.95 as "within the mosaic window, so treated as possible
+mosaicism rather than noise", and that sentence reached the dossier.
+
+### ASSUMPTION-MOSAIC-02 — The het band is applied to the site allele fraction
+The quantity banded is `VariantRecord.allele_fraction`, not
+`Genotype.allele_balance`. For a biallelic call the two are identical. For a
+record decomposed from a multiallelic site they are not: after splitting
+`A>G,GT` with `GT=1/2` and `AD=2,21,21`, each split record holds the *site's*
+REF depth (2) and its own ALT depth (21), so `alt/(ref+alt)` is 0.91 and a
+textbook compound heterozygote looks homozygous. `alt/DP` is 0.48, which is what
+the band is for. Where the site depth is unknown the fraction is `None` and no
+allele-balance finding may be raised at all, because a confident wrong flag is
+worse than no flag (GP-14).
+
+This is enforced structurally: a lint in `tests/unit/test_architecture.py`
+forbids reading `genotype.allele_balance` outside `src/mva/models/` and
+`src/mva/ingestion/qc.py`, because the original fix was written once in the QC
+stage and then undone by two prioritisation stages that re-derived the wrong
+quantity from the raw field.
 
 ---
 
@@ -60,6 +102,21 @@ under-estimates frequency for variants enriched in ancestries
 under-represented in reference cohorts, which would make common variants in those
 populations look like plausible ultra-rare causes. Every frequency carries
 source, version and population (GP-18).
+
+**A population must be large enough to set that maximum.** Taken raw, "maximum"
+hands the decision to whichever cohort was sampled least: one allele observed
+once in 40 chromosomes is an AF of 0.025, above any plausible recessive
+cut-point, while the same site sits at 8×10⁻⁶ across 125,000 global chromosomes.
+The maximum then reports a genuine founder allele as `common_variant`, sinks its
+rarity component, and drops it from the plausible-candidate set — destroying
+exactly the case the maximum-AF rule exists to protect. Populations reporting
+fewer than `frequency.min_allele_number` alleles (default 2000) are excluded
+from the maximum and **recorded** in the rarity rationale rather than silently
+dropped; a population that reports no allele number at all stays eligible,
+because an unrecorded cohort size is unknown, not small (GP-14). gnomAD's
+`grpmax` and the ACMG BA1/BS1 filtering allele frequency address the same
+problem. Rationale and the choice of 2000:
+`docs/decisions/0010-filtering-allele-frequency.md`.
 
 ### ASSUMPTION-PREDICTION-01 — In-silico prediction is never proof of causality
 CADD, REVEL and SpliceAI scores are `COMPUTATIONAL_PREDICTION` tier and
@@ -111,6 +168,24 @@ Genes grouped under one clinical label may act through different mechanisms
 drug rationale valid for one may be irrelevant or inverted for another. Mechanism
 is resolved per gene, never per disease name.
 
+### ASSUMPTION-MECHANISM-04 — Not every deviation from wild type is the disease
+A node can deviate because it is broken or because it is *compensating*. Clearance
+of aneuploid progenitors is the worked example: it deviates from wild type, and
+pushing it back "corrects" a protective response. Nothing in a signed state field
+distinguishes the two cases, so every `MechanismNode` carries a mandatory,
+un-defaulted `deviation_is_pathological` flag. Where a node is compensatory, no
+corrective direction is derived from its state — the direction check returns
+`UNKNOWN` rather than guessing — and such a node may not be designated the
+therapeutic target at all.
+
+### ASSUMPTION-MECHANISM-05 — The direction triple is checked, not trusted
+`disease_direction`, `required_correction` and the therapeutic target node's
+`state_in_patient` are authored independently in two curated tables, while the
+drug check compares an agent against `required_correction` alone. A single
+mistyped cell therefore inverts the whole Track 2 gate silently. The three are
+required to agree at construction time (`MechanismHypothesis`), so an inconsistent
+chain cannot be built, let alone reported.
+
 ---
 
 ## Drug hypotheses
@@ -136,6 +211,12 @@ wrong-direction rejection. Some real agents genuinely have bidirectional,
 dose- and context-dependent effects; forcing them to a single sign would be
 fabrication.
 
+A measured `NO_CHANGE` is **not** in that category. A demonstrated null is a
+signed, established finding — usually the strongest evidence available *against*
+the claim that this agent corrects this node — so it resolves to `False`, not to
+`None`. Filing it as unsigned would award it the undetermined-direction credit and
+a recommendation to go and measure a sign that has already been measured.
+
 ### ASSUMPTION-DRUG-03 — Repurposing requires approval
 An investigational agent or tool compound may be a valid research probe but is
 not a repurposing candidate. Approval status is tracked separately from
@@ -146,6 +227,13 @@ direction, and the two rejection reasons are never conflated.
 `SURVEILLANCE`, `SUPPORTIVE` and `PREVENTIVE`. Presenting an anticonvulsant as
 addressing a chromosome-segregation defect is a category error the type system
 prevents.
+
+The class is a **curated label**, so the separation does not rest on it. The
+statement that an agent "does not correct the mechanism" is emitted whenever its
+`target_node_id` differs from the mechanism's `therapeutic_target_node_id`,
+whatever the class cell says, and the non-fatal `MECHANISM_MISMATCH` reason is
+carried on the hypothesis as a `concern` and printed beside the candidate rather
+than discarded once the candidate survives triage.
 
 ### ASSUMPTION-DRUG-05 — Achievable concentration is required
 A compound effective at 10 µM in culture that peaks at 0.1 µM in plasma is not a
@@ -160,7 +248,11 @@ germline chromosomal-instability population. This caveat is a default field on
 ### ASSUMPTION-DRUG-07 — Could it worsen the disease?
 Every candidate must answer whether it could increase aneuploidy or cancer
 susceptibility. `None` (unassessed) is itself a blocking gap in this disease
-context, not a pass.
+context, not a pass — and it **blocks**: in a chromosomal-instability mechanism an
+unassessed answer is disqualifying with `ONCOGENIC_RISK`, not merely recorded.
+Outside such a context it stays a recorded, non-fatal concern. A report that calls
+a gap blocking while the pipeline ranks the candidate anyway is telling the reader
+two different things at once.
 
 ---
 
@@ -178,6 +270,21 @@ The contradiction penalty is subtracted from the weighted sum, not multiplied
 into it, and is weighted above the smallest positive components so that
 contradicting evidence can actually move a candidate rather than being averaged
 into irrelevance.
+
+**`common_variant`, `low_quality_call` and `benign_consequence` are each counted
+twice on purpose:** they lower a positive component (rarity, analytical validity,
+molecular consequence respectively) *and* add a term to the subtracted penalty.
+This is deliberate double counting, and it is stated here because an undocumented
+double count is indistinguishable from a bug. The rationale is that the two
+counts answer different questions. The component asks "how strong is this line of
+support?" and degrades smoothly; the penalty asks "is there a recorded reason
+this hypothesis is wrong?" and is emitted as a persisted `CONTRADICTS`
+`EvidenceItem` a reviewer can argue with (GP-19). A common allele that scored
+0.12 for rarity would otherwise still be outranked by an unannotated variant
+scoring the neutral 0.5, and nothing in the output would say why the first one
+should not be trusted. The cost is that these three findings move a candidate
+further than a single-count model would; the penalty magnitudes were chosen with
+that overlap in mind and are, like every number here, uncalibrated (GP-32).
 
 ### ASSUMPTION-SCORING-03 — No leaderboard tuning
 Weights are not tuned against the live leaderboard during scaffolding. Doing so

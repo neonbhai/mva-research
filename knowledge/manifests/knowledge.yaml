@@ -34,7 +34,7 @@ tables:
     name: drug_catalog
     path: public/drug_catalog.tsv
     retrieved: '2026-08-27'
-    sha256: 8673ac190921ad5fad15ca115cd7b96e05d9ac06bef322384eda02526a16a6b4
+    sha256: cd69b0448d84d960a518f4d764ef933c95cb59f29359e2b768e887bab2406190
     synthetic: true
     version: synthetic-v0.0
   frequencies:

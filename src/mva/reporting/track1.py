@@ -41,14 +41,21 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from mva.errors import ExportBlockedError
 from mva.models import ContigStyle, Sensitivity, normalise_contig
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mva.models import CandidatePair
+    from mva.privacy.export import ExportDecision
 
 _LOG = logging.getLogger(__name__)
+
+#: Used only when ``mva.privacy.export`` is present but predates
+#: ``PUBLIC_EXPORT_ALLOWLIST``. It is a fixed name, not ``path.name``: an
+#: allowlist derived from the file under inspection is not an allowlist.
+TRACK1_EXPORT_ALLOWLIST_FALLBACK: tuple[str, ...] = ("track1_submission.csv",)
 
 #: The exact 12 columns, in the exact order, from the verified contract.
 TRACK1_COLUMNS: tuple[str, ...] = (
@@ -369,12 +376,29 @@ def write_submission(rows: Sequence[SubmissionRow], path: Path) -> Path:
 
 
 def _gate_public_export(path: Path) -> None:
-    """Run the public-export gate over the written file, if it is available.
+    """Run the public-export gate over the written file, and act on its verdict.
 
     Bound dynamically because ``mva.privacy.export`` is a peer deliverable that may
     not be present in every checkout; its absence degrades to "ungated", which is
-    recorded in the log rather than silently assumed to be fine. When the gate is
-    present and blocks, the file is deleted and the error propagates: fail closed.
+    recorded in the log rather than silently assumed to be fine.
+
+    Two things used to make this function decorative, and both were exercised in
+    review:
+
+    * ``gate_public_export`` RETURNS an :class:`~mva.privacy.export.ExportDecision`
+      and never raises for a refusal — that is its documented contract, so the
+      caller can see every failing check at once. Wrapping it in ``try/except``
+      and ignoring the return value meant a verdict of ``allowed=False`` deleted
+      nothing, raised nothing and left the submission on disk, while the docstring
+      claimed the opposite.
+    * ``allowlist=(path.name,)`` builds the allowlist out of the file being
+      checked, so the allowlist check could not fail. The deny-by-default list
+      is :data:`mva.privacy.export.PUBLIC_EXPORT_ALLOWLIST`, which is what makes
+      it a decision taken in advance rather than a tautology.
+
+    The ``try/except`` is kept, narrowed to the call itself, because a gate that
+    raises for an unexpected reason must still delete the file before the error
+    propagates. Fail closed means the artifact does not survive the refusal.
     """
     try:
         module = importlib.import_module("mva.privacy.export")
@@ -389,11 +413,25 @@ def _gate_public_export(path: Path) -> None:
     if gate is None:  # pragma: no cover - defensive against interface drift
         _LOG.info("mva.privacy.export exposes no gate_public_export; submission left ungated.")
         return
+    declared_allowlist = getattr(
+        module, "PUBLIC_EXPORT_ALLOWLIST", TRACK1_EXPORT_ALLOWLIST_FALLBACK
+    )
+    allowlist = cast("Sequence[str]", declared_allowlist)
     try:
-        gate(path, declared=Sensitivity.PUBLIC, allowlist=(path.name,))
+        decision = cast(
+            "ExportDecision", gate(path, declared=Sensitivity.PUBLIC, allowlist=allowlist)
+        )
     except Exception:
         path.unlink(missing_ok=True)
         raise
+    if not decision.allowed:
+        path.unlink(missing_ok=True)
+        msg = (
+            f"Submission {path.name!r} was refused by the public-export gate (GP-43) and "
+            f"has been deleted. Failing checks: {'; '.join(decision.reasons)}. "
+            "Content is withheld under GP-41."
+        )
+        raise ExportBlockedError(msg)
 
 
 def _validate_row(index: int, row: dict[str, str | None], errors: list[str]) -> None:

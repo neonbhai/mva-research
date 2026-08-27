@@ -33,19 +33,27 @@ from pydantic import ValidationError
 
 from mva.errors import ReferenceMismatchError
 from mva.models.genome import GenomicCoordinate
-from mva.models.variant import VariantRecord, Zygosity
+from mva.models.variant import (
+    FLAG_REF_ALLELE_MISMATCH,
+    OP_LEFT_ALIGN,
+    OP_SPLIT_MULTIALLELIC,
+    OP_TRIM,
+    VariantRecord,
+    Zygosity,
+)
 
 # ---------------------------------------------------------------------------
 # Operation and flag vocabulary
 # ---------------------------------------------------------------------------
 
-OP_SPLIT_MULTIALLELIC: Final = "split_multiallelic"
-OP_TRIM: Final = "trim"
-OP_LEFT_ALIGN: Final = "left_align"
-
+#: ``OP_SPLIT_MULTIALLELIC``, ``OP_TRIM`` and ``OP_LEFT_ALIGN`` are imported from
+#: :mod:`mva.models.variant`, which owns the vocabulary this stage shares with
+#: prioritisation. GP-01/GP-03 keep those two packages from importing each other,
+#: so a literal spelled out in both is a literal that drifts.
+#:
 #: QC flag raised when the record's REF disagrees with the reference sequence.
 #: Consumed by :mod:`mva.ingestion.qc` to emit a CONTRADICTS evidence item.
-REF_ALLELE_MISMATCH_FLAG: Final = "ref_allele_mismatch"
+REF_ALLELE_MISMATCH_FLAG: Final = FLAG_REF_ALLELE_MISMATCH
 
 WARN_NO_REFERENCE: Final = "no_reference_lookup_left_alignment_skipped"
 WARN_REF_ALLELE_MISMATCH: Final = "ref_allele_mismatch"

@@ -29,11 +29,16 @@ from mva.mechanisms import (
 from mva.models.base import AssertionTier
 from mva.models.evidence import EvidenceStrength
 from mva.models.mechanism import (
+    NULL_DIRECTIONS,
+    UNSIGNED_DIRECTIONS,
     EffectDirection,
     MechanismHypothesis,
     MechanismLink,
     MechanismNode,
     MechanismNodeKind,
+    corrective_direction,
+    directions_agree,
+    same_sign,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -173,25 +178,35 @@ def test_relevance_score_of_a_chainless_hypothesis_is_zero(
 
 
 @pytest.mark.unit
-def test_target_node_raises_when_the_target_is_not_a_node() -> None:
+def test_a_target_that_is_not_a_node_is_refused_at_construction() -> None:
     """A mechanism pointing at a node it does not contain is incoherent, not merely empty."""
-    orphan = MechanismHypothesis(
-        mechanism_id="MECH-ORPHAN-01",
-        gene_symbol="SYNTHKIN1",
-        summary="A chain whose therapeutic target was never declared as a node.",
-        nodes=(
-            MechanismNode(
-                node_id="N1_variant",
-                kind=MechanismNodeKind.VARIANT,
-                label="Variant",
-                state_in_patient=EffectDirection.LOSS_OF_FUNCTION,
+    with pytest.raises(ValueError, match="not among its nodes"):
+        MechanismHypothesis(
+            mechanism_id="MECH-ORPHAN-01",
+            gene_symbol="SYNTHKIN1",
+            summary="A chain whose therapeutic target was never declared as a node.",
+            nodes=(
+                MechanismNode(
+                    node_id="N1_variant",
+                    kind=MechanismNodeKind.VARIANT,
+                    label="Variant",
+                    state_in_patient=EffectDirection.LOSS_OF_FUNCTION,
+                    deviation_is_pathological=True,
+                ),
             ),
-        ),
-        links=(),
-        disease_direction=EffectDirection.LOSS_OF_FUNCTION,
-        therapeutic_target_node_id="N_does_not_exist",
-        required_correction=EffectDirection.RESTORE,
-    )
+            links=(),
+            disease_direction=EffectDirection.LOSS_OF_FUNCTION,
+            therapeutic_target_node_id="N_does_not_exist",
+            required_correction=EffectDirection.RESTORE,
+        )
+
+
+@pytest.mark.unit
+def test_target_node_raises_when_the_target_is_not_a_node(
+    mechanism: MechanismHypothesis,
+) -> None:
+    """`model_copy` does not re-run validators, so `target_node` keeps its own guard."""
+    orphan = mechanism.model_copy(update={"therapeutic_target_node_id": "N_does_not_exist"})
     with pytest.raises(ValueError, match="not among its nodes"):
         orphan.target_node()
 
@@ -346,3 +361,194 @@ def test_link_models_are_frozen(mechanism: MechanismHypothesis) -> None:
     link: MechanismLink = mechanism.links[0]
     with pytest.raises(ValueError, match="frozen"):
         link.is_directly_demonstrated = False  # type: ignore[misc]
+
+
+# direction invariants --------------------------------------------------------
+#
+# The three curated direction cells -- `disease_direction`, `required_correction`
+# and the therapeutic target node's `state_in_patient` -- are authored
+# independently in two different TSVs, while the drug direction check compares an
+# agent against `required_correction` alone. One mistyped cell therefore inverts
+# the entire Track 2 gate silently: the contraindicated checkpoint inhibitor is
+# reported as "direction AGREES" and the correct stabiliser is rejected as
+# wrong-direction, with the report printing its own refutation.
+
+
+def _triple(
+    *,
+    disease_direction: EffectDirection,
+    required_correction: EffectDirection,
+    state_in_patient: EffectDirection,
+    deviation_is_pathological: bool = True,
+) -> MechanismHypothesis:
+    """A minimal one-node chain exercising only the direction triple."""
+    return MechanismHypothesis(
+        mechanism_id="MECH-TRIPLE-01",
+        gene_symbol="SYNTHKIN1",
+        summary="A one-node chain used to exercise the direction-consistency validator.",
+        nodes=(
+            MechanismNode(
+                node_id="N_TARGET",
+                kind=MechanismNodeKind.CELLULAR_PROCESS,
+                label="Target process",
+                state_in_patient=state_in_patient,
+                deviation_is_pathological=deviation_is_pathological,
+            ),
+        ),
+        links=(),
+        disease_direction=disease_direction,
+        therapeutic_target_node_id="N_TARGET",
+        required_correction=required_correction,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("disease_direction", "required_correction", "state_in_patient"),
+    [
+        (
+            EffectDirection.LOSS_OF_FUNCTION,
+            EffectDirection.RESTORE,
+            EffectDirection.LOSS_OF_FUNCTION,
+        ),
+        (EffectDirection.DECREASE, EffectDirection.INCREASE, EffectDirection.DECREASE),
+        (EffectDirection.INCREASE, EffectDirection.DECREASE, EffectDirection.INCREASE),
+        (
+            EffectDirection.GAIN_OF_FUNCTION,
+            EffectDirection.DECREASE,
+            EffectDirection.GAIN_OF_FUNCTION,
+        ),
+        (EffectDirection.DESTABILISE, EffectDirection.STABILISE, EffectDirection.DESTABILISE),
+        # An unsigned disease direction derives no requirement, so it constrains
+        # nothing and must not be turned into a spurious contradiction.
+        (EffectDirection.UNKNOWN, EffectDirection.RESTORE, EffectDirection.LOSS_OF_FUNCTION),
+    ],
+)
+def test_a_consistent_direction_triple_constructs(
+    disease_direction: EffectDirection,
+    required_correction: EffectDirection,
+    state_in_patient: EffectDirection,
+) -> None:
+    built = _triple(
+        disease_direction=disease_direction,
+        required_correction=required_correction,
+        state_in_patient=state_in_patient,
+    )
+    assert built.required_correction is required_correction
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("disease_direction", "required_correction", "state_in_patient"),
+    [
+        # The reviewer's exact break: a target that has LOST function cannot be
+        # corrected by pushing it further DOWN.
+        (
+            EffectDirection.LOSS_OF_FUNCTION,
+            EffectDirection.DECREASE,
+            EffectDirection.LOSS_OF_FUNCTION,
+        ),
+        (EffectDirection.DECREASE, EffectDirection.DECREASE, EffectDirection.DECREASE),
+        (EffectDirection.INCREASE, EffectDirection.INCREASE, EffectDirection.INCREASE),
+        # The node disagrees with an otherwise self-consistent metadata row.
+        (
+            EffectDirection.LOSS_OF_FUNCTION,
+            EffectDirection.RESTORE,
+            EffectDirection.GAIN_OF_FUNCTION,
+        ),
+        # The metadata row disagrees with an otherwise consistent node.
+        (EffectDirection.INCREASE, EffectDirection.RESTORE, EffectDirection.LOSS_OF_FUNCTION),
+        (
+            EffectDirection.GAIN_OF_FUNCTION,
+            EffectDirection.RESTORE,
+            EffectDirection.GAIN_OF_FUNCTION,
+        ),
+    ],
+)
+def test_an_inconsistent_direction_triple_is_refused_at_construction(
+    disease_direction: EffectDirection,
+    required_correction: EffectDirection,
+    state_in_patient: EffectDirection,
+) -> None:
+    """A sign error here inverts the whole drug gate, so it is refused, not reported."""
+    with pytest.raises(ValueError, match="opposite ways"):
+        _triple(
+            disease_direction=disease_direction,
+            required_correction=required_correction,
+            state_in_patient=state_in_patient,
+        )
+
+
+@pytest.mark.unit
+def test_the_shipped_chain_satisfies_the_direction_triple(mechanism: MechanismHypothesis) -> None:
+    """The curated tables are themselves subject to the invariant, not exempt from it."""
+    target = mechanism.target_node()
+    assert target.deviation_is_pathological is True
+    assert same_sign(mechanism.required_correction, corrective_direction(target.state_in_patient))
+    assert same_sign(
+        mechanism.required_correction, corrective_direction(mechanism.disease_direction)
+    )
+
+
+@pytest.mark.unit
+def test_a_compensatory_node_cannot_be_the_therapeutic_target() -> None:
+    """Pushing a compensatory response back to wild type suppresses a protective mechanism.
+
+    Clearance of aneuploid progenitors is the worked example: it deviates from wild
+    type, "correcting" it is exactly the wrong intervention, and nothing in a state
+    field alone distinguishes the two cases. So the target may not be a node the
+    curator has marked compensatory.
+    """
+    with pytest.raises(ValueError, match="marked compensatory"):
+        _triple(
+            disease_direction=EffectDirection.LOSS_OF_FUNCTION,
+            required_correction=EffectDirection.RESTORE,
+            state_in_patient=EffectDirection.LOSS_OF_FUNCTION,
+            deviation_is_pathological=False,
+        )
+
+
+# a measured null ------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_measured_null_disagrees_and_is_not_an_unknown() -> None:
+    """`no_change` is a demonstrated result, not a gap in the record.
+
+    Filing it under "unsigned" would award it the undetermined-direction credit and
+    recommend measuring a sign that has already been measured. It is the strongest
+    available evidence that this agent does NOT make the required correction.
+    """
+    assert directions_agree(EffectDirection.RESTORE, EffectDirection.NO_CHANGE) is False
+    assert directions_agree(EffectDirection.DECREASE, EffectDirection.NO_CHANGE) is False
+    assert EffectDirection.NO_CHANGE not in UNSIGNED_DIRECTIONS
+    assert EffectDirection.NO_CHANGE in NULL_DIRECTIONS
+    # A required correction nobody has signed stays undeterminable, both ways round.
+    assert directions_agree(EffectDirection.NO_CHANGE, EffectDirection.RESTORE) is None
+    assert directions_agree(EffectDirection.UNKNOWN, EffectDirection.NO_CHANGE) is None
+
+
+@pytest.mark.unit
+def test_a_node_is_constructible_only_with_an_explicit_pathological_flag() -> None:
+    """GP-14 at the type boundary: the flag has no default, because its convenient
+    default -- "every deviation is disease" -- inverts the sign on compensatory nodes."""
+    with pytest.raises(ValueError, match="deviation_is_pathological"):
+        MechanismNode(  # type: ignore[call-arg]
+            node_id="N_X",
+            kind=MechanismNodeKind.CELLULAR_PROCESS,
+            label="A node whose curator did not say which kind of deviation this is",
+            state_in_patient=EffectDirection.INCREASE,
+        )
+
+
+@pytest.mark.unit
+def test_the_chain_table_must_carry_the_pathological_column(tmp_path: Path) -> None:
+    """A MISSING column is a loud load error, never a default (the whole point of the field)."""
+    chain = tmp_path / "chain.tsv"
+    text = CHAIN_PATH.read_text(encoding="utf-8")
+    chain.write_text(
+        text.replace("\tstate_in_patient\tdeviation_is_pathological\t", "\tstate_in_patient\t", 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(IngestionError, match="deviation_is_pathological"):
+        MechanismLibrary.from_tsv(chain, META_PATH, version=LIBRARY_VERSION)

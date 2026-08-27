@@ -37,6 +37,22 @@ from mva.privacy.audit import scan_bytes
 from mva.privacy.classify import is_sensitive_extension
 from mva.privacy.patterns import MAX_SCAN_BYTES, read_capped
 
+#: Filenames permitted to leave the workspace. Deny by default: an artifact absent
+#: from this list is refused even if its classification says PUBLIC (GP-43).
+#:
+#: It lives HERE, in the privacy layer, rather than only in the composition root,
+#: because the allowlist is the policy and every caller of the gate must share
+#: one. A caller that passes its own list — ``allowlist=(path.name,)`` was the
+#: real example — has written a check that can only pass, since the file is
+#: always on a list built from the file.
+PUBLIC_EXPORT_ALLOWLIST: tuple[str, ...] = (
+    "track1_submission.csv",
+    "mechanism_report.md",
+    "drug_hypotheses.md",
+    "rejection_record.md",
+    "track2_report.md",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ExportDecision:

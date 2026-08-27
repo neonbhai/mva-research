@@ -27,6 +27,8 @@ intent: `tests/unit/test_docs_integrity.py` asserts every package under
 | `reporting` | real | Assertion checking, tier marking, Track 1 CSV against the verified contract, dossier and Track 2 rendering. | Reports are only as good as the synthetic inputs they render. | — |
 | `cli` / `pipeline` | real | Composition root, stage orchestration, determinism verification. | — | — |
 | Structural / CNV calling | **absent** | — | Not implemented at all. A material gap for a chromosomal-instability disorder. | TD-03 |
+| Repeat-expansion calling | **absent** | — | Not implemented at all. Short-tandem-repeat expansions are neither called nor representable, so a negative result at a repeat locus means "not looked at", not "not present". | TD-13 |
+| mtDNA heteroplasmy | **absent** | `chrM` calls are recognised and modelled as `InheritanceModel.MITOCHONDRIAL` instead of being described in nuclear two-copy language. | The heteroplasmy fraction is never measured or represented, and neither is the sampled tissue. Every mitochondrial candidate scores the same flat inheritance value regardless of load. | TD-14 |
 
 ## The rule this table enforces
 

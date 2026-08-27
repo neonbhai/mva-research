@@ -23,6 +23,9 @@ from mva.config import FrequencyThresholds, PhaseWeights, QualityThresholds, Sco
 from mva.models.genome import GenomeBuild, GenomicCoordinate
 from mva.models.pair import CandidatePair, ComponentScores, InheritanceModel, PhaseStatus
 from mva.models.variant import (
+    FLAG_REF_ALLELE_MISMATCH,
+    INGESTION_QC_FLAGS,
+    OP_SPLIT_MULTIALLELIC,
     ConsequenceAnnotation,
     FilterStatus,
     Genotype,
@@ -35,6 +38,9 @@ from mva.prioritization.filters import (
     FLAG_COMMON_VARIANT,
     FLAG_LOW_QUALITY_CALL,
     FLAG_PLAUSIBLE_CANDIDATE,
+    FLAG_POSSIBLE_MOSAIC,
+    INGESTION_NEUTRAL_FLAGS,
+    INGESTION_QUALITY_FLAGS,
     REASON_NO_ALT_ALLELE,
     REASON_NON_CANONICAL_CONTIG,
     REASON_WRONG_GENOME_BUILD,
@@ -42,12 +48,19 @@ from mva.prioritization.filters import (
     apply_soft_flags,
     select_candidate_variants,
 )
-from mva.prioritization.pairing import PairCandidate, generate_pairs, infer_phase
+from mva.prioritization.pairing import (
+    PRODUCED_INHERITANCE_MODELS,
+    UNPRODUCED_INHERITANCE_MODELS,
+    PairCandidate,
+    generate_pairs,
+    infer_phase,
+)
 from mva.prioritization.ranking import rank_pairs
 from mva.prioritization.scoring import (
     NEUTRAL_MECHANISM_SCORE,
     NEUTRAL_PHENOTYPE_SCORE,
     ScoredPair,
+    _variant_analytical_validity,
     composite_score,
     score_pair,
 )
@@ -85,17 +98,23 @@ def make_variant(
     pathogenicity_scores: dict[str, float] | None = None,
     allele_frequency: float | None = 0.0,
     population: str = "global",
+    allele_number: int = 152312,
     homozygote_count: int = 0,
+    frequencies: tuple[PopulationFrequency, ...] | None = None,
     annotate: bool = True,
+    extra_consequences: tuple[ConsequenceAnnotation, ...] = (),
     qc_flags: tuple[str, ...] = (),
+    normalisation_ops: tuple[str, ...] = (),
+    alt_allele_index: int | None = None,
 ) -> VariantRecord:
     """Build one fully-specified ``VariantRecord``.
 
     Defaults describe a clean, ultra-rare, HIGH-impact heterozygote — the shape
     a real candidate has — so each test only has to say how it differs.
     """
-    frequencies: tuple[PopulationFrequency, ...] = ()
-    if allele_frequency is not None:
+    if frequencies is None:
+        frequencies = ()
+    if frequencies == () and allele_frequency is not None:
         frequencies = (
             PopulationFrequency(
                 source="SYNTH_gnomAD",
@@ -103,7 +122,7 @@ def make_variant(
                 population=population,
                 allele_frequency=allele_frequency,
                 allele_count=0,
-                allele_number=152312,
+                allele_number=allele_number,
                 homozygote_count=homozygote_count,
                 filter_status="PASS",
             ),
@@ -124,6 +143,7 @@ def make_variant(
                 source_tool="SYNTH_vep",
                 source_tool_version="v0.0-synthetic",
             ),
+            *extra_consequences,
         )
     return VariantRecord(
         coordinate=GenomicCoordinate(
@@ -138,6 +158,7 @@ def make_variant(
             ref_reads=ref_reads,
             alt_reads=alt_reads,
             genotype_quality=genotype_quality,
+            alt_allele_index=alt_allele_index,
         ),
         filter_status=filter_status,
         raw_filters=("PASS",) if filter_status is FilterStatus.PASS else ("LowQual",),
@@ -146,6 +167,7 @@ def make_variant(
         population_frequencies=frequencies,
         qc_flags=qc_flags,
         source_artifact="inline_test_fixture",
+        normalisation_ops=normalisation_ops,
     )
 
 
@@ -806,3 +828,419 @@ def test_genuine_contradiction_is_still_recorded_and_penalised() -> None:
     assert any(
         item.direction is EvidenceDirection.CONTRADICTS for item in scored.contradicting_evidence
     ), "a common-variant pair recorded no contradicting evidence"
+
+
+# ---------------------------------------------------------------------------
+# 10. Adversarial-review regressions
+# ---------------------------------------------------------------------------
+
+
+def _split_multiallelic_pair() -> tuple[VariantRecord, VariantRecord]:
+    """The `chr11:5000000 A>G,GT  GT=1/2  DP=44  AD=2,21,21` site, decomposed.
+
+    Each record holds the SITE's ref depth (2) and its own alt depth (21), so
+    `alt/(ref+alt)` is 0.913 for both while the site allele fraction is 0.477.
+    """
+
+    def _allele(alt: str, index: int, impact: ImpactSeverity) -> VariantRecord:
+        return make_variant(
+            contig="chr11",
+            position=5000000,
+            ref="A",
+            alt=alt,
+            genotype_string="1/2",
+            depth=44,
+            ref_reads=2,
+            alt_reads=21,
+            genotype_quality=97,
+            normalisation_ops=(OP_SPLIT_MULTIALLELIC,),
+            alt_allele_index=index,
+            gene="SYNTHMUL4",
+            allele_frequency=None,
+            impact=impact,
+        )
+
+    return (
+        _allele("G", 1, ImpactSeverity.MODERATE),
+        _allele("GT", 2, ImpactSeverity.HIGH),
+    )
+
+
+@pytest.mark.unit
+def test_split_multiallelic_call_is_not_penalised_for_its_vcf_formatting() -> None:
+    """G1: the prioritisation stage bands the SITE allele fraction, not alt/(ref+alt).
+
+    Both stages read `Genotype.allele_balance` directly, undoing the site-aware
+    fix that `mva.ingestion.qc` already applies. The result: a textbook compound
+    heterozygote at a multiallelic site was flagged `low_quality_call`, given an
+    analytical validity of 0.75 with a fabricated mosaicism note, and lost 0.178
+    of composite to the shape of its VCF line.
+    """
+    variants = list(_split_multiallelic_pair())
+    for variant in variants:
+        assert variant.genotype.allele_balance == pytest.approx(0.913, abs=0.001)
+        assert variant.allele_fraction == pytest.approx(0.477, abs=0.001)
+
+    flagged = apply_soft_flags(variants, frequency=FREQUENCY, quality=QUALITY)
+    for variant in flagged:
+        assert FLAG_LOW_QUALITY_CALL not in variant.qc_flags
+        assert FLAG_POSSIBLE_MOSAIC not in variant.qc_flags
+
+        score, notes = _variant_analytical_validity(variant, QUALITY)
+        assert score == pytest.approx(1.0)
+        assert notes == []
+
+
+@pytest.mark.unit
+def test_split_multiallelic_pair_keeps_its_composite_and_asks_no_false_questions() -> None:
+    """The same record, scored end to end: no call-validity question is fabricated."""
+    flagged = apply_soft_flags(
+        list(_split_multiallelic_pair()), frequency=FREQUENCY, quality=QUALITY
+    )
+    pair = next(c for c in generate_pairs(flagged) if c.is_pair)
+    scored = score_all((pair,))[0]
+
+    assert scored.scores.analytical_validity == pytest.approx(1.0)
+    assert scored.scores.contradiction_penalty == pytest.approx(0.0)
+    assert not any("call-validity" in q.question_id for q in scored.open_questions)
+    assert "mosaic" not in scored.rationale.lower()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ref_reads", "alt_reads"),
+    [
+        (17, 3),  # fraction 0.15 — below the het band, above the mosaic floor
+        (19, 1),  # fraction 0.05 — below the mosaic floor: artifact
+        (20, 20),  # fraction 0.50 — inside the band: nothing to say
+        (30, 10),  # fraction 0.25 — exactly at the band edge
+        (2, 38),  # fraction 0.95 — ABOVE the band: never mosaicism
+        (1, 49),  # fraction 0.98 — likewise
+    ],
+)
+def test_only_a_low_allele_fraction_is_described_as_mosaic(ref_reads: int, alt_reads: int) -> None:
+    """G2: mosaicism dilutes the alternate allele; it can never concentrate it.
+
+    The branch was `if not (min <= b <= max): if b >= mosaic_floor: MOSAIC`, and
+    since the floor (0.10) is below the ceiling (0.75) every high-balance het
+    qualified. An allele balance of 0.95 was reported as "within the mosaic
+    window, so treated as possible mosaicism rather than noise", and that
+    sentence reached the dossier.
+    """
+    variant = make_variant(depth=ref_reads + alt_reads, ref_reads=ref_reads, alt_reads=alt_reads)
+    fraction = variant.allele_fraction
+    assert fraction is not None
+
+    _, notes = _variant_analytical_validity(variant, QUALITY)
+    joined = " ".join(notes).lower()
+
+    # The word appears only where the alternate allele is DILUTED. Above the
+    # band it must not appear at all, in any form a reader could take as a
+    # mosaic finding.
+    assert ("mosaic" in joined) is (fraction < QUALITY.min_allele_balance_het)
+    if fraction > QUALITY.max_allele_balance_het:
+        assert "above the" in joined
+        assert "dropout" in joined
+
+
+@pytest.mark.unit
+def test_high_allele_balance_is_penalised_without_being_called_mosaic() -> None:
+    """The above-band case keeps its own multiplier: narrowed, not disarmed."""
+    high = make_variant(depth=40, ref_reads=2, alt_reads=38)
+    clean = make_variant(depth=40, ref_reads=20, alt_reads=20)
+
+    high_score, _ = _variant_analytical_validity(high, QUALITY)
+    clean_score, _ = _variant_analytical_validity(clean, QUALITY)
+
+    assert high_score < clean_score
+    assert high_score == pytest.approx(0.60)
+
+
+def _founder_allele() -> VariantRecord:
+    """8e-6 across 125,000 global chromosomes; one allele in a 40-chromosome group."""
+    return make_variant(
+        frequencies=(
+            PopulationFrequency(
+                source="SYNTH_gnomAD",
+                version="v0.0-synthetic",
+                population="global",
+                allele_frequency=8e-6,
+                allele_count=1,
+                allele_number=125000,
+                homozygote_count=0,
+                filter_status="PASS",
+            ),
+            PopulationFrequency(
+                source="SYNTH_gnomAD",
+                version="v0.0-synthetic",
+                population="ami",
+                allele_frequency=0.025,
+                allele_count=1,
+                allele_number=40,
+                homozygote_count=0,
+                filter_status="PASS",
+            ),
+        ),
+    )
+
+
+@pytest.mark.unit
+def test_a_singleton_in_a_tiny_cohort_does_not_make_a_variant_common() -> None:
+    """G3: popmax had no cohort-size guard, so AC=1/AN=40 read as AF 0.025.
+
+    A genuine founder allele was flagged `common_variant`, its rarity component
+    fell to 0.1196, and `select_candidate_variants` dropped it. See ADR 0010.
+    """
+    variant = _founder_allele()
+
+    observed = variant.max_allele_frequency(min_allele_number=FREQUENCY.min_allele_number)
+    assert observed is not None
+    assert observed.population == "global"
+
+    flagged = apply_soft_flags([variant], frequency=FREQUENCY, quality=QUALITY)[0]
+    assert FLAG_COMMON_VARIANT not in flagged.qc_flags
+
+    selected = select_candidate_variants([flagged], frequency=FREQUENCY)
+    assert len(selected) == 1, "a founder allele was removed from the plausible set"
+
+    scored = score_all(generate_pairs([flagged]))[0]
+    assert scored.scores.rarity == pytest.approx(1.0)
+    assert scored.scores.contradiction_penalty == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+def test_an_excluded_population_is_named_rather_than_dropped_silently() -> None:
+    """The guard is reported: a reader can see what it set aside and disagree."""
+    selection = _founder_allele().select_max_allele_frequency(
+        min_allele_number=FREQUENCY.min_allele_number
+    )
+    assert [f.population for f in selection.excluded] == ["ami"]
+
+    scored = score_all(generate_pairs([_founder_allele()]))[0]
+    assert "ami" in scored.rationale
+    assert "AN 40" in scored.rationale
+
+
+@pytest.mark.unit
+def test_the_guard_still_calls_a_well_powered_common_allele_common() -> None:
+    """G3 narrows the popmax; it must not blind it."""
+    common = make_variant(allele_frequency=0.12, allele_number=152312, homozygote_count=1102)
+    flagged = apply_soft_flags([common], frequency=FREQUENCY, quality=QUALITY)[0]
+    assert FLAG_COMMON_VARIANT in flagged.qc_flags
+
+
+@pytest.mark.unit
+def test_ingestion_quality_flags_partition_the_shared_vocabulary() -> None:
+    """G4: the set is derived from the emitted vocabulary, not re-typed by hand.
+
+    Eight of the twelve hand-written names were emitted nowhere in `src/`, and
+    three that ingestion does emit were missing.
+    """
+    recognised = INGESTION_QUALITY_FLAGS | INGESTION_NEUTRAL_FLAGS
+    assert recognised >= INGESTION_QC_FLAGS, (
+        "ingestion emits QC flags the prioritisation stage does not recognise: "
+        + ", ".join(sorted(INGESTION_QC_FLAGS - recognised))
+    )
+    assert not (INGESTION_QUALITY_FLAGS & INGESTION_NEUTRAL_FLAGS)
+    # Every name that means "the call may not be real" is a quality flag.
+    assert {FLAG_REF_ALLELE_MISMATCH, "filtered_by_caller", "high_allele_balance"} <= (
+        INGESTION_QUALITY_FLAGS
+    )
+    # And the ones that deliberately are not are exactly the documented three.
+    documented_neutral = {"possible_mosaic", "no_quality_metrics", "no_caller_filter"}
+    assert set(INGESTION_NEUTRAL_FLAGS) == documented_neutral
+
+
+@pytest.mark.unit
+def test_a_reference_allele_mismatch_is_penalised_rather_than_ignored() -> None:
+    """A confidently wrong coordinate must not rank like a clean call.
+
+    VCF says REF=C, the reference says A — a build or patch mismatch. QC flags it
+    and raises a `contradicts` item; the prioritisation stage then scored it
+    `analytical validity 1.0` with no flag, no contradiction and no open question.
+    """
+    mismatched = make_variant(qc_flags=(FLAG_REF_ALLELE_MISMATCH,))
+    clean = make_variant()
+
+    flagged = apply_soft_flags([mismatched], frequency=FREQUENCY, quality=QUALITY)[0]
+    assert FLAG_LOW_QUALITY_CALL in flagged.qc_flags
+
+    penalised = score_all(generate_pairs([flagged]))[0]
+    baseline = score_all(generate_pairs([clean]))[0]
+
+    assert penalised.scores.analytical_validity < baseline.scores.analytical_validity
+    assert penalised.scores.contradiction_penalty > 0.0
+    assert penalised.composite < baseline.composite
+    assert any("call-validity" in q.question_id for q in penalised.open_questions)
+
+
+@pytest.mark.unit
+def test_the_rendered_consequence_term_belongs_to_the_worst_impact_transcript() -> None:
+    """G6: the rationale used `min()` over strings, which sorts alphabetically.
+
+    A `stop_gained` + `intron_variant` variant rendered as
+    "intron_variant (HIGH impact), loss-of-function term stop_gained". The score
+    was right; the sentence a clinician reads was not.
+    """
+    variant = make_variant(
+        consequence_terms=("stop_gained",),
+        impact=ImpactSeverity.HIGH,
+        extra_consequences=(
+            ConsequenceAnnotation(
+                gene_symbol=GENE,
+                gene_id="SYNTHG0001",
+                transcript_id="SYNTHT0009.1",
+                consequence_terms=("intron_variant",),
+                impact=ImpactSeverity.MODIFIER,
+                source_tool="SYNTH_vep",
+                source_tool_version="v0.0-synthetic",
+            ),
+        ),
+    )
+    assert variant.worst_impact_for_gene(GENE) is ImpactSeverity.HIGH
+
+    scored = score_all(generate_pairs([variant]))[0]
+    assert "stop_gained (HIGH impact)" in scored.rationale
+    assert "intron_variant (HIGH impact)" not in scored.rationale
+
+
+@pytest.mark.unit
+def test_a_phased_multiallelic_het_still_resolves_trans() -> None:
+    """G7: `1|2` lost its own ALT index at the split, so resolved phase was discarded.
+
+    Allele 1 is unambiguously on haplotype slot 0 and the partner allele on slot
+    1. Without the recorded index `_alt_haplotype_indices('1|2')` returned
+    `{0, 1}` and the pair bailed to UNKNOWN — failing safe, but throwing away a
+    genuine *trans* call.
+    """
+    split = make_variant(
+        contig="chr1",
+        position=100,
+        ref="A",
+        alt="G",
+        genotype_string="1|2",
+        phased=True,
+        phase_set=100,
+        alt_allele_index=1,
+        normalisation_ops=(OP_SPLIT_MULTIALLELIC,),
+        depth=44,
+        ref_reads=2,
+        alt_reads=21,
+    )
+    partner = make_variant(
+        contig="chr1",
+        position=300,
+        ref="C",
+        alt="T",
+        genotype_string="0|1",
+        phased=True,
+        phase_set=100,
+        alt_allele_index=1,
+    )
+
+    phase = infer_phase(split, partner)
+    assert phase.status is PhaseStatus.TRANS_CONFIRMED
+    assert phase.method == "phase_set"
+
+
+@pytest.mark.unit
+def test_an_unrecorded_alt_index_still_refuses_to_guess() -> None:
+    """The G7 fix must not become a licence to resolve phase it cannot see."""
+    a = make_variant(contig="chr1", position=100, genotype_string="1|2", phased=True, phase_set=100)
+    b = make_variant(
+        contig="chr1",
+        position=300,
+        ref="C",
+        alt="T",
+        genotype_string="0|1",
+        phased=True,
+        phase_set=100,
+    )
+    assert infer_phase(a, b).status is PhaseStatus.UNKNOWN
+
+
+@pytest.mark.unit
+def test_every_inheritance_model_is_produced_or_documented_as_unreachable() -> None:
+    """G8: five enum members were unreachable while the docs implied coverage.
+
+    A `chrM` hemizygous call scored 0.90 for "a single call accounting for both
+    gene copies" — mitochondrial DNA has no gene copies. Either the pipeline
+    produces a model or it says, in code, why it cannot.
+    """
+    assert PRODUCED_INHERITANCE_MODELS.isdisjoint(UNPRODUCED_INHERITANCE_MODELS)
+    assert PRODUCED_INHERITANCE_MODELS | set(UNPRODUCED_INHERITANCE_MODELS) == set(
+        InheritanceModel
+    ), "an InheritanceModel member is neither produced nor on the documented exclusion list"
+    for model, reason in UNPRODUCED_INHERITANCE_MODELS.items():
+        assert reason.strip(), f"{model.value} is excluded with no stated reason"
+
+    corpus = [
+        # compound heterozygous: two hets in one gene
+        make_variant(position=40200000, ref="C", alt="T"),
+        make_variant(position=40210500, ref="G", alt="A"),
+        # homozygous recessive
+        make_variant(
+            position=40206000,
+            ref="T",
+            alt="C",
+            zygosity=Zygosity.HOM_ALT,
+            genotype_string="1/1",
+            gene="SYNTHHOM1",
+        ),
+        # X-linked recessive
+        make_variant(
+            contig="chrX",
+            position=1000,
+            zygosity=Zygosity.HEMIZYGOUS,
+            genotype_string="1",
+            gene="SYNTHX1",
+        ),
+        # mitochondrial: chrM, whatever the zygosity label says
+        make_variant(
+            contig="chrM",
+            position=3243,
+            ref="A",
+            alt="G",
+            zygosity=Zygosity.HEMIZYGOUS,
+            genotype_string="1",
+            gene="SYNTHMT1",
+        ),
+        # mosaic: flagged by the QC stage on allele fraction
+        make_variant(
+            position=99000,
+            gene="SYNTHMOS1",
+            depth=40,
+            ref_reads=34,
+            alt_reads=6,
+            qc_flags=(FLAG_POSSIBLE_MOSAIC,),
+        ),
+        # unknown: a lone HIGH-impact het with nothing to pair against
+        make_variant(position=77000, gene="SYNTHLONE1"),
+    ]
+    produced = {candidate.inheritance_model for candidate in generate_pairs(corpus)}
+
+    assert produced == PRODUCED_INHERITANCE_MODELS, (
+        "PRODUCED_INHERITANCE_MODELS does not match what the pipeline produces; "
+        f"missing {sorted(m.value for m in PRODUCED_INHERITANCE_MODELS - produced)}, "
+        f"unexpected {sorted(m.value for m in produced - PRODUCED_INHERITANCE_MODELS)}"
+    )
+
+
+@pytest.mark.unit
+def test_a_mitochondrial_call_is_not_described_as_accounting_for_both_gene_copies() -> None:
+    """The rationale a reader sees must not claim mtDNA has two gene copies."""
+    mt = make_variant(
+        contig="chrM",
+        position=3243,
+        ref="A",
+        alt="G",
+        zygosity=Zygosity.HEMIZYGOUS,
+        genotype_string="1",
+        gene="SYNTHMT1",
+    )
+    scored = score_all(generate_pairs([mt]))[0]
+
+    assert scored.candidate.inheritance_model is InheritanceModel.MITOCHONDRIAL
+    assert "both gene copies" not in scored.rationale
+    assert "heteroplasmy" in scored.rationale
+    assert scored.scores.inheritance_consistency == pytest.approx(0.50)

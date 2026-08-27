@@ -42,6 +42,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from mva.clock import Clock
+from mva.errors import ReportCompletenessError
 from mva.models import (
     AssertionTier,
     CandidatePair,
@@ -50,6 +51,7 @@ from mva.models import (
     InterventionClass,
     MechanismHypothesis,
     MechanismLink,
+    MechanismNode,
     RejectionReason,
 )
 from mva.reporting.assertions import TIER_MARKERS, Assertion, AssertionChecker, weakest_tier
@@ -186,6 +188,10 @@ def build_rejection_record(rejected: Sequence[DrugHypothesis], *, clock: Clock) 
     """
     context: dict[str, object] = {
         "generated_at": clock.now().isoformat(),
+        # The record is also written as a standalone file (Snakefile: rejection_record.md),
+        # where it names compounds and lists what would have to change for each. Read in
+        # isolation, with no banner, that reads as a shortlist of things to try next.
+        "not_medical_advice": NOT_MEDICAL_ADVICE,
         "rejected": [_rejection_context(drug) for drug in sorted(rejected, key=_drug_sort_key)],
         "count": len(rejected),
     }
@@ -233,6 +239,15 @@ def _render_track2(
     checker = AssertionChecker(resolver, strict=True)
     presentable, all_rejected = _partition_rejected(accepted, rejected)
 
+    agreeing = _select(presentable, InterventionClass.DISEASE_MODIFYING, agree=True)
+    undetermined = _select(presentable, InterventionClass.DISEASE_MODIFYING, agree=None)
+    other_class = _select_non_disease_modifying(presentable)
+    _check_every_hypothesis_is_rendered(
+        accepted=accepted,
+        rejected=rejected,
+        sections=(agreeing, undetermined, other_class, all_rejected),
+    )
+
     context: dict[str, object] = {
         "title": title,
         "generated_at": clock.now().isoformat(),
@@ -243,21 +258,67 @@ def _render_track2(
         "pair": _pair_context(pair),
         "disease_modifying": [
             _drug_context(drug, mechanism, resolver, checker, require_rationale=True)
-            for drug in _select(presentable, InterventionClass.DISEASE_MODIFYING, agree=True)
+            for drug in agreeing
         ],
         "direction_undetermined": [
             _drug_context(drug, mechanism, resolver, checker, require_rationale=True)
-            for drug in _select(presentable, InterventionClass.DISEASE_MODIFYING, agree=None)
+            for drug in undetermined
         ],
         "symptomatic": [
             _drug_context(drug, mechanism, resolver, checker, require_rationale=False)
-            for drug in _select_non_disease_modifying(presentable)
+            for drug in other_class
         ],
         "rejection_record": build_rejection_record(all_rejected, clock=clock),
         "rejected_count": len(all_rejected),
         "caveats": _caveats(mechanism),
     }
     return render_template("track2_report.md.j2", context)
+
+
+def _check_every_hypothesis_is_rendered(
+    *,
+    accepted: Sequence[DrugHypothesis],
+    rejected: Sequence[DrugHypothesis],
+    sections: tuple[tuple[DrugHypothesis, ...], ...],
+) -> None:
+    """Refuse to render unless every input hypothesis lands in exactly one section.
+
+    The sections are chosen by predicate — ``intervention_class``, then
+    ``directions_agree`` matched against ``is True`` / ``is None``, then
+    ``rejected``. Those predicates are not a partition, and the case they miss is
+    the worst one available: a disease-modifying agent whose ``directions_agree``
+    is ``False`` while ``rejected`` is ``False`` matches neither AGREES nor CANNOT
+    BE DETERMINED, and `_partition_rejected` only rescues ``rejected=True``. Such
+    an object cannot be constructed — the `DrugHypothesis` validator forbids it —
+    but it can be *copied* into existence through ``model_copy(update=...)``, which
+    does not re-run validators.
+
+    The observed consequence was a report reading "Candidates presented: 0 ...
+    Rejected: 0" for a run that had triaged a contraindicated compound: it was
+    neither presented nor rejected, it was gone. Erasing a contraindicated
+    compound is strictly worse than listing it in the wrong section, so a gap here
+    raises instead of shortening the report.
+    """
+    counts: dict[str, int] = {}
+    for section in sections:
+        for drug in section:
+            counts[drug.drug_id] = counts.get(drug.drug_id, 0) + 1
+    expected = {drug.drug_id for drug in (*accepted, *rejected)}
+    missing = sorted(expected - set(counts))
+    duplicated = sorted(drug_id for drug_id, count in counts.items() if count > 1)
+    unexpected = sorted(set(counts) - expected)
+    if not (missing or duplicated or unexpected):
+        return
+    msg = (
+        f"Track 2 rendering would not account for every hypothesis it was given: "
+        f"{len(missing)} would appear in no section {missing}, {len(duplicated)} in more "
+        f"than one {duplicated}, {len(unexpected)} in a section but not in the input "
+        f"{unexpected}. A hypothesis in no section is deleted from the report rather than "
+        "reported, so this is refused. The usual cause is a DrugHypothesis whose "
+        "directions_agree is False while rejected is False, which model_copy can produce "
+        "and the constructor cannot: build it with revalidated_copy instead."
+    )
+    raise ReportCompletenessError(msg)
 
 
 def _drug_sort_key(drug: DrugHypothesis) -> tuple[int, float, str]:
@@ -489,6 +550,7 @@ def _drug_context(
         "score": f"{drug.score:.3f}",
         "rank": drug.rank,
         "rationale": rationale,
+        "concerns": [reason.value for reason in drug.concerns],
         "direction_verdict": _direction_verdict(drug),
         "target_in_mechanism": drug.target_node_id in mechanism.node_ids,
         "questions": _drug_questions(drug, mechanism),
@@ -566,10 +628,7 @@ def _drug_questions(
     )
     answers = (
         f"{drug.target} — mechanism node {drug.target_node_id} ({node_label}).",
-        (
-            f"{drug.required_direction.value}. The mechanism's disease direction is "
-            f"{mechanism.disease_direction.value}; the required correction is its inverse."
-        ),
+        _required_direction_answer(drug, mechanism),
         _direction_verdict(drug),
         (
             f"{drug.strongest_evidence_type.value}; "
@@ -590,6 +649,50 @@ def _drug_questions(
         {"number": index, "question": question, "answer": answer}
         for index, (question, answer) in enumerate(zip(DRUG_QUESTIONS, answers, strict=True), 1)
     ]
+
+
+def _required_direction_answer(drug: DrugHypothesis, mechanism: MechanismHypothesis) -> str:
+    """Mandatory question 2, stating the derivation that was actually used.
+
+    The requirement is only the inverse of ``disease_direction`` for the mechanism's
+    designated therapeutic target. For any other node it comes from that node's own
+    ``state_in_patient``, and for a node off the chain it does not exist at all.
+    Printing "the required correction is its inverse" for all three cases stated a
+    derivation the pipeline had not performed — and did so about the compounds whose
+    grounds are weakest, since those are exactly the ones acting away from the target.
+    """
+    target_node: MechanismNode | None = next(
+        (node for node in mechanism.nodes if node.node_id == drug.target_node_id), None
+    )
+    if drug.target_node_id == mechanism.therapeutic_target_node_id:
+        return (
+            f"{drug.required_direction.value}. `{drug.target_node_id}` is this mechanism's "
+            f"designated therapeutic target, whose disease direction is "
+            f"{mechanism.disease_direction.value}; the required correction is its inverse."
+        )
+    if target_node is None:
+        return (
+            f"{drug.required_direction.value}. `{drug.target_node_id}` is not a node of "
+            f"{mechanism.mechanism_id}, so no required direction can be derived for it at "
+            f"all. The mechanism's own required correction "
+            f"({mechanism.required_correction.value}) applies at "
+            f"`{mechanism.therapeutic_target_node_id}` and NOT to this agent."
+        )
+    if not target_node.deviation_is_pathological:
+        return (
+            f"{drug.required_direction.value}. `{drug.target_node_id}` is not the therapeutic "
+            f"target (`{mechanism.therapeutic_target_node_id}`), and its deviation is recorded "
+            "as COMPENSATORY rather than pathological. No corrective direction follows from a "
+            "compensatory node's state — pushing it back towards wild type would suppress a "
+            "protective response — so the requirement is undetermined rather than derived."
+        )
+    return (
+        f"{drug.required_direction.value}. `{drug.target_node_id}` is not the therapeutic "
+        f"target (`{mechanism.therapeutic_target_node_id}`), so the requirement is derived "
+        f"from that node's own state in the patient ({target_node.state_in_patient.value}) "
+        f"and NOT from the mechanism's disease direction "
+        f"({mechanism.disease_direction.value})."
+    )
 
 
 def _concentration_answer(drug: DrugHypothesis) -> str:
