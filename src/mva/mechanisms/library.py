@@ -2,7 +2,7 @@
 
 The chain table (`knowledge/public/mechanisms.tsv`) is a **two-record-type table
 sharing one header**: a row either populates the *node block*
-(``node_id .. state_in_patient``) or the *link block*
+(``node_id .. deviation_is_pathological``) or the *link block*
 (``link_id .. uncertainty``), never both. Rows are therefore matched by block
 rather than by absolute column index, which keeps the loader robust against the
 commonest authoring artefact in a hand-maintained TSV — one tab too many or too
@@ -50,6 +50,15 @@ _NODE_FIELDS: tuple[str, ...] = (
     "node_identifier",
     "state_in_patient",
     "deviation_is_pathological",
+)
+
+#: Node columns that must carry an explicit value on every node row.
+#: ``node_identifier`` is the only optional one: an external ID is genuinely
+#: absent for some nodes. ``deviation_is_pathological`` is required precisely
+#: because its convenient default -- "everything that deviates is disease" --
+#: inverts the corrective sign on a compensatory node (see MechanismNode).
+_REQUIRED_NODE_FIELDS: tuple[str, ...] = tuple(
+    field for field in _NODE_FIELDS if field != "node_identifier"
 )
 
 #: The link block of the chain table, in file order.

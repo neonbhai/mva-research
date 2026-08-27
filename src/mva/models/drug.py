@@ -207,6 +207,17 @@ class DrugHypothesis(FrozenModel):
     rejected: bool = False
     rejection_reasons: tuple[RejectionReason, ...] = ()
     rejection_rationale: str = ""
+    concerns: tuple[RejectionReason, ...] = Field(
+        default=(),
+        description=(
+            "Reasons raised against this hypothesis that were NOT fatal. Held in a "
+            "field of their own rather than merged into `rejection_reasons`, which "
+            "an accepted hypothesis must leave empty: without somewhere to put them "
+            "the triage stage computes the near misses and then discards them, and "
+            "a candidate is presented as clean when it is merely not disqualified. "
+            "A reason is either fatal or a concern, never both."
+        ),
+    )
 
     # ---------------------------------------------------------------- derived
 
@@ -245,7 +256,16 @@ class DrugHypothesis(FrozenModel):
         if not self.rejected and self.rejection_reasons:
             msg = (
                 f"Drug {self.drug_id!r} carries rejection reasons "
-                f"{[r.value for r in self.rejection_reasons]} but rejected=False."
+                f"{[r.value for r in self.rejection_reasons]} but rejected=False. "
+                "A non-fatal reason belongs in `concerns`."
+            )
+            raise ValueError(msg)
+        overlap = sorted(r.value for r in set(self.concerns) & set(self.rejection_reasons))
+        if overlap:
+            msg = (
+                f"Drug {self.drug_id!r} lists {overlap} as both a rejection reason and a "
+                "non-fatal concern. A reason is one or the other; recording it as both "
+                "makes the rejection record contradict the candidate block."
             )
             raise ValueError(msg)
         return self

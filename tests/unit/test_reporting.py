@@ -269,12 +269,14 @@ def _mechanism() -> MechanismHypothesis:
                 kind=MechanismNodeKind.PROTEIN,
                 label="SYNTHKIN1 kinase",
                 state_in_patient=EffectDirection.LOSS_OF_FUNCTION,
+                deviation_is_pathological=True,
             ),
             MechanismNode(
                 node_id="N-CHECKPOINT",
                 kind=MechanismNodeKind.CELLULAR_PROCESS,
                 label="Spindle assembly checkpoint",
                 state_in_patient=EffectDirection.DECREASE,
+                deviation_is_pathological=True,
             ),
         ),
         links=(

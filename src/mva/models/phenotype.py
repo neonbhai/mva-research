@@ -13,7 +13,7 @@ from enum import StrEnum
 
 from pydantic import Field, field_validator
 
-from mva.models.base import FrozenModel
+from mva.models.base import FrozenModel, error_token
 
 _HPO_RE = re.compile(r"^HP:\d{7}$")
 
@@ -90,7 +90,11 @@ class PhenotypeObservation(FrozenModel):
     def _valid_hpo(cls, value: str) -> str:
         token = value.strip().upper().replace("HP_", "HP:")
         if not _HPO_RE.match(token):
-            msg = f"Invalid HPO identifier {value!r}; expected the form 'HP:0001250'."
+            msg = (
+                f"Invalid HPO identifier <term:{error_token(value)}>; expected the "
+                "form 'HP:0001250'. A phenotype term is patient information, so it "
+                "is tokenised rather than echoed (PRIV-09)."
+            )
             raise ValueError(msg)
         return token
 
