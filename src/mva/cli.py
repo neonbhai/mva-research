@@ -118,17 +118,63 @@ def load_case_config_with_defaults(config_path: Path, defaults_path: Path | None
 
 
 def _install_privacy_guards(config: CaseConfig, workspace: Workspace) -> str:
-    """Install log redaction and, where required, the offline profile."""
+    """Install log redaction and, for any non-ONLINE profile, ARM the offline guard.
+
+    Until this actually armed, the function installed a permanently inert audit
+    hook, set two htslib variables, and returned the string ``"offline_enforced"``
+    for the CLI to print. `netguard.is_armed()` was `False` for the whole run and a
+    DNS lookup succeeded: the run reported a guarantee that no line of code
+    provided. `OfflineProfile` existed and was exercised only by its own unit
+    tests.
+
+    Arming here is process-lifetime and one-way (see
+    :func:`~mva.privacy.netguard.arm_for_process`), because a CLI process on the
+    patient-data path has no "after". `mva.orchestrator.execute_pipeline`
+    additionally arms a nested, unwinding profile around the stage graph, so a
+    caller that reaches the pipeline without going through this CLI — Snakemake, a
+    test, a notebook — is covered too. `OfflineProfile` is nesting-safe, so the two
+    compose rather than fight.
+
+    Returns the profile label for display only. The label is now a report of state
+    the caller can verify with `netguard.is_armed()`, not a claim.
+    """
     from mva.privacy.redact import install_redaction
 
     install_redaction()
 
     if config.network_profile is NetworkProfile.ONLINE:
-        return "online"
-    from mva.privacy.netguard import configure_reference_cache
+        return NetworkProfile.ONLINE.value
+    from mva.privacy.netguard import arm_for_process
 
-    configure_reference_cache(workspace.root)
+    arm_for_process(workspace.root)
     return config.network_profile.value
+
+
+def _report_network_guard(config: CaseConfig) -> None:
+    """Print what the guard VERIFIABLY did, and name the half nobody verified.
+
+    The profile label alone reads as a guarantee. Two thirds of it now is one:
+    `is_armed()` is observed state, not a claim. The remaining third is not, and
+    saying so here is the difference between a control and a reassurance —
+    `NetworkProfile.OFFLINE_ENFORCED` is documented as "audit hook armed AND an
+    OS-level control asserted", and nothing in this process can confirm the second
+    half. A `sandbox-exec` profile, a `pf` rule or a network namespace is asserted
+    by the operator outside this program; if it was not, the run had a tripwire and
+    the operator believed it had a boundary (TD-06).
+    """
+    from mva.privacy.netguard import is_armed
+
+    if config.network_profile is NetworkProfile.ONLINE:
+        return
+    state = "ARMED" if is_armed() else "[bold red]NOT ARMED[/bold red]"
+    console.print(f"  network guard        python-level audit hook: {state}")
+    if config.network_profile is NetworkProfile.OFFLINE_ENFORCED:
+        console.print(
+            "  [yellow]note[/yellow] offline_enforced also claims an OS-level control "
+            "(sandbox-exec / pf / netns). That half is asserted by the operator and is "
+            "NOT verified here. C extensions (pysam/htslib) and subprocesses bypass the "
+            "hook entirely — see docs/privacy-model.md and TD-06."
+        )
 
 
 def _fail(message: str) -> None:
@@ -225,6 +271,7 @@ def run_all(
         return
 
     console.print(f"[green]ok[/green] run {result.run_id} complete  (network: {profile})")
+    _report_network_guard(case)
     table = Table(show_header=True, title="artifacts")
     table.add_column("kind")
     table.add_column("path (workspace-relative)")

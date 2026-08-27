@@ -1,75 +1,86 @@
 # Next actions
 
-## Right now
+Updated 2026-08-28. The proband data is here; the pipeline is not yet wired to it.
 
-**First command to run:**
+## First command
+
 ```bash
-cd mva-research && just verify
+just verify
 ```
 
-If it passes, the repo is in a good state and the next step is below. If it
-fails, fix the failure before anything else — `just verify` is a blocking gate by
-design (ADR 0009).
+Blocking by design (ADR 0009). Fix a failure before anything else.
 
-## Immediate
+## The critical path to a submission
 
-Phases 1-5 are complete: the pipeline runs end to end, `just verify` is green,
-and both acceptance criteria are confirmed in the artifacts.
+In order. Nothing downstream is meaningful until (1) holds.
 
-The highest-value next step is **TD-02, known-answer validation** — see
-`docs/validation-plan.md` Level 3. Until it is done, the synthetic case proves
-the machinery and nothing about calibration, and no real-world sensitivity claim
-is supportable.
+1. **Gene assignment must reach `VariantRecord.consequences`.**
+   `gene_symbols` is a *derived* property reading `csq.gene_symbol`, and
+   `pairing._variants_by_gene` groups on it. With no annotator the pipeline emits
+   **zero candidate pairs** and scores zero. Two independent implementations are
+   in flight: `annotation/gene_intervals.py` (MANE interval join — the robust
+   fallback) and `annotation/snpeff_local.py` (full consequence prediction).
+   Either unblocks the path; both is better.
+2. **Wire the real adapters at the composition root.** They exist and are tested
+   but nothing binds them, so the pipeline still runs on synthetic tables. See
+   the integration backlog below.
+3. **Normalise indels against the reference FASTA** before any frequency or
+   clinical join. a substantial fraction of the proband's records are indel-bearing and a failed
+   join is indistinguishable from "novel and ultra-rare".
+4. **Run the real case, then read the run's warnings**, not just its output.
 
-## Phase 4 review: one brief not yet run
+## Integration backlog — owned by the orchestrator, not by any agent
 
-Four of the five reviewer briefs have been run and their findings integrated
-(genomic validity, pharmacology, privacy, reproducibility). **The architecture
-brief has not been run:**
+| # | Change | File | Blocked by |
+|---|---|---|---|
+| 1 | Bind ClinVar / gnomAD / SnpEff / MANE adapters into `AdapterSet` | `orchestrator.py`, `annotation/__init__.py` | adapter agents in flight |
+| 2 | Bind `HpoResourceSet` and pass `semantics=` to `score_all_genes`; thread the real `hpo_version` into `load_phenotype_profile` | `orchestrator.py` | HPO agent in flight |
+| 3 | Load `config.inputs.reference_fasta` and pass the lookup into `normalise_variants` | `orchestrator.py`, `config.py` | reference FASTA download; join agent in flight |
+| 4 | A resource-root setting for out-of-repo releases, with digests | `config.py`, `config/` | — |
+| 5 | `.gitignore` negations for real public-reference fixtures (ADR 0012) | `.gitignore` | fixture agents in flight |
+| 6 | Golden expectation locking the **emitted submission EPCRs** | `tests/golden/` | submission ordering settling — see ADR 0014 |
+| 7 | Maturity-ledger rows: split HPO (`real`) from `gene_phenotype.tsv` (`synthetic-substitute`); regrade `annotation` per adapter | `docs/maturity-ledger.md` | adapters landing |
+| 8 | ASSUMPTION-PHENOTYPE-03/04/05 (directional entailment; IC from corpus not depth; deliberate asymmetry) | `docs/scientific-assumptions.md` | — |
+| 9 | Decision record for the SYNTHMUL4 / SYNTHMET2 phenotype movement | `docs/decisions/` | HPO agent's final delta |
 
-```
-prompts/review-architecture.md
-```
+Item 6 is the one most likely to be skipped and most costly to skip — see the
+enforcement-gap section of ADR 0014.
 
-Run it the same way, and promote every accepted finding into a test or a lint —
-never leave one as prose. A finding that cannot be mechanically enforced has not
-really been fixed. The other four briefs are re-runnable and worth re-running
-after any significant change.
+## Open review findings not yet closed
 
-## Before connecting real data — the exact sequence
+From the Codex adversarial review (2026-08-28), routed to file owners:
 
-Do these in order. Steps 1–4 are privacy prerequisites; step 5 is a scientific
-prerequisite.
+- gnomAD: incomplete shards return `{}` instead of failing closed — **live while
+  the 184.8 GB download is in flight**.
+- gnomAD: backend exceptions disclose the queried patient coordinate (verified).
+- ClinVar: allele representation not canonicalised before joining (verified).
+- MANE: placeholder `impact` can be reported with `synthetic=False` (verified).
+- SnpEff: malformed subprocess output becomes silent absence (verified); install
+  is not content-pinned.
+- HPO: alias-vs-primary status conflicts resolve silently (verified); malformed
+  corpus rows are dropped without appearing in degradation stats.
 
-1. Create and mount the encrypted APFS sparse bundle
-   (`docs/privacy-model.md` has the commands). Exclude it from Time Machine and
-   Spotlight.
-2. `export MVA_WORKSPACE=/Volumes/MVACASE/case01` and
-   `export TMPDIR=/Volumes/MVACASE/tmp`.
-3. Write the real case config with `synthetic: false` and `network_profile:
-   offline_enforced`. Run under an OS-level network control as well as the Python
-   guard — the Python guard is a tripwire, not a boundary (TD-06).
-4. `just privacy-audit` — must pass clean.
-5. **Replace the synthetic annotation adapters with real, hash-pinned local
-   resources** (VEP or SnpEff, a gnomAD sites-only release, a ClinVar release
-   VCF). Until this is done the pipeline's consequence and frequency values are
-   fabricated and **no real-data claim is supportable** (TD-01).
-
-Then, and only then, run the real case.
+From the earlier architecture review, still open: C1 (three divergent `run_id`
+derivations; the Snakemake DAG fails end to end), M1, M3, M4, M5, M6, M8.
+**C1 matters before anyone reruns our submission** — reproducibility is a stated
+challenge requirement.
 
 ## Before submitting
 
-- Re-verify the Track 1 contract against the live Space. Ours is vendored in
-  `docs/references/track1-submission-contract.md` and was correct on 2026-08-27,
-  but the Space is mutable.
-- Confirm `proband_id` is exactly `PROBAND01` and every chromosome carries the
-  `chr` prefix — the scorer compares chrom strings raw, so a missing prefix scores
-  zero while looking correct.
-- Confirm ≤10 rows and every `epcr` in `(0, 1]`.
-- Get human domain-expert review (TD-09).
+- Re-verify the contract against the live Space. Ours is vendored and was
+  re-verified against the real `evaluation.py` on 2026-08-28.
+- `proband_id` exactly `PROBAND01`; every chromosome `chr`-prefixed. **The proband
+  VCF uses bare contigs** — the conversion is tested, but any new emission path
+  must be re-checked. A correct answer emitted as `15` scores exactly zero.
+- ≤10 rows, every `epcr` in `(0, 1]`, all distinct.
+- Fill all ten rows: rows below the answer cannot lower either metric.
+- Never split a candidate pair across two rows (100 → 50 rank points).
+- Human domain-expert review (TD-09).
 
 ## Deliberately not doing
 
 - Tuning weights against the live leaderboard (ASSUMPTION-SCORING-03).
-- Adding a graph database (ADR 0002) or an LLM to the runtime path (ADR 0003).
-- Relaxing the blocking gate for throughput (ADR 0009).
+- Fetching the 79 GB of FASTQs or realigning (`docs/resource-acquisition-assessment.md`).
+- gnomAD genomes (524 GB — impossible here) or dbSNP (no allele number, so
+  ADR 0010's guard is unimplementable against it).
+- A graph database (ADR 0002) or an LLM in the runtime path (ADR 0003).

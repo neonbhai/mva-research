@@ -1,134 +1,99 @@
 # Current status
 
-**Updated:** 2026-08-28 · **Phase:** 6 (handoff). Phases 1-5 complete.
+Updated 2026-08-28. Phase 7: real data connected.
 
 ## What exists
 
-A complete, provenance-first vertical slice running end to end on a synthetic
-case, with Phase 4 adversarial-review findings integrated.
+**The proband data is here.** Access to `SageBio/mva-hackathon-2026-data` was
+granted and the case files were fetched into the encrypted volume:
 
-- **Domain contracts** — `src/mva/models/`: variant, genome/coordinate, evidence,
-  candidate pair, phenotype, mechanism, drug, provenance. Frozen,
-  `extra="forbid"`, invariants enforced at construction rather than downstream.
-- **Stages** — ingestion (cyvcf2 + pure-Python backends, multiallelic splitting,
-  parsimony trimming, QC flagging), annotation adapters over hash-pinned local
-  tables, four-valued phenotype scoring, filter/pair/score/rank prioritisation,
-  mechanism library, drug triage with signed direction checking, DuckDB+Parquet
-  evidence store, reporting (Track 1 CSV, dossier, mechanism and Track 2 reports).
-- **Composition root** — `pipeline.py`, `orchestrator.py`, `cli.py`. Stages never
-  import each other; an AST lint enforces it.
-- **Workflow** — an 11-job Snakemake DAG whose rules are one `mva` subcommand
-  each. The same DAG runs without Snakemake via `mva run all`.
-- **Privacy** — 11-check scanner, redaction filter, netguard, export gate,
-  deny-by-default `.gitignore`, pre-commit hook.
-- **Documentation** — architecture, 11 ADRs, scientific assumptions, privacy
-  model, validation plan, maturity ledger, tech debt, golden principles, the
-  vendored Track 1 contract, 5 re-runnable reviewer briefs.
+| File | Size | sha256 (first 16) |
+|---|---|---|
+| `WGS_SPECIMEN_FLOWCELL.vcf.gz` | 305 MB | `REDACTED-HASH` |
+| `WGS_SPECIMEN_FLOWCELL.vcf.gz.tbi` | 2.2 MB | `REDACTED-HASH` |
+| `Challenge_Clinical_Phenotype_1.docx` | 17 KB | — |
+
+They live only in `/Volumes/MVACASE/raw`, mode 700. The 79 GB of FASTQs was
+deliberately not fetched (`docs/resource-acquisition-assessment.md`).
+
+`/Volumes/MVACASE` is an AES-256 APFS sparse bundle, Spotlight indexing off,
+`nobrowse`, key at `~/private/REDACTED-KEY-PATH` (mode 600). FileVault is on; no Time
+Machine destination is configured. The bundle exists for the **30-day deletion
+obligation** — on APFS only cryptographic erasure proves deletion.
+
+**Real reference data** at `~/Contri/bio-hackathon/mva-resources` (outside the
+repo; `knowledge/manifests/resources.yaml` is the committed record): ClinVar
+GRCh38 `2026-08-22` (185 MB), HPO `2026-06-23` (66 MB), gnomAD v4.1 constraint
+(92 MB), DDG2P, ClinGen, MANE v1.5, SnpEff GRCh38.115, gnomAD v4.1 exome sites
+(184.8 GB, downloading), GRCh38 reference FASTA (3.3 GB, downloading).
 
 ## What works
 
-Verified by running, not asserted:
-
-| Command | Result |
-|---|---|
-| `just verify` | **all gates passed** |
-| `uv run pytest -q` | **411 passed** |
-| `uv run ruff check src tests` | clean |
-| `uv run pyright src tests` (strict) | 0 errors |
-| `just demo` | 30 artifacts, every promised output produced |
-| `just demo-determinism` | **30 artifacts byte-identical** |
-| cross-process determinism | **identical under differing PYTHONHASHSEED and TZ** |
-| `just privacy-audit` | **11 checks pass, 0 fail-severity findings** |
-| `just workflow-check` | 11-job DAG resolves |
-
-**Both acceptance criteria confirmed in the artifacts, not just in tests:**
-
-1. The synthetic causal pair `chr15:40200000 C>T` + `chr15:40210500 G>A`
-   (SYNTHKIN1) is **row 1** of `track1_submission.csv` at epcr REDACTED-EPCR, produced
-   by general scoring with nothing special-cased.
-2. The wrong-direction agent `SYNTH-DRUG-B` is **rejected**, leading reason
-   `wrong_direction`, reversal condition recorded as "nothing short of the
-   mechanism itself being wrong".
-
-## What Phase 4 changed
-
-Four adversarial reviewers, each reproducing claims by running code. They found
-real defects, including one in a test written by the lead engineer.
-
-- **The central Track 2 claim was breakable.** Nothing validated that
-  `disease_direction`, `required_correction` and the target node's state agreed,
-  so a one-cell typo inverted the whole direction gate — the contraindicated
-  checkpoint inhibitor rendered as "direction AGREES". Now a model validator.
-- **A wrong-direction drug could be silently erased.** `model_copy` bypasses
-  pydantic validators; the renderer then matched such a hypothesis to no section
-  at all. Now re-validated, and the renderer raises on an unrendered hypothesis.
-- **The privacy content allowlist was an unconditional bypass.** A real VCF
-  committed under `knowledge/public/` or `tests/golden/` passed every check.
-- **Case-variant APFS paths defeated workspace containment.** Now compares
-  `(st_dev, st_ino)`.
-- **The Track 1 export gate discarded its own verdict.**
-- **The multiallelic allele-balance correction was being thrown away** by the two
-  stages that act on it, costing 0.178 composite on VCF formatting alone.
-- **The headline Track 2 golden test was a tautology** — it compared the
-  expectation file against itself and stayed green with the direction check
-  inverted. Now asserts on the pipeline result.
-- **`config/default.yaml` and both golden TSVs were unpinned**, so a weight edit
-  or a re-baseline passed `just verify` unnoticed. Now sha256-locked.
-
-One finding forced a deliberate behaviour change with a decision record:
-ADR 0011 makes an unassessed chromosomal-instability risk disqualifying, which
-re-baselined SYNTH-DRUG-E and required a new catalogue entry (SYNTH-DRUG-G) to
-preserve the "direction undetermined is not disagreement" lesson.
+- **ClinVar adapter, verified against the real release.** Correct significance,
+  star ratings and review status; **absent variants are omitted, not called
+  benign** (GP-14). 2,989 P/LP variants across the CIN gene panel.
+- **Real HPO semantics** — ontology DAG, IC from the actual annotation corpus
+  (not graph depth), Lin/Resnik/Jiang-Conrath, Köhler symmetric best-match.
+  Directional propagation: OBSERVED up, EXCLUDED down. Determinism proven across
+  three `PYTHONHASHSEED` values.
+- **Contig conversion, the highest-stakes detail in the project.** The proband
+  VCF uses **bare contigs**; the scorer compares chrom strings raw. Verified:
+  `15` → `chr15`, `MT` → `chrM`, decoys and scaffolds rejected. The renderer
+  forces UCSC and `validate_submission` re-checks the rendered bytes.
+- **EPCR ties eliminated** — ten strictly-decreasing values, minimum gap 0.0100,
+  order-preserving by construction. Causal pair still row 1 at REDACTED-EPCR.
+- **Pairing cap no longer truncates by coordinate** — it orders by plausibility
+  and reports when it fires (ADR 0013).
+- 756 tests passing.
 
 ## What is incomplete
 
-- **Annotation is a synthetic substitute.** Consequence and frequency values are
-  fabricated. This is the blocking prerequisite for any real-data claim (TD-01).
-- **No known-answer validation.** The synthetic case proves the machinery, not
-  the calibration. No real-world sensitivity claim is supportable (TD-02).
-- **No structural or copy-number variant calling** (TD-03); no repeat expansions
-  (TD-13); no mtDNA heteroplasmy (TD-14).
-- **Proband-only**: phase is UNKNOWN for every pair, capping the inheritance
-  component (TD-07).
-- **No human domain-expert review** (TD-09).
-- Full list with costs and triggers: `docs/tech-debt.md`.
+- **Composition-root wiring.** The real adapters (ClinVar, gnomAD, SnpEff, MANE
+  gene intervals) and HPO semantics exist but are **not yet bound in
+  `orchestrator.py`**. Until they are, the pipeline still runs on synthetic
+  tables. This is the single largest remaining gap.
+- **`generate_pairs` yields nothing without gene assignment.**
+  `VariantRecord.gene_symbols` is derived purely from `consequences`, so with no
+  annotator the pipeline emits **zero candidate pairs**. Two fixes in flight.
+- **Indel left-alignment.** a substantial fraction of scanned records are indel-bearing and no
+  reference FASTA is configured, so minimal representation is not reached. Indels
+  may silently fail to join gnomAD/ClinVar — which looks exactly like "rare".
+- **gnomAD constraint has no chrX/chrY** (verified byte-complete download). An
+  X-linked candidate gets no pLI/LOEUF, and absence must not read as unconstrained.
+- Exome-only frequencies for a WGS proband: exact per-ancestry AF is available
+  for well under 1% of the callset. A regulatory causal variant is out of reach.
+- TD-01 partially paid: clinical slot done, frequency and consequence in flight.
 
 ## Commands
 
 ```bash
-just bootstrap        # install toolchain, sync deps, install pre-commit hook
-just verify           # THE GATE: lint, typecheck, arch, tests, workflow,
-                      #   determinism, privacy audit
-just verify-fast      # inner loop; skips the two end-to-end runs
-just demo             # end-to-end synthetic run
-just demo-artifacts   # list what it produced
-just demo-audit       # show the run's privacy audit
-just demo-determinism # run twice, compare artifact hashes
-just privacy-audit    # standalone privacy scan
-just snakemake track1 # run the DAG to the Track 1 target
-just clean-demo
+just verify                       # the blocking gate
+just demo                         # synthetic end-to-end
+just privacy-audit                # standalone privacy scan
+uv run python tools/inspect/vcf_schema.py <vcf>   # schema metadata only, never records
 ```
 
-The demo workspace is `$TMPDIR/mva-research-demo` — outside the repo, because
-that is what a real run requires and the privacy audit fails an in-repo
-workspace.
+Real-case environment:
+```bash
+export MVA_WORKSPACE=/Volumes/MVACASE/case01
+export TMPDIR=/Volumes/MVACASE/tmp
+```
 
 ## Blockers
 
-None. No decision is waiting on the user.
+1. **Composition-root wiring** — nothing real reaches the pipeline until
+   `orchestrator.py` binds the new adapters. Blocked only on concurrent edits.
+2. **Gene assignment must land** or the submission is empty.
+3. **Reference FASTA download** must finish before indels can be normalised to
+   minimal representation.
 
-## Notes for the next session
+## Known-dangerous details
 
-Read this file and `docs/next-actions.md` first. The repo is the system of
-record; nothing important lives only in conversation history.
-
-Worth knowing when judging test coverage: **most of the serious defects were
-found by wiring stages together and by adversarial review, not by unit tests.**
-The unit suite was green while the direction gate was invertible, the export gate
-was inert, and a real VCF could be committed. Every one of those is now locked by
-a regression test — but the lesson is that a green suite is evidence about the
-tests, not about the system.
-
-The one design tension worth knowing: this repo is built to be maximally legible
-to an agent **except** for the patient-data path, which is deliberately illegible
-to one. If a debugging affordance seems missing, that is usually why — ADR 0008.
+- The proband VCF's reference is `..._no_chr.fasta` — **bare contigs**. The
+  scorer does no normalisation. Emitting `15` scores exactly 0.0 while looking
+  correct. Verified handled, but any new emission path must re-check.
+- `INFO/AF` in this VCF is GATK's **sample** allele frequency, not a population
+  frequency. Reading it as population AF would mark every het as common.
+- Single sample, so phase is UNKNOWN for every pair (TD-07 is binding, not
+  theoretical).
+- Multi-allelics are **not** split in the source (1.46%); normalisation must.

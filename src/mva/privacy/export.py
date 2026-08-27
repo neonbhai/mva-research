@@ -6,8 +6,9 @@ nothing passes it without satisfying **all** of:
 1. an explicit allowlist match — someone decided, in advance and in writing, that
    an artifact of this name is publishable;
 2. ``declared is Sensitivity.PUBLIC`` — the producing stage claims it;
-3. a fresh scan of the actual bytes finding no ``fail``-severity hit — the claim
-   is verified against the file as it exists right now;
+3. a fresh scan of the actual bytes finding no ``fail``-severity hit, under the
+   shared audit battery **plus** :data:`EXPORT_ONLY_RULES` — the claim is verified
+   against the file as it exists right now;
 4. no patient-data extension on either endpoint.
 
 The reason (2) and (3) are separate is the whole design. **Classification is a
@@ -35,7 +36,12 @@ from mva.errors import ExportBlockedError
 from mva.models.base import Sensitivity
 from mva.privacy.audit import scan_bytes
 from mva.privacy.classify import is_sensitive_extension
-from mva.privacy.patterns import MAX_SCAN_BYTES, read_capped
+from mva.privacy.patterns import (
+    MAX_SCAN_BYTES,
+    REDACTION_ONLY_RULES,
+    Rule,
+    read_capped,
+)
 
 #: Filenames permitted to leave the workspace. Deny by default: an artifact absent
 #: from this list is refused even if its classification says PUBLIC (GP-43).
@@ -51,6 +57,30 @@ PUBLIC_EXPORT_ALLOWLIST: tuple[str, ...] = (
     "drug_hypotheses.md",
     "rejection_record.md",
     "track2_report.md",
+)
+
+
+#: Rules applied at the export gate ON TOP OF the shared audit battery.
+#:
+#: ``variant_id`` — this project's own ``GRCh38:chr15:40200000:C:T`` rendering — is
+#: ``REDACTION_ONLY`` in :mod:`mva.privacy.patterns`, i.e. deliberately excluded
+#: from ``RULES``. That exclusion is correct for the repository audit: the public
+#: knowledge tables (``knowledge/public/frequencies.tsv``,
+#: ``knowledge/public/consequences.tsv``) and ``tests/golden/expected_ranking.tsv``
+#: are full of build-qualified coordinates by design, and an audit that failed on
+#: them would be switched off inside a day.
+#:
+#: The reasoning does not transfer here. A file about to leave the workspace has no
+#: legitimate reason to carry a coordinate in this project's canonical rendering,
+#: and the Track 1 submission is not an exception to that: it writes
+#: chrom/pos/ref/alt as four separate CSV columns, never as ``build:chrom:pos:...``.
+#:
+#: Without this the second half of "gated twice" was decorative. When
+#: ``track2_report.md`` was rendering ``- Variants: GRCh38:chr15:40200000:C:T, ...``
+#: into a PUBLIC artifact, running the gate over it returned ``allowed=True``: no
+#: rule in ``RULES`` matches a colon-delimited variant id.
+EXPORT_ONLY_RULES: tuple[Rule, ...] = tuple(
+    rule for rule in REDACTION_ONLY_RULES if rule.rule_id == "variant_id"
 )
 
 
@@ -106,9 +136,11 @@ def gate_public_export(
             reasons.append(f"readability: could not read the artifact ({type(exc).__name__})")
         else:
             findings = scan_bytes(data, check="export_scan", path_label=path.name)
-            failing = tuple(
-                sorted({f.rule_id for f in findings if f.severity == "fail" and f.rule_id})
-            )
+            matched = {f.rule_id for f in findings if f.severity == "fail" and f.rule_id}
+            matched |= {
+                rule.rule_id for rule in EXPORT_ONLY_RULES if rule.pattern.search(data) is not None
+            }
+            failing = tuple(sorted(matched))
             scanned_rules = failing
             if failing:
                 reasons.append(

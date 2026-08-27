@@ -203,7 +203,17 @@ class ConsequenceAnnotation(FrozenModel):
     consequence_terms: tuple[str, ...] = Field(
         description="Sequence Ontology terms, most severe first."
     )
-    impact: ImpactSeverity
+    impact: ImpactSeverity | None = Field(
+        default=None,
+        description=(
+            "Predicted severity class, or None for NOT ASSESSED — the source located "
+            "the gene but computed no molecular consequence. None is emphatically not "
+            "MODIFIER: MODIFIER is a positive prediction of negligible effect, and "
+            "prioritization.filters.BENIGN_IMPACTS treats it as one. Collapsing "
+            "'nobody predicted' into 'predicted harmless' is the GP-14 failure this "
+            "field exists to keep representable."
+        ),
+    )
     hgvs_c: str | None = None
     hgvs_p: str | None = None
     exon: str | None = None
@@ -360,7 +370,9 @@ class VariantRecord(FrozenModel):
             ImpactSeverity.LOW: 2,
             ImpactSeverity.MODIFIER: 3,
         }
-        impacts = [c.impact for c in self.consequences_for_gene(gene)]
+        # Unassessed transcripts drop out rather than counting as least-severe:
+        # a gene-assignment-only annotation must not dilute a real prediction.
+        impacts = [c.impact for c in self.consequences_for_gene(gene) if c.impact is not None]
         return min(impacts, key=lambda i: order[i]) if impacts else None
 
     def select_max_allele_frequency(self, *, min_allele_number: int = 0) -> FrequencySelection:

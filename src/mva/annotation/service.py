@@ -204,7 +204,16 @@ def annotate_variants(
         coverage=_coverage(
             variant_ids,
             descriptors=descriptors,
-            indexes=(consequence_index, frequency_index, clinical_index),
+            # Must track AdapterSet.descriptors(), which omits the clinical slot when
+            # no clinical adapter is bound. Passing three indexes against two
+            # descriptors made zip(strict=True) raise, so an unbound clinical slot
+            # crashed the stage. strict=True is right and caught it; the call site
+            # was wrong.
+            indexes=(
+                (consequence_index, frequency_index, clinical_index)
+                if adapters.clinical is not None
+                else (consequence_index, frequency_index)
+            ),
         ),
         warnings=_warnings(
             records,
@@ -239,7 +248,7 @@ def _consequence_evidence(
     claim = (
         f"{variant_id} is predicted to cause {annotation.most_severe_term} in "
         f"{annotation.gene_symbol} on transcript {annotation.transcript_id} "
-        f"(predicted impact: {annotation.impact.value})."
+        f"(predicted impact: {_impact_text(annotation.impact)})."
     )
     payload: dict[str, str | int | float | bool | None] = {
         "gene_symbol": annotation.gene_symbol,
@@ -248,7 +257,7 @@ def _consequence_evidence(
         "is_canonical": annotation.is_canonical,
         "is_mane_select": annotation.is_mane_select,
         "consequence_terms": ",".join(annotation.consequence_terms),
-        "impact": annotation.impact.value,
+        "impact": _impact_text(annotation.impact),
         "hgvs_c": annotation.hgvs_c,
         "hgvs_p": annotation.hgvs_p,
         "splice_ai_delta_max": annotation.splice_ai_delta_max,
@@ -264,10 +273,14 @@ def _consequence_evidence(
         # with OBSERVED_DATA is rejected by EvidenceItem itself.
         direction=(
             EvidenceDirection.SUPPORTS
-            if annotation.impact in _SUPPORTING_IMPACTS
+            if annotation.impact is not None and annotation.impact in _SUPPORTING_IMPACTS
             else EvidenceDirection.NEUTRAL
         ),
-        strength=_IMPACT_STRENGTH[annotation.impact],
+        strength=(
+            EvidenceStrength.INSUFFICIENT
+            if annotation.impact is None
+            else _IMPACT_STRENGTH[annotation.impact]
+        ),
         evidence_type=EvidenceType.IN_SILICO_PREDICTION,
         tier=AssertionTier.COMPUTATIONAL_PREDICTION,
         citation=Citation(
@@ -512,6 +525,17 @@ def _unique_ids(variant_ids: Iterable[str]) -> tuple[str, ...]:
     for variant_id in variant_ids:
         seen.setdefault(variant_id, None)
     return tuple(seen)
+
+
+def _impact_text(impact: ImpactSeverity | None) -> str:
+    """Render an impact for human-facing evidence text.
+
+    ``None`` means the source located the gene but predicted no consequence. It
+    renders as "not assessed" rather than as a severity, so a reader can never
+    mistake a gene-assignment-only annotation for a prediction of harmlessness
+    (GP-14).
+    """
+    return "not assessed" if impact is None else impact.value
 
 
 def _coverage(

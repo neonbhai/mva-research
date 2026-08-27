@@ -145,6 +145,38 @@ A term absent from the record is `NOT_ASSESSED`, never `EXCLUDED`.
 from the source document. It is not the clinician's confidence in the finding.
 The two are not multiplied.
 
+### ASSUMPTION-PHENOTYPE-03 — Entailment is directional
+`OBSERVED` propagates **up** the ontology: observing a child term entails every
+ancestor. `EXCLUDED` propagates **down**: excluding a parent excludes its
+descendants. `UNCERTAIN` and `NOT_ASSESSED` propagate in neither direction.
+
+The two directions are opposite and are not interchangeable. Propagating
+`OBSERVED` downward would credit a gene for features nobody observed; propagating
+`EXCLUDED` upward would exclude an entire organ system on the strength of one
+absent sign. A record that entails a term both present and absent is **reported
+as a conflict, never resolved by rule** — including when the two arrive under an
+`alt_id` and its primary, which resolve to the same term.
+
+### ASSUMPTION-PHENOTYPE-04 — Specificity comes from a corpus, not from depth
+Information content is `IC(t) = -ln(n(t)/N)` over the real HPO annotation corpus
+under the true-path rule, where `n(t)` counts diseases reaching `t` or any
+descendant. It is **not** derived from graph depth, which is a known
+methodological error: depth measures how finely an area of the ontology has been
+subdivided, not how rare a finding is.
+
+Two honest limitations. IC tracks **curation effort** as well as true rarity, so
+a well-studied phenotype looks less specific than an equally rare neglected one.
+And IC is **undefined — not zero** — for a term the corpus never reaches; such
+terms are excluded from the mean and counted, never scored as uninformative.
+
+### ASSUMPTION-PHENOTYPE-05 — The scored similarity is asymmetric on purpose
+The scored coverage component is Köhler et al.'s `sim(Q→D)`: patient terms
+matched against the gene's. The reverse direction is computed and reported in the
+evidence payload but **is not scored on**, because averaging over a gene's
+curated terms penalises well-studied genes for features nobody assessed in this
+patient — which is GP-14 inverted. Both numbers are visible so a reader can audit
+the choice.
+
 ---
 
 ## Mechanism

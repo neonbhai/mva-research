@@ -26,11 +26,17 @@ from mva.prioritization.filters import (
     select_candidate_variants,
 )
 from mva.prioritization.pairing import (
+    DEFAULT_MAX_PAIRING_VARIANTS,
+    DEFAULT_MAX_PAIRS_PER_GENE,
+    FLAG_CAP_TRUNCATED,
     FLAG_PHASE_CIS,
     FLAG_PHASE_TRANS,
     FLAG_PHASE_UNKNOWN,
     FLAG_SINGLE_VARIANT,
+    GeneCapEvent,
     PairCandidate,
+    PairingResult,
+    generate_pair_candidates,
     generate_pairs,
     infer_phase,
 )
@@ -55,7 +61,10 @@ from mva.prioritization.scoring import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_PAIRING_VARIANTS",
+    "DEFAULT_MAX_PAIRS_PER_GENE",
     "FLAG_BENIGN_CONSEQUENCE",
+    "FLAG_CAP_TRUNCATED",
     "FLAG_COMMON_VARIANT",
     "FLAG_HOMOZYGOUS_CALL",
     "FLAG_LOW_FREQUENCY_VARIANT",
@@ -72,7 +81,9 @@ __all__ = [
     "NEUTRAL_PHENOTYPE_SCORE",
     "Contradiction",
     "FilterResult",
+    "GeneCapEvent",
     "PairCandidate",
+    "PairingResult",
     "ScoredPair",
     "apply_hard_filters",
     "apply_soft_flags",
@@ -80,6 +91,7 @@ __all__ = [
     "collect_contradictions",
     "composite_score",
     "contradiction_penalty",
+    "generate_pair_candidates",
     "generate_pairs",
     "infer_phase",
     "rank_pairs",

@@ -137,3 +137,83 @@ def test_no_module_interpolates_a_genotype_string_into_a_message() -> None:
         + "\n".join(offenders)
         + REMEDIATION
     )
+
+
+def test_gnomad_query_failure_redacts_region() -> None:
+    """A gnomAD backend failure must not put the queried coordinate in the traceback.
+
+    Found by adversarial review and reproduced before it was fixed: cyvcf2 puts
+    the region string into whatever it raises, and the adapter let that propagate
+    unwrapped. The result was a bare ``RuntimeError: chr21:5031905-5031905`` — a
+    proband coordinate reaching the terminal, the log file, a crash report and an
+    agent's context through the *error* path, which no amount of care on the
+    success path prevents.
+
+    The whole traceback is rendered, not just ``str(exc)``: chaining with
+    ``raise ... from exc`` would keep the original message and frame visible even
+    though the new message is clean, so the fix has to suppress the context and
+    this test has to look at what a reader would actually see.
+    """
+    import traceback
+    from collections.abc import Iterator
+
+    import mva.annotation.gnomad_sites as gnomad
+    from mva.errors import AdapterUnavailableError
+
+    fixture = (
+        REPO / "tests" / "fixtures" / "gnomad" / "gnomad.exomes.v4.1.sites.chr21.slice.vcf.bgz"
+    )
+    if not fixture.is_file():  # pragma: no cover - fixture is committed
+        pytest.skip(f"gnomAD fixture not present at {fixture}")
+
+    real_open = gnomad._open_reader
+
+    class _Exploding:
+        """A reader that raises the region it was handed, as cyvcf2 does."""
+
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        @property
+        def raw_header(self) -> str:
+            return str(getattr(self._inner, "raw_header", ""))
+
+        def __call__(self, region: str) -> Iterator[object]:
+            raise RuntimeError(region)
+
+        def close(self) -> None:
+            close = getattr(self._inner, "close", None)
+            if callable(close):
+                close()
+
+    # Built rather than written as a literal. A traceback prints each frame's
+    # SOURCE LINE, so a hard-coded coordinate in this test's own call would show up
+    # in the rendering and fail the assertion for a reason that has nothing to do
+    # with the adapter. Real callers pass a variable, which is what this mimics.
+    queried = ":".join(["GRCh38", "chr" + "21", str(5_031_905), "C", "A"])
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+
+        def exploding_open(path: Path) -> _Exploding:
+            return _Exploding(real_open(path))
+
+        monkeypatch.setattr(gnomad, "_open_reader", exploding_open)
+        adapter = gnomad.GnomadSitesFrequencyAdapter(fixture, release="v4.1", subset="exomes")
+        try:
+            with pytest.raises(AdapterUnavailableError) as excinfo:
+                adapter.frequencies([queried])
+        finally:
+            adapter.close()
+    finally:
+        monkeypatch.undo()
+
+    rendered = "".join(
+        traceback.format_exception(type(excinfo.value), excinfo.value, excinfo.value.__traceback__)
+    )
+    assert "5031905" not in rendered, "the queried position reached the traceback" + REMEDIATION
+    assert "chr21" not in rendered, "the queried contig reached the traceback" + REMEDIATION
+    assert "AdapterUnavailableError" in rendered
+    assert re.search(r"<region:[0-9a-f]{8}>", rendered), (
+        "the sanitized message must still carry a correlation handle" + REMEDIATION
+    )

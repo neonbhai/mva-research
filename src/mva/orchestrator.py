@@ -17,7 +17,7 @@ from pathlib import Path
 
 from mva.annotation.local_tables import load_default_adapters
 from mva.annotation.service import annotate_variants
-from mva.config import CaseConfig, Workspace
+from mva.config import CaseConfig, NetworkProfile, Workspace
 from mva.determinism import canonical_json
 from mva.errors import ConfigError, ExportBlockedError
 from mva.evidence.ledger import AssertionResolver, EvidenceLedger
@@ -47,11 +47,13 @@ from mva.pipeline import (
     write_provenance_manifest,
 )
 from mva.prioritization.filters import apply_hard_filters, apply_soft_flags
-from mva.prioritization.pairing import generate_pairs
+from mva.prioritization.pairing import generate_pair_candidates
 from mva.prioritization.ranking import assign_discriminating_experiments, rank_pairs
 from mva.prioritization.scoring import score_pair
 from mva.privacy.audit import run_audit
+from mva.privacy.export import PUBLIC_EXPORT_ALLOWLIST as _PUBLIC_EXPORT_ALLOWLIST
 from mva.privacy.export import gate_public_export
+from mva.privacy.netguard import OfflineProfile
 from mva.reporting.dossier import build_candidate_dossier
 from mva.reporting.track1 import (
     build_submission_rows,
@@ -110,22 +112,29 @@ class PipelineResult:
         return None
 
 
-#: Filenames permitted to leave the workspace. Deny by default: an artifact absent
-#: from this list is refused even if its classification says PUBLIC (GP-43).
-PUBLIC_EXPORT_ALLOWLIST: tuple[str, ...] = (
-    "track1_submission.csv",
-    "mechanism_report.md",
-    "drug_hypotheses.md",
-    "rejection_record.md",
-    "track2_report.md",
-)
+#: Re-exported, not redeclared. This module previously carried its own byte-equal
+#: copy of the list in `mva.privacy.export`, which is the arrangement that lets the
+#: two drift silently — and the policy is supposed to have exactly one home (see
+#: that module's docstring). The name stays importable from here because the
+#: composition root is where a reader looks for what this run may publish.
+PUBLIC_EXPORT_ALLOWLIST: tuple[str, ...] = _PUBLIC_EXPORT_ALLOWLIST
 
 
 def _gate_public_artifact(context: RunContext, artifact: ArtifactProvenance) -> None:
     """Run the public-export gate over an artifact classified PUBLIC.
 
-    The submission is the one artifact that necessarily leaves the workspace, so
-    it is the one that must not be trusted on its classification alone.
+    Wired to `RunContext.on_register`, so it runs on EVERY artifact the run
+    produces, at the moment it is produced. It previously ran on the submission
+    and on nothing else, while `MECHANISM_REPORT`, `DRUG_HYPOTHESES`,
+    `REJECTION_RECORD` and `TRACK2_REPORT` were all classified PUBLIC and all on
+    the export allowlist — so four of the five artifacts a reader would actually
+    publish were gated zero times, and `docs/architecture.md`'s "gated twice"
+    described the submission alone.
+
+    Non-PUBLIC artifacts no-op here, which is what makes gating everything cheap
+    enough to do unconditionally: the scan cost is paid only by the files the
+    classification already claims are publishable.
+
     Classification is a claim; the allowlist match and the content re-scan are the
     verification (GP-43). A refusal raises: an invalid public artifact sitting on
     disk is one someone will find and upload.
@@ -153,14 +162,54 @@ def _should_run(stage: str, stop_after: str | None) -> bool:
     return STAGES.index(stage) <= STAGES.index(stop_after)
 
 
-def execute_pipeline(  # noqa: PLR0915 - the composition root is legitimately long
+def execute_pipeline(
     config: CaseConfig,
     workspace: Workspace,
     *,
     allow_workspace_in_repo: bool = False,
     stop_after: str | None = None,
 ) -> PipelineResult:
-    """Run the pipeline and write every artifact."""
+    """Run the pipeline and write every artifact, with the offline guard ARMED.
+
+    The arming lives here and not only in `mva.cli` because `execute_pipeline` is
+    what actually reads the VCF. Every other entry point — Snakemake, a test, a
+    notebook, a future service — reaches patient data through this function, and a
+    guard that only the CLI installs is a guard the next entry point does not have.
+    `mva.cli._install_privacy_guards` still arms for the whole process; the two
+    nest, which `OfflineProfile` is explicitly built for.
+
+    `strict=False` is deliberate and not a weakening: the run shells out to `git`
+    for the provenance manifest and the privacy audit, and `strict` blocks
+    `subprocess.Popen`. Strict mode would make every run fail at the manifest step,
+    which is how a control gets switched off. What is denied here is Python-level
+    outbound network — the realistic accident of a stage calling `requests.get`.
+    The honest limits (C extensions, spawned subprocesses, `ctypes`) are in
+    `mva.privacy.netguard`, and closing them needs an OS control (TD-06).
+    """
+    if config.network_profile is NetworkProfile.ONLINE:
+        return _execute_stages(
+            config,
+            workspace,
+            allow_workspace_in_repo=allow_workspace_in_repo,
+            stop_after=stop_after,
+        )
+    with OfflineProfile(workspace_root=workspace.root):
+        return _execute_stages(
+            config,
+            workspace,
+            allow_workspace_in_repo=allow_workspace_in_repo,
+            stop_after=stop_after,
+        )
+
+
+def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately long
+    config: CaseConfig,
+    workspace: Workspace,
+    *,
+    allow_workspace_in_repo: bool = False,
+    stop_after: str | None = None,
+) -> PipelineResult:
+    """The stage graph itself. Call `execute_pipeline`, which arms the guard first."""
     repo_root = workspace.repo_root
     knowledge_root = repo_root / KNOWLEDGE_ROOT_NAME
 
@@ -177,6 +226,9 @@ def execute_pipeline(  # noqa: PLR0915 - the composition root is legitimately lo
         allow_workspace_in_repo=allow_workspace_in_repo,
         reference_versions=reference_versions,
     )
+    # Wired BEFORE the first artifact is written, so there is no window in which an
+    # artifact is registered ungated. See `_gate_public_artifact`.
+    context.on_register = _gate_public_artifact
     ledger = EvidenceLedger(run_id=context.run_id)
 
     # ---------------------------------------------------------------- ingest
@@ -246,7 +298,16 @@ def execute_pipeline(  # noqa: PLR0915 - the composition root is legitimately lo
     flagged = apply_soft_flags(
         filtered.retained, frequency=config.frequency, quality=config.quality
     )
-    candidates = generate_pairs(flagged, max_pairs_per_gene=config.max_pairs_per_gene)
+    # ADR 0013: bound the hypothesis space by plausibility, never by coordinate, and
+    # surface it when a cap fires. A cap that silently deletes the correct pair is the
+    # worst failure this pipeline can have, so the warning is part of the contract.
+    pairing = generate_pair_candidates(
+        flagged,
+        max_pairs_per_gene=config.max_pairs_per_gene,
+        frequency=config.frequency,
+    )
+    candidates = pairing.candidates
+    context.warnings.extend(pairing.warnings)
 
     gene_symbols = sorted({c.gene_symbol for c in candidates})
     phenotype_matches = score_all_genes(
@@ -309,7 +370,7 @@ def execute_pipeline(  # noqa: PLR0915 - the composition root is legitimately lo
         )
         raise ExportBlockedError(msg)
 
-    submission_art = context.write_text_artifact(
+    context.write_text_artifact(
         "submission/track1_submission.csv",
         submission_text,
         kind=ArtifactKind.SUBMISSION,
@@ -317,7 +378,8 @@ def execute_pipeline(  # noqa: PLR0915 - the composition root is legitimately lo
         upstream=[pairs_art.artifact_id],
         row_count=len(rows),
     )
-    _gate_public_artifact(context, submission_art)
+    # No explicit gate call here any more: `context.on_register` ran it as
+    # `submission_art` was registered, along with every other artifact.
     resolver = AssertionResolver(ledger)
     context.write_text_artifact(
         "reports/candidate_dossier.md",

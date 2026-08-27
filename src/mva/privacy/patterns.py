@@ -20,7 +20,9 @@ The one concession is :func:`correlation_id`, which lets a caller count *distinc
 matches (e.g. "three different HPO terms") without ever holding onto them. It is
 keyed by a per-process random salt that is never persisted, because a plain
 truncated hash of a low-entropy value — a seven-digit HPO term, a short MRN — is
-brute-forceable in milliseconds.
+brute-forceable in milliseconds. That salt is also why the value must stay in
+memory: rendering it into a file makes the file a random function of a secret, and
+every artifact here is inside the GP-30 byte-identity claim.
 
 False positives are a design input, not an afterthought
 -------------------------------------------------------
@@ -60,16 +62,29 @@ _RUN_SALT: Final[bytes] = secrets.token_bytes(16)
 
 
 def correlation_id(matched: bytes) -> str:
-    """A within-run-stable, non-invertible tag for a matched byte string.
+    """A within-PROCESS-stable, non-invertible tag for a matched byte string.
+
+    **In-memory only. Never render this into an artifact.** The key is
+    ``secrets.token_bytes(16)`` regenerated at import, so the tag is a random
+    function of a secret from one process to the next. Anything that reaches a
+    file inherits that randomness, and a file that changes between two identical
+    runs is a GP-30 violation.
+
+    That is not hypothetical: ``mva.privacy.audit.redact_path`` used this to label
+    redacted path components, ``privacy/privacy_audit.md`` is a registered artifact
+    inside the byte-identity claim and is not in ``verify_determinism``'s skip set,
+    and the two disagreed across processes. The report now labels by first
+    appearance (``mva.privacy.audit.PathRedactor``), which is deterministic AND
+    less invertible than this.
 
     Use this — and only this — when you need to know whether two matches were the
     *same* value (counting distinct HPO terms, deduplicating findings) without
-    retaining the value.
+    retaining the value, and the answer lives only in a local variable.
 
     A bare ``sha256(value)[:8]`` would be useless here: HPO terms, MRNs and
     genomic positions all live in tiny keyspaces, so an unsalted digest is a
     lookup table away from plaintext. The HMAC key is per-process and unpersisted,
-    which makes the tag meaningless outside the run that produced it.
+    which makes the tag meaningless outside the process that produced it.
     """
     return hmac.new(_RUN_SALT, matched, "sha256").hexdigest()[:8]
 

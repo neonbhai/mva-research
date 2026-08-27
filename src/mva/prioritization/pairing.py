@@ -10,16 +10,27 @@ near-disqualifying and therefore the one direction where being wrong is safe.
 Scope note: candidates are gene-scoped, so a variant with no gene annotation
 forms no candidate. That is a limitation of a gene-based hypothesis space, not a
 filter — such records remain in the flagged variant set the caller holds.
+
+Bounds note: pair enumeration is quadratic, so the hypothesis space is bounded
+twice — ``max_pairing_variants`` on the input and ``max_pairs_per_gene`` on the
+output. Both order by *plausibility*, never by genomic coordinate, and both
+report themselves through :class:`PairingResult`. A bound that silently deletes
+a hypothesis is indistinguishable from a complete search, which is the worst
+failure this module can have: the deleted candidate is invisible and therefore
+unfalsifiable (GP-13). Callers that will act on the result should use
+:func:`generate_pair_candidates` and surface :attr:`PairingResult.warnings`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 
+from mva.config import FrequencyThresholds
 from mva.models.pair import InheritanceModel, PhaseEvidence, PhaseStatus, make_pair_id
 from mva.models.variant import FLAG_POSSIBLE_MOSAIC, ImpactSeverity, VariantRecord, Zygosity
+from mva.prioritization.filters import FLAG_LOW_QUALITY_CALL, select_candidate_variants
 
 #: The mitochondrial contig. Its copy number is per-cell heteroplasmy, not two
 #: gene copies, so nuclear zygosity language does not apply to it at all.
@@ -89,6 +100,31 @@ PROMOTED_VARIANT_FLAGS: tuple[str, ...] = (
 #: Sorts before any real coordinate, so single-variant candidates order ahead of
 #: two-variant candidates that share the same first variant.
 _NO_SECOND_VARIANT: tuple[int, int, str, str] = (-1, -1, "", "")
+
+#: Backstop on the number of candidate hypotheses one gene may carry forward.
+DEFAULT_MAX_PAIRS_PER_GENE = 20
+
+#: Bound on how many of a gene's variants enter PAIR enumeration.
+#:
+#: Pair enumeration is quadratic: a gene with 200 alt-carrying calls yields 19,900
+#: hypotheses, essentially all of which a cap of 20 discards. Bounding the input
+#: is what makes the cap a backstop rather than the thing that decides the
+#: hypothesis space. ``C(24, 2) = 276`` is an order of magnitude above the default
+#: cap, so on any realistic gene the cap, not this bound, is what selects — the
+#: bound only stops a pathological gene from generating work nobody will read.
+DEFAULT_MAX_PAIRING_VARIANTS = 24
+
+#: Impact severity as an ordinal, most severe first.
+_IMPACT_ORDER: dict[ImpactSeverity, int] = {
+    ImpactSeverity.HIGH: 0,
+    ImpactSeverity.MODERATE: 1,
+    ImpactSeverity.LOW: 2,
+    ImpactSeverity.MODIFIER: 3,
+}
+
+#: Where a variant with no impact prediction for the gene sorts. With LOW, not
+#: last: absence of an annotation is not evidence of benignity (GP-14).
+_IMPACT_ORDER_UNKNOWN = _IMPACT_ORDER[ImpactSeverity.LOW]
 
 
 @dataclass(frozen=True)
@@ -387,46 +423,262 @@ def _variants_by_gene(
     return grouped
 
 
-def generate_pairs(
-    variants: Sequence[VariantRecord], *, max_pairs_per_gene: int = 20
-) -> tuple[PairCandidate, ...]:
+def _plausibility_order(
+    gene: str, variant: VariantRecord, plausible_ids: frozenset[str] | None
+) -> tuple[int, int, int]:
+    """How plausible this variant is as part of a severe recessive hypothesis.
+
+    Three ordinal bands, most decisive first. They mirror the scoring model's own
+    priorities rather than inventing new ones, and none of them is a threshold
+    this module owns:
+
+    1. **Recessive-plausible allele frequency.** Membership of
+       :func:`~mva.prioritization.filters.select_candidate_variants`, which is the
+       ADR 0010 criterion — maximum AF across adequately powered populations, at
+       or below ``max_plausible_recessive``. A variant with no adequately powered
+       observation stays in band 0: absence of frequency data is not evidence of
+       commonness any more than it is evidence of rarity (GP-14). ``None`` means
+       no thresholds were supplied, so this module has no frequency opinion and
+       every variant sits in band 0.
+    2. **Call quality.** ``low_quality_call`` last. Analytical validity carries
+       the largest weight in the scoring model for the same reason: a call that is
+       not real cannot be causal, whatever its biology.
+    3. **Predicted impact for this gene**, most severe first. An absent
+       prediction sorts with LOW rather than last — no annotation is not evidence
+       of benignity (GP-14) — and cannot arise for a gene-scoped candidate anyway,
+       since the gene came from the variant's own consequences.
+
+    This is an ORDERING, never a filter. Nothing is removed on the strength of it;
+    it decides only which hypotheses a cap keeps when a cap has to fire at all.
+    """
+    plausible = 0 if plausible_ids is None or variant.variant_id in plausible_ids else 1
+    quality = 1 if FLAG_LOW_QUALITY_CALL in variant.qc_flags else 0
+    predicted = variant.worst_impact_for_gene(gene)
+    impact = _IMPACT_ORDER_UNKNOWN if predicted is None else _IMPACT_ORDER[predicted]
+    return (plausible, quality, impact)
+
+
+def _candidate_plausibility_key(
+    candidate: PairCandidate, plausible_ids: frozenset[str] | None
+) -> tuple[
+    tuple[int, int, int], tuple[str, tuple[int, int, str, str], tuple[int, int, str, str], str]
+]:
+    """Cap-ordering key for a candidate: its WEAKEST member, then its total order.
+
+    Weakest, not best: a biallelic hypothesis is only as strong as the less
+    plausible of its two alleles, so a pair carrying one common low-impact call is
+    ranked behind a pair of two rare HIGH-impact ones. ``sort_key()`` is appended
+    to keep the order total and reproducible (GP-30) — it is a tiebreak of last
+    resort here, not the primary criterion it used to be.
+    """
+    weakest = max(
+        _plausibility_order(candidate.gene_symbol, variant, plausible_ids)
+        for variant in candidate.variants
+    )
+    return (weakest, candidate.sort_key())
+
+
+@dataclass(frozen=True)
+class GeneCapEvent:
+    """One gene whose hypothesis list was shortened, with the arithmetic."""
+
+    gene_symbol: str
+    #: Variants in this gene that carried an alternate allele.
+    variants: int
+    #: Variants admitted to pair enumeration (the input bound).
+    variants_paired: int
+    #: Candidates the gene would have produced from the admitted variants.
+    generated: int
+    #: Candidates carried forward after ``max_pairs_per_gene``.
+    kept: int
+
+    @property
+    def dropped(self) -> int:
+        return self.generated - self.kept
+
+
+@dataclass(frozen=True)
+class PairingResult:
+    """Candidates, plus an explicit record of anything a cap removed.
+
+    ``generate_pairs`` returns only :attr:`candidates`, which is why the cap was
+    invisible: the flag reached the candidate records but the *fact that a cap
+    fired at all* reached nothing that a run report could print. A cap that
+    silently deletes the answer is the worst failure mode in this pipeline, so it
+    is reported as a first-class result, not inferred from a flag.
+    """
+
+    candidates: tuple[PairCandidate, ...]
+    cap_events: tuple[GeneCapEvent, ...] = ()
+
+    @property
+    def truncated(self) -> bool:
+        return bool(self.cap_events)
+
+    @property
+    def truncated_genes(self) -> tuple[str, ...]:
+        return tuple(event.gene_symbol for event in self.cap_events)
+
+    @property
+    def dropped_candidates(self) -> int:
+        return sum(event.dropped for event in self.cap_events)
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """Human-visible warning for the run report, or empty when nothing capped.
+
+        Gene symbols and counts only — no coordinates, no variant identifiers
+        (GP-41). Gene symbols already appear in the public Track 1 submission's
+        ``notes`` column, so naming them here discloses nothing new and is what
+        makes the warning actionable.
+        """
+        if not self.cap_events:
+            return ()
+        genes = ", ".join(sorted(self.truncated_genes))
+        return (
+            f"{FLAG_CAP_TRUNCATED}: {len(self.cap_events)} gene(s) ({genes}) produced more "
+            f"candidate hypotheses than the per-gene cap allows; {self.dropped_candidates} "
+            "hypothesis/hypotheses were not carried forward and therefore cannot be "
+            "ranked, submitted or scored. Truncation keeps the most plausible candidates "
+            "(recessive-plausible allele frequency, then call quality, then predicted "
+            "impact), never the leftmost by coordinate — but a deleted hypothesis is "
+            "invisible and unfalsifiable. Raise max_pairs_per_gene, or treat this run's "
+            "candidate list as incomplete for these genes.",
+        )
+
+
+def generate_pair_candidates(
+    variants: Sequence[VariantRecord],
+    *,
+    max_pairs_per_gene: int = DEFAULT_MAX_PAIRS_PER_GENE,
+    max_pairing_variants: int = DEFAULT_MAX_PAIRING_VARIANTS,
+    frequency: FrequencyThresholds | None = None,
+) -> PairingResult:
     """Enumerate every gene-scoped candidate hypothesis, deterministically.
 
-    Within each gene: all unordered pairs of alt-carrying variants, plus a
-    single-variant candidate for each homozygous/hemizygous call and each
-    HIGH-impact heterozygote. Candidates are ordered by genomic position and
-    truncated at ``max_pairs_per_gene``; when truncation happens every surviving
-    candidate for that gene carries ``gene_pair_cap_truncated``, because a
-    silently shortened hypothesis list is indistinguishable from a complete one.
+    Within each gene: all unordered pairs of alt-carrying variants admitted to
+    pair enumeration, plus a single-variant candidate for each
+    homozygous/hemizygous call, each mitochondrial or possibly-mosaic call, and
+    each HIGH-impact heterozygote.
+
+    **Two bounds, both by plausibility and both reported.**
+
+    ``max_pairing_variants`` bounds the pairing *input*: pair enumeration is
+    quadratic, so a gene carrying hundreds of calls would otherwise generate tens
+    of thousands of hypotheses for a cap to throw away. The admitted variants are
+    the most plausible ones by :func:`_plausibility_order`, informed by
+    ``frequency`` when the caller supplies thresholds. A variant not admitted to
+    *pairing* still forms its own single-variant candidate if it warrants one, so
+    no variant becomes wholly unreachable.
+
+    ``max_pairs_per_gene`` is the backstop, and it now truncates by plausibility
+    rather than by genomic coordinate. That ordering was the defect: candidates
+    were sorted by ``(gene, first coordinate, second coordinate, pair_id)`` and cut
+    at the cap, so the kept set was "every pair involving the leftmost variant,
+    then the second, ..." and whole variants at the right-hand end of a gene
+    became unreachable in any pairing. At ten variants in a gene only 44% of
+    pairings survived; at twenty, 10.5% — and which 44% was decided by chromosomal
+    position, which is not evidence of anything.
+
+    The returned order is unchanged: candidates come back in ``sort_key()`` order,
+    the plausibility ordering being used for the truncation decision only. When no
+    cap fires the output is identical to the pre-fix implementation.
+
+    Every surviving candidate of a truncated gene carries
+    :data:`FLAG_CAP_TRUNCATED`, and the event is recorded in
+    :attr:`PairingResult.cap_events` so a run report can state it.
     """
+    if max_pairs_per_gene < 1:
+        msg = f"max_pairs_per_gene={max_pairs_per_gene} must be at least 1."
+        raise ValueError(msg)
+    if max_pairing_variants < 2:
+        msg = (
+            f"max_pairing_variants={max_pairing_variants} must be at least 2; "
+            "a pair needs two variants."
+        )
+        raise ValueError(msg)
+
+    plausible_ids = (
+        None
+        if frequency is None
+        else frozenset(
+            variant.variant_id
+            for variant in select_candidate_variants(variants, frequency=frequency)
+        )
+    )
+
     grouped = _variants_by_gene(variants)
     candidates: list[PairCandidate] = []
+    cap_events: list[GeneCapEvent] = []
 
     for gene in sorted(grouped):
         members = grouped[gene]
+        paired = sorted(
+            members,
+            key=lambda variant: (
+                _plausibility_order(gene, variant, plausible_ids),
+                variant.sort_key(),
+                variant.variant_id,
+            ),
+        )[:max_pairing_variants]
+        # Restore genomic order so pair_ids and candidate ordering do not depend
+        # on the plausibility ranking (GP-30).
+        paired.sort(key=lambda variant: (variant.sort_key(), variant.variant_id))
+
         gene_candidates: list[PairCandidate] = [
             _build_single_candidate(gene, variant)
             for variant in members
             if _wants_single_candidate(gene, variant)
         ]
         gene_candidates.extend(
-            _build_pair_candidate(gene, a, b) for a, b in combinations(members, 2)
+            _build_pair_candidate(gene, a, b) for a, b in combinations(paired, 2)
         )
         gene_candidates.sort(key=lambda candidate: candidate.sort_key())
 
-        if len(gene_candidates) > max_pairs_per_gene:
-            gene_candidates = [
-                PairCandidate(
-                    pair_id=candidate.pair_id,
-                    gene_symbol=candidate.gene_symbol,
-                    variant_a=candidate.variant_a,
-                    variant_b=candidate.variant_b,
-                    inheritance_model=candidate.inheritance_model,
-                    phase=candidate.phase,
-                    flags=(*candidate.flags, FLAG_CAP_TRUNCATED),
+        generated = len(gene_candidates)
+        if generated > max_pairs_per_gene or len(paired) < len(members):
+            kept = sorted(
+                gene_candidates,
+                key=lambda candidate: _candidate_plausibility_key(candidate, plausible_ids),
+            )[:max_pairs_per_gene]
+            gene_candidates = sorted(
+                (
+                    replace(candidate, flags=(*candidate.flags, FLAG_CAP_TRUNCATED))
+                    for candidate in kept
+                ),
+                key=lambda candidate: candidate.sort_key(),
+            )
+            cap_events.append(
+                GeneCapEvent(
+                    gene_symbol=gene,
+                    variants=len(members),
+                    variants_paired=len(paired),
+                    generated=generated,
+                    kept=len(gene_candidates),
                 )
-                for candidate in gene_candidates[:max_pairs_per_gene]
-            ]
+            )
         candidates.extend(gene_candidates)
 
-    return tuple(candidates)
+    return PairingResult(candidates=tuple(candidates), cap_events=tuple(cap_events))
+
+
+def generate_pairs(
+    variants: Sequence[VariantRecord],
+    *,
+    max_pairs_per_gene: int = DEFAULT_MAX_PAIRS_PER_GENE,
+    max_pairing_variants: int = DEFAULT_MAX_PAIRING_VARIANTS,
+    frequency: FrequencyThresholds | None = None,
+) -> tuple[PairCandidate, ...]:
+    """Candidates only, discarding the cap report.
+
+    Kept because most callers want the list and nothing else. A caller that will
+    act on a truncated hypothesis space — the composition root, above all — should
+    use :func:`generate_pair_candidates` and surface
+    :attr:`PairingResult.warnings`.
+    """
+    return generate_pair_candidates(
+        variants,
+        max_pairs_per_gene=max_pairs_per_gene,
+        max_pairing_variants=max_pairing_variants,
+        frequency=frequency,
+    ).candidates
