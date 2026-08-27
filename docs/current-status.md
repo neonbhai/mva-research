@@ -1,84 +1,103 @@
 # Current status
 
-**Updated:** 2026-08-27 · **Phase:** 3 (synthetic vertical slice) — integration in
-progress.
+**Updated:** 2026-08-27 · **Phase:** 5 (verification) — Phase 4 adversarial
+review in progress.
 
 ## What exists
 
+The complete vertical slice, running end to end on the synthetic case.
+
 - **Domain contracts** — `src/mva/models/`: variant, genome/coordinate, evidence,
-  candidate pair, phenotype, mechanism, drug, provenance. Frozen, strictly
-  validated, `extra="forbid"`.
-- **Foundation** — injectable clock, canonical hashing, typed errors, typed config
-  with the workspace privacy boundary.
-- **Structural lints** — `tests/unit/test_architecture.py` enforces the import
-  layer map, the no-peer-stage-imports rule, models-as-leaf, no-network-clients on
-  the sensitive path, and no direct wall-clock reads. Failure messages carry their
-  own remediation.
-- **Privacy protections** — deny-by-default `.gitignore` with narrow, audited
-  negations; privacy package (scanner, redaction, netguard, export gate).
-- **Synthetic fixture** — adversarial by design: known compound-het answer, common
-  distractors, low-quality call, in-cis pair, multiallelic site, four-valued
-  phenotype profile, and a drug catalogue containing a wrong-direction agent.
-- **Knowledge tables** — `knowledge/public/`: consequences, frequencies, gene
-  panel, gene–phenotype, mechanism chain, mechanism metadata, drug catalogue. All
-  synthetic, all versioned.
-- **Golden expectations** — `tests/golden/`: the expected #1 pair and the expected
-  drug triage outcomes.
-- **Documentation** — architecture, 9 decision records, scientific assumptions,
-  privacy model, validation plan, maturity ledger, tech debt, golden principles,
-  the vendored Track 1 submission contract, and five re-runnable reviewer briefs.
+  candidate pair, phenotype, mechanism, drug, provenance. Frozen,
+  `extra="forbid"`, with invariants enforced at the type boundary.
+- **Stages** — ingestion (cyvcf2 + pure-Python backends, multiallelic splitting,
+  trimming, QC flagging), annotation adapters over hash-pinned local tables,
+  four-valued phenotype scoring, filter/pair/score/rank prioritisation, mechanism
+  library, drug triage with signed direction checking, DuckDB+Parquet evidence
+  store, reporting (Track 1 CSV, dossier, mechanism and Track 2 reports).
+- **Composition root** — `pipeline.py` (artifacts, provenance, determinism),
+  `orchestrator.py` (stage graph), `cli.py` (Typer). Stages never import each
+  other.
+- **Workflow** — an 11-job Snakemake DAG whose rules are one `mva` subcommand
+  each; the same DAG runs without Snakemake via `mva run all`.
+- **Privacy** — scanner (11 checks), redaction filter, netguard, export gate,
+  deny-by-default `.gitignore`, pre-commit hook.
+- **Structural lints** — import layering, no peer-stage imports, models-as-leaf,
+  no network clients on the sensitive path, no wall-clock reads, docs integrity.
+- **Documentation** — architecture, 9 ADRs, scientific assumptions, privacy
+  model, validation plan, maturity ledger, tech debt, golden principles, the
+  vendored Track 1 contract, 5 re-runnable reviewer briefs.
 
 ## What works
 
-Verified by running:
+Verified by running, not asserted:
 
-- `uv run pytest tests/unit/test_architecture.py` — 5 passed. The layering test
-  caught a real ordering error on its first run (foundation utilities had to move
-  below `config`), which is the intended behaviour.
-- `uv run ruff check src tests` — clean.
-- `uv run pyright src tests` — 0 errors, strict mode.
-- `.gitignore` verified with `git check-ignore -v --no-index`: sensitive paths
-  ignored, synthetic fixtures correctly re-included through negations.
+| Command | Result |
+|---|---|
+| `just verify` | **all gates passed** |
+| `uv run pytest -q` | **296 passed** |
+| `uv run ruff check src tests` | clean |
+| `uv run pyright src tests` (strict) | 0 errors |
+| `just demo` | 30 artifacts, all promised outputs produced |
+| `just demo-determinism` | **30 artifacts byte-identical across two runs** |
+| `just privacy-audit` | **11 checks pass** |
+| `just snakemake -n` | 11-job DAG builds; full run completes |
+
+**Both acceptance criteria confirmed in the artifacts, not just in tests:**
+
+1. The synthetic causal pair `chr15:40200000 C>T` + `chr15:40210500 G>A`
+   (SYNTHKIN1) is **row 1** of `track1_submission.csv` at epcr REDACTED-EPCR, produced
+   by general scoring with nothing special-cased.
+2. The wrong-direction agent `SYNTH-DRUG-B` is **rejected**, leading reason
+   `wrong_direction`, with the reversal condition recorded as "nothing short of
+   the mechanism itself being wrong".
 
 ## What is incomplete
 
-- **Composition root** — `src/mva/pipeline.py` and `src/mva/cli.py` not yet
-  written. They are the last integration step and depend on the stage APIs now
-  landing.
-- **Stage integration** — ingestion, annotation, phenotype, prioritization,
-  mechanisms, interventions, evidence and reporting are implemented but not yet
-  wired end to end or run together.
-- **`just demo`** — not yet executable (needs the CLI).
-- **Phase 4 adversarial review** — briefs written, reviews not yet run.
-- **Test count** — the 21 required behaviours are specified and mostly
-  implemented per-stage; the end-to-end golden and determinism tests are pending
-  the composition root.
+- **Phase 4 adversarial review** — four reviewers running (genomic validity,
+  pharmacology, privacy, reproducibility). Findings will be promoted into tests
+  or lints, never left as prose.
+- **Annotation is a synthetic substitute.** Consequence and frequency values are
+  fabricated. This is the blocking prerequisite for any real-data claim (TD-01).
+- **No known-answer validation.** The synthetic case proves the machinery, not
+  the calibration (TD-02).
+- **No structural or copy-number variant calling** (TD-03).
+- Full list with costs and triggers: `docs/tech-debt.md`.
 
 ## Commands
 
 ```bash
 just bootstrap        # install toolchain, sync deps, install pre-commit hook
 just verify           # THE GATE: lint + typecheck + arch + tests + privacy audit
-just lint             # ruff check + format check
-just typecheck        # pyright strict
-just test             # full pytest suite
-just arch             # structural + docs-integrity lints only
 just demo             # end-to-end synthetic run
+just demo-artifacts   # list what it produced
+just demo-audit       # show the run's privacy audit
 just demo-determinism # run twice, compare artifact hashes
 just privacy-audit    # standalone privacy scan
-just clean-demo       # remove demo workspace
+just snakemake track1 # run the DAG to the Track 1 target
+just clean-demo
 ```
+
+The demo workspace is `$TMPDIR/mva-research-demo` — deliberately outside the
+repo, because that is what a real run requires and the privacy audit fails an
+in-repo workspace.
 
 ## Blockers
 
-None external. No decision is waiting on the user.
+None. No decision is waiting on the user.
 
 ## Notes for the next session
 
-Start by reading this file and `docs/next-actions.md`. The repo is the system of
+Read this file and `docs/next-actions.md` first. The repo is the system of
 record; nothing important lives only in conversation history.
 
-The one design tension worth knowing about: this repo is built to be maximally
-legible to an agent **except** for the patient-data path, which is deliberately
-illegible to one. If a debugging affordance seems missing, that is usually why —
-see ADR 0008.
+Four integration bugs were found by wiring the stages together rather than by
+unit tests, which is worth knowing when judging coverage: an evidence-ID
+collision from stamping a pair ID onto a variant-level fact; a low component
+score being emitted as `CONTRADICTS`; a `.gitignore` negation that re-opened the
+`.env.*` deny rule; and the orchestrator bypassing the public-export gate. All
+four are now locked by regression tests.
+
+The one design tension worth knowing: this repo is built to be maximally legible
+to an agent **except** for the patient-data path, which is deliberately illegible
+to one. If a debugging affordance seems missing, that is usually why — ADR 0008.
