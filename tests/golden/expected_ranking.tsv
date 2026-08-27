@@ -1,0 +1,4 @@
+# Golden expectation for the synthetic case. Changing this file requires a
+# decision record (GP-32). It is never re-baselined to make a test pass.
+rank	gene_symbol	variant_a	variant_b	inheritance_model	must_be_flagged
+1	SYNTHKIN1	GRCh38:chr15:40200000:C:T	GRCh38:chr15:40210500:G:A	compound_heterozygous	phase_unknown

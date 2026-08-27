@@ -16,7 +16,7 @@ Import layers, low to high:
 
 ```
 0. models         (pure types; imports nothing from mva except models)
-1. errors, determinism, clock, logging_setup   (foundation utilities)
+1. errors, determinism, clock   (foundation utilities)
 2. config         (may import models + utilities)
 3. privacy        (cross-cutting; may import layers 0-2 only)
 4. ingestion, annotation, phenotype     (data in)

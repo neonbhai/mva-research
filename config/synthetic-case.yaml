@@ -1,0 +1,20 @@
+# Synthetic demo case. Fully fabricated; contains no patient-derived data.
+# This is the case exercised by `just demo` and locked by the golden tests.
+case_id: synthetic-demo
+proband_id: PROBAND01          # the challenge scorer accepts only this literal value
+genome_build: GRCh38
+synthetic: true
+description: >
+  Fully synthetic rare-disease case used to exercise the pipeline end to end.
+  Two rare damaging heterozygous variants in the fictional gene SYNTHKIN1 are the
+  expected causal compound-heterozygous pair. Distractors include common variants,
+  a low-quality call, an in-cis pair, a multiallelic site and a plausible
+  second-ranked gene.
+
+inputs:
+  vcf: inputs/synthetic_case.vcf
+  phenotype: inputs/synthetic_phenotype.tsv
+
+network_profile: offline_best_effort
+max_submission_rows: 10
+max_pairs_per_gene: 20

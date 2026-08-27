@@ -1,0 +1,16 @@
+# SYNTHETIC population frequencies. Stands in for gnomAD (docs/maturity-ledger.md: annotation = synthetic-substitute).
+# Source/version/population are recorded per GP-18: a bare allele frequency is unusable.
+# A variant ABSENT from this table has NO frequency data, which is NOT evidence of rarity (GP-14).
+variant_id	source	version	population	allele_frequency	allele_count	allele_number	homozygote_count	filter_status
+GRCh38:chr15:40200000:C:T	SYNTH_gnomAD	v0.0-synthetic	global	0.0000000	0	152312	0	PASS
+GRCh38:chr15:40201000:C:A	SYNTH_gnomAD	v0.0-synthetic	global	0.0000131	2	152312	0	PASS
+GRCh38:chr15:40201050:T:G	SYNTH_gnomAD	v0.0-synthetic	global	0.0000197	3	152312	0	PASS
+GRCh38:chr15:40205000:A:G	SYNTH_gnomAD	v0.0-synthetic	global	0.1204000	18338	152312	1102	PASS
+GRCh38:chr15:40206000:T:C	SYNTH_gnomAD	v0.0-synthetic	global	0.0821000	12505	152312	514	PASS
+GRCh38:chr15:40210500:G:A	SYNTH_gnomAD	v0.0-synthetic	global	0.0000053	1	188100	0	PASS
+GRCh38:chr15:40210500:G:A	SYNTH_gnomAD	v0.0-synthetic	nfe	0.0000149	1	67200	0	PASS
+GRCh38:chr15:40211000:G:GAT	SYNTH_gnomAD	v0.0-synthetic	global	0.0000066	1	151800	0	PASS
+GRCh38:chr11:5000000:A:G	SYNTH_gnomAD	v0.0-synthetic	global	0.0455000	6930	152312	160	PASS
+GRCh38:chr7:55000000:C:G	SYNTH_gnomAD	v0.0-synthetic	global	0.0000262	4	152312	0	PASS
+GRCh38:chr7:55001000:A:T	SYNTH_gnomAD	v0.0-synthetic	global	0.0000394	6	152312	0	PASS
+GRCh38:chr3:10000000:G:A	SYNTH_gnomAD	v0.0-synthetic	global	0.0031000	472	152312	3	PASS

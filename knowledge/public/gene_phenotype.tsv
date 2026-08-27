@@ -1,0 +1,13 @@
+# SYNTHETIC gene-to-phenotype associations for the demo case.
+# HPO identifiers are real public ontology terms; the gene symbols are FICTIONAL.
+gene_symbol	hpo_id	label	association_strength	source	version
+SYNTHKIN1	HP:0000252	Microcephaly	strong	SYNTH_curation	v0.0-synthetic
+SYNTHKIN1	HP:0001511	Intrauterine growth retardation	strong	SYNTH_curation	v0.0-synthetic
+SYNTHKIN1	HP:0200024	Premature chromatid separation	definitive	SYNTH_curation	v0.0-synthetic
+SYNTHKIN1	HP:0001305	Dandy-Walker malformation	moderate	SYNTH_curation	v0.0-synthetic
+SYNTHKIN1	HP:0002667	Nephroblastoma	moderate	SYNTH_curation	v0.0-synthetic
+SYNTHMET2	HP:0001250	Seizure	moderate	SYNTH_curation	v0.0-synthetic
+SYNTHMET2	HP:0000252	Microcephaly	supporting	SYNTH_curation	v0.0-synthetic
+SYNTHOTH3	HP:0000518	Cataract	moderate	SYNTH_curation	v0.0-synthetic
+SYNTHMUL4	HP:0001250	Seizure	supporting	SYNTH_curation	v0.0-synthetic
+SYNTHSOL5	HP:0000822	Hypertension	supporting	SYNTH_curation	v0.0-synthetic

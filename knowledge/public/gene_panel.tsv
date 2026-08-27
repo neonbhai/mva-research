@@ -1,0 +1,7 @@
+# SYNTHETIC gene panel with mechanism class and inheritance prior.
+gene_symbol	gene_id	full_name	inheritance	mechanism_class	disease_association	source	version
+SYNTHKIN1	SYNTHG0001	Synthetic kinetochore checkpoint protein 1	autosomal_recessive	spindle_assembly_checkpoint	Synthetic variegated aneuploidy (demo)	SYNTH_curation	v0.0-synthetic
+SYNTHMET2	SYNTHG0002	Synthetic metabolic enzyme 2	autosomal_recessive	metabolic	Synthetic metabolic disorder (demo)	SYNTH_curation	v0.0-synthetic
+SYNTHOTH3	SYNTHG0003	Synthetic lens structural protein 3	autosomal_recessive	structural	Synthetic cataract (demo)	SYNTH_curation	v0.0-synthetic
+SYNTHMUL4	SYNTHG0004	Synthetic multiallelic locus protein 4	autosomal_recessive	unknown	Synthetic disorder (demo)	SYNTH_curation	v0.0-synthetic
+SYNTHSOL5	SYNTHG0005	Synthetic solute carrier 5	autosomal_dominant	transport	Synthetic transport disorder (demo)	SYNTH_curation	v0.0-synthetic
