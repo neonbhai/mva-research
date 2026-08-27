@@ -13,9 +13,13 @@ Two functions, two different jobs:
 
 The rule that governs both: **an unknown is a concern, never a pass.** Missing
 paediatric exposure, unassessed oncogenic risk and unmeasured exposure are all
-recorded explicitly. Only one of them is disqualifying by itself; none of them is
-silently treated as fine, because the commonest way a gap disappears from a
-write-up is that nobody had a field to put it in.
+recorded explicitly, and none of them is silently treated as fine — the commonest
+way a gap disappears from a write-up is that nobody had a field to put it in.
+
+Which unknowns are *fatal* is context-dependent, and deliberately so. An
+unassessed oncogenic risk is a recorded concern in general and a **disqualifying**
+one in a chromosomal-instability disorder, because there the unmeasured quantity
+is the disease mechanism itself.
 
 Nothing here is medical advice; every output is a research hypothesis.
 """
@@ -183,21 +187,44 @@ def assess_safety(
             else "Increases chromosomal instability; no CIN context detected, flagged not fatal."
         )
     elif entry.worsens_cin is None:
+        # An unassessed answer to mandatory question 7 is BLOCKING in a
+        # chromosomal-instability context, and the whole pipeline says so: the model
+        # field, the evidence schema, the report text and ASSUMPTION-DRUG-07 all call
+        # it a blocking gap. It therefore has to block. Recording it as a non-fatal
+        # concern let an agent whose oncogenic risk nobody had measured be presented
+        # as a ranked candidate in a report that told the reader, in the same
+        # paragraph, that the question "must be answered before any further
+        # consideration". Outside a CIN context it stays a recorded concern.
         concerns.append(
             SafetyConcern(
                 concern_id=f"SC-{entry.drug_id}-CIN-UNASSESSED",
                 description=(
                     f"Whether {entry.name} increases aneuploidy or cancer susceptibility has "
-                    "not been assessed. Unassessed is not negative: in this disease context "
-                    "it is a blocking gap that must be closed before any use."
+                    "not been assessed. Unassessed is not negative: in a germline "
+                    "chromosomal-instability disorder it is a blocking gap that must be "
+                    "closed before any use."
+                    if cin_context
+                    else f"Whether {entry.name} increases aneuploidy or cancer susceptibility "
+                    "has not been assessed. No chromosomal-instability context was detected "
+                    "for this mechanism, so the gap is recorded rather than fatal."
                 ),
-                severity="major",
-                population="Not assessed in any population",
-                is_disqualifying=False,
+                severity="critical" if cin_context else "major",
+                population=(
+                    "Children with a constitutional chromosomal-instability disorder"
+                    if cin_context
+                    else "Not assessed in any population"
+                ),
+                is_disqualifying=cin_context,
             )
         )
-        reasons.append(RejectionReason.SAFETY_CONCERN)
-        notes.append("Oncogenic/CIN risk unassessed.")
+        reasons.append(
+            RejectionReason.ONCOGENIC_RISK if cin_context else RejectionReason.SAFETY_CONCERN
+        )
+        notes.append(
+            "Oncogenic/CIN risk unassessed; blocking in this disease context."
+            if cin_context
+            else "Oncogenic/CIN risk unassessed; no CIN context detected, flagged not fatal."
+        )
 
     # 2. Paediatric exposure. Recorded always; never fatal on its own.
     if not entry.has_pediatric_exposure:

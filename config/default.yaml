@@ -38,6 +38,10 @@ frequency:
   rare: 0.0001
   low_frequency: 0.001
   max_plausible_recessive: 0.01
+  # A population reporting fewer than this many alleles may not set the maximum
+  # AF; it is recorded as excluded instead. AC=1 in AN=40 is an AF of 0.025 and
+  # would read as 'common', discarding a genuine founder allele (ADR 0010).
+  min_allele_number: 2000
   # Mid-range, not 1.0: absence of frequency data is not evidence of rarity (GP-14).
   absent_frequency_score: 0.5
 

@@ -45,6 +45,16 @@ class UnsourcedAssertionError(EvidenceError):
     """A report tried to state a claim with no resolvable evidence (GP-10)."""
 
 
+class ReportCompletenessError(MvaError):
+    """A renderer would have emitted fewer hypotheses than it was given.
+
+    Report sections are chosen by predicate. A predicate set that does not
+    partition the input does not shorten the report — it *erases* the rows it
+    misses, silently, and the row most likely to be missed is a contraindicated
+    compound in a state no section expects.
+    """
+
+
 class PrivacyViolationError(MvaError):
     """A privacy boundary would be crossed. Always fail closed."""
 

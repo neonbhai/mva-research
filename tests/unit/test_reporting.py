@@ -8,6 +8,7 @@ filed under agreement, symptom management presented as mechanism correction.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import pytest
 from jinja2 import UndefinedError
 
 from mva.clock import FixedClock
-from mva.errors import UnsourcedAssertionError
+from mva.errors import ReportCompletenessError, UnsourcedAssertionError
 from mva.evidence.ledger import AssertionResolver, EvidenceLedger
 from mva.models import (
     ApprovalStatus,
@@ -312,6 +313,8 @@ def _drug(
     intervention_class: InterventionClass,
     observed: EffectDirection,
     evidence_ids: tuple[str, ...],
+    required: EffectDirection = EffectDirection.RESTORE,
+    target_node_id: str = "N-CHECKPOINT",
     rejected: bool = False,
     rejection_reasons: tuple[RejectionReason, ...] = (),
     rejection_rationale: str = "",
@@ -323,9 +326,9 @@ def _drug(
         approval_status=ApprovalStatus.APPROVED_OTHER_INDICATION,
         intervention_class=intervention_class,
         target="checkpoint signalling",
-        target_node_id="N-CHECKPOINT",
+        target_node_id=target_node_id,
         mechanism_of_action="synthetic mechanism of action for testing",
-        required_direction=EffectDirection.RESTORE,
+        required_direction=required,
         observed_direction=observed,
         is_direct_evidence=True,
         strongest_evidence_type=EvidenceType.CELL_LINE,
@@ -599,3 +602,250 @@ def test_missing_template_variable_is_a_loud_error(tmp_path: Path) -> None:
 def test_missing_template_is_a_loud_error(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         render_template("absent.md.j2", {}, templates_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# 10. Every hypothesis given to the renderer must appear in exactly one section.
+# ---------------------------------------------------------------------------
+
+
+def _drug_block(report: str, name: str) -> str:
+    """The body of one '### <name>' drug block, up to the next block or section."""
+    marker = f"\n### {name} ("
+    start = report.index(marker) + len(marker)
+    remainder = report[start:]
+    ends = [pos for pos in (remainder.find("\n### "), remainder.find("\n## ")) if pos != -1]
+    return remainder if not ends else remainder[: min(ends)]
+
+
+@pytest.mark.unit
+def test_renderer_refuses_to_drop_a_hypothesis_that_matches_no_section() -> None:
+    """The sections are chosen by predicate, and the predicates are not a partition.
+
+    A disease-modifying agent with `directions_agree is False` and `rejected is
+    False` matches neither AGREES nor CANNOT BE DETERMINED, and `_partition_rejected`
+    only rescues `rejected=True`. It is unconstructible — but `model_copy` skips
+    validators, and the observed result was a report reading "Candidates presented:
+    0 ... Rejected: 0" while a contraindicated compound had been triaged. Erasing it
+    is worse than listing it, so the renderer raises.
+    """
+    smuggled = _rejected_wrong_direction().model_copy(
+        update={"rejected": False, "rejection_reasons": ()}
+    )
+    assert smuggled.directions_agree is False
+    assert smuggled.rejected is False
+
+    with pytest.raises(ReportCompletenessError, match="would appear in no section"):
+        build_track2_report(
+            _mechanism(),
+            [_accepted_agreeing(), smuggled],
+            [],
+            pair=None,
+            resolver=_resolver(),
+            clock=_clock(),
+        )
+
+
+@pytest.mark.unit
+def test_renderer_refuses_a_hypothesis_that_would_appear_twice() -> None:
+    """The same compound listed as both presented and rejected is a caller bug."""
+    duplicated = _accepted_agreeing()
+    with pytest.raises(ReportCompletenessError, match="in more than one"):
+        build_track2_report(
+            _mechanism(),
+            [duplicated],
+            [
+                _drug(
+                    duplicated.drug_id,
+                    duplicated.name,
+                    intervention_class=InterventionClass.DISEASE_MODIFYING,
+                    observed=EffectDirection.DECREASE,
+                    evidence_ids=(),
+                    rejected=True,
+                    rejection_reasons=(RejectionReason.WRONG_DIRECTION,),
+                    rejection_rationale="Pushes the target the disease way.",
+                )
+            ],
+            pair=None,
+            resolver=_resolver(),
+            clock=_clock(),
+        )
+
+
+@pytest.mark.unit
+def test_every_hypothesis_lands_in_exactly_one_section_in_the_normal_case() -> None:
+    """The happy path: four inputs, four appearances, no silent loss."""
+    report = _full_track2_report()
+    for name in ("Synthexostat", "Synthexadrug", "Synthicam", "Synthinib"):
+        assert report.count(f"### {name} (") == 1, name
+
+
+# ---------------------------------------------------------------------------
+# 11. A compensatory node is never an agreement.
+# ---------------------------------------------------------------------------
+
+
+def _compensatory_mechanism() -> MechanismHypothesis:
+    """The reporting fixture chain with `N-PROTEIN` re-marked as compensatory."""
+    base = _mechanism()
+    nodes = tuple(
+        node.model_copy(update={"deviation_is_pathological": False})
+        if node.node_id == "N-PROTEIN"
+        else node
+        for node in base.nodes
+    )
+    fields = {name: getattr(base, name) for name in MechanismHypothesis.model_fields}
+    fields["nodes"] = nodes
+    return MechanismHypothesis(**fields)
+
+
+@pytest.mark.unit
+def test_a_drug_acting_on_a_compensatory_node_is_not_in_the_agrees_section() -> None:
+    """Suppressing a protective response is not a correction, however the sign reads.
+
+    Naively inverting `state_in_patient` scores an agent that suppresses clearance
+    of aneuploid cells as a perfect match in a chromosomal-instability disorder.
+    """
+    mechanism = _compensatory_mechanism()
+    on_compensatory = _drug(
+        "DRUG-E",
+        "Synthsuppressin",
+        intervention_class=InterventionClass.DISEASE_MODIFYING,
+        observed=EffectDirection.DECREASE,
+        evidence_ids=("EV-DRUG-0003",),
+        required=EffectDirection.UNKNOWN,
+        target_node_id="N-PROTEIN",
+    )
+    assert on_compensatory.directions_agree is None
+
+    report = build_track2_report(
+        mechanism,
+        [_accepted_agreeing(), on_compensatory],
+        [],
+        pair=None,
+        resolver=_resolver(),
+        clock=_clock(),
+    )
+    agreeing = _section(report, "Disease-modifying candidates — direction AGREES")
+    undetermined = _section(report, "Direction CANNOT BE DETERMINED — not presented as agreement")
+    assert "Synthsuppressin" not in agreeing
+    assert "Synthsuppressin" in undetermined
+    assert "COMPENSATORY" in _drug_block(report, "Synthsuppressin")
+
+
+# ---------------------------------------------------------------------------
+# 12. Mandatory question 2 states the derivation that was actually used.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_inverse_derivation_is_claimed_only_for_the_therapeutic_target() -> None:
+    """The "its inverse" derivation is claimed only at the designated target.
+
+    For any other node the requirement comes from that node's own `state_in_patient`.
+    Printing the disease-direction derivation everywhere stated a derivation the
+    pipeline had not performed — about exactly the compounds whose grounds are
+    weakest, since those are the ones acting away from the target.
+    """
+    mechanism = _mechanism()
+    off_target = _drug(
+        "DRUG-F",
+        "Synthperipherin",
+        intervention_class=InterventionClass.DISEASE_MODIFYING,
+        observed=EffectDirection.INCREASE,
+        evidence_ids=("EV-DRUG-0001",),
+        target_node_id="N-PROTEIN",
+    )
+    assert off_target.target_node_id != mechanism.therapeutic_target_node_id
+
+    report = build_track2_report(
+        mechanism,
+        [_accepted_agreeing(), off_target],
+        [],
+        pair=None,
+        resolver=_resolver(),
+        clock=_clock(),
+    )
+    on_target_block = _drug_block(report, "Synthexostat")
+    off_target_block = _drug_block(report, "Synthperipherin")
+
+    assert "its inverse" in on_target_block
+    assert "its inverse" not in off_target_block, (
+        "the inverse-of-the-disease-direction derivation does not apply off the target node"
+    )
+    assert "state in the patient" in off_target_block
+    assert "N-PROTEIN" in off_target_block
+
+
+# ---------------------------------------------------------------------------
+# 13. The rejection record is a standalone artifact and carries the banner.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_rejection_record_carries_the_not_medical_advice_banner() -> None:
+    """It is written as its own file, where it names compounds and lists, per
+    compound, "what would have to change". Read in isolation with no banner that is
+    a shortlist of things to try next."""
+    record = build_rejection_record([_rejected_wrong_direction()], clock=_clock())
+    assert NOT_MEDICAL_ADVICE in record
+    assert record.index(NOT_MEDICAL_ADVICE) < record.index("Synthinib")
+    assert "What would have to change" in record
+
+
+# ---------------------------------------------------------------------------
+# 14. The structural claim is rendered whatever the curated class cell says.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_disease_modifying_label_does_not_suppress_the_off_target_statement() -> None:
+    """The reviewer's reproduction, end to end on the shipped tables.
+
+    Flipping Synthazepam's `intervention_class` cell to `disease_modifying` put a
+    seizure drug acting on the organismal phenotype into the disease-modifying
+    AGREES section at rank 1, score 1.000, with nothing in the report saying it does
+    not touch the checkpoint. The statement is now gated on the target node, so the
+    label cannot switch it off.
+    """
+    from mva.clock import demo_clock
+    from mva.evidence.ledger import EvidenceLedger
+    from mva.interventions import DrugCatalog, generate_drug_hypotheses
+    from mva.mechanisms import MechanismLibrary, build_mechanism
+
+    knowledge = Path(__file__).resolve().parents[2] / "knowledge" / "public"
+    version = "synthetic-demo-2026.1"
+    library = MechanismLibrary.from_tsv(
+        knowledge / "mechanisms.tsv", knowledge / "mechanism_meta.tsv", version=version
+    )
+    built = build_mechanism("SYNTHKIN1", pair_id="PAIR-1", library=library, clock=demo_clock())
+    assert built.hypothesis is not None
+    mechanism = built.hypothesis
+
+    catalog = DrugCatalog.from_tsv(knowledge / "drug_catalog.tsv", version=version)
+    synthazepam = next(e for e in catalog.entries() if e.drug_id == "SYNTH-DRUG-D")
+    relabelled = replace(synthazepam, intervention_class=InterventionClass.DISEASE_MODIFYING)
+    triaged = generate_drug_hypotheses(
+        mechanism=mechanism,
+        catalog=DrugCatalog([relabelled], version=version),
+        clock=demo_clock(),
+    )
+
+    ledger = EvidenceLedger(run_id=RUN_ID)
+    ledger.extend([*built.evidence, *triaged.evidence])
+    report = build_track2_report(
+        mechanism,
+        triaged.accepted,
+        triaged.rejected,
+        pair=None,
+        resolver=AssertionResolver(ledger),
+        clock=demo_clock(),
+    )
+
+    block = _drug_block(report, "Synthazepam")
+    assert "intervention class: disease_modifying" in block.lower()
+    assert "does NOT correct the mechanism" in block
+    assert mechanism.therapeutic_target_node_id in block
+    assert "mechanism_mismatch" in block, "the non-fatal reason must be printed, not discarded"
+    # And the derivation printed for question 2 is the one that actually applies.
+    assert "its inverse" not in block

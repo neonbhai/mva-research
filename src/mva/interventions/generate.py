@@ -208,9 +208,12 @@ def generate_drug_hypotheses(
     rejected = sorted(
         (t for t in triaged if t.hypothesis.rejected), key=lambda t: t.hypothesis.sort_key()
     )
+    # `revalidated_copy`, never `model_copy`: pydantic does not re-run validators on
+    # `model_copy(update=...)`, so stamping a rank through it would let any invariant
+    # the hypothesis was built under be silently violated at the last step -- including
+    # the one that forbids an unrejected wrong-direction agent (GP-16).
     ranked = tuple(
-        t.hypothesis.model_copy(update={"rank": position})
-        for position, t in enumerate(accepted, start=1)
+        t.hypothesis.revalidated_copy(rank=position) for position, t in enumerate(accepted, start=1)
     )
     evidence: list[EvidenceItem] = []
     for t in triaged:
@@ -398,6 +401,8 @@ def _triage_entry(
         concern.concern_id: item.evidence_id
         for concern, item in zip(safety.concerns, _concern_items(items, safety), strict=True)
     }
+    # `SafetyConcern` carries no validators, so a plain copy is safe here; the
+    # revalidating copy is used where an invariant would otherwise be bypassed.
     linked_concerns = tuple(
         concern.model_copy(update={"evidence_ids": (concern_ids[concern.concern_id],)})
         for concern in safety.concerns
@@ -442,6 +447,12 @@ def _triage_entry(
         rejected=fatal,
         rejection_reasons=ordered if fatal else (),
         rejection_rationale=rationale if fatal else "",
+        # A non-fatal reason is not discarded because the candidate survived: it is
+        # carried on the hypothesis so the renderer prints it beside the candidate.
+        # `MECHANISM_MISMATCH` is the reason this matters -- it is raised for every
+        # agent acting off the therapeutic target, and dropping it left the
+        # symptomatic/disease-modifying separation resting on one curated TSV cell.
+        concerns=() if fatal else ordered,
     )
     record = (
         _record(
@@ -643,26 +654,33 @@ def _drug_evidence(
             )
         )
 
-    if entry.intervention_class is not InterventionClass.DISEASE_MODIFYING:
+    # Gated on the STRUCTURE, not on the label. Acting somewhere other than the
+    # therapeutic target is what makes an agent non-corrective; `intervention_class`
+    # is a curated cell that can say anything. Gating on the cell meant flipping one
+    # TSV value moved a phenotype-level agent into the disease-modifying section at
+    # rank 1 with nothing in the report contradicting it.
+    if entry.target_node_id != mechanism.therapeutic_target_node_id:
         items.append(
             _evidence_item(
                 subject_id=entry.drug_id,
                 claim=(
-                    f"{entry.name} is classified {entry.intervention_class.value}: it acts on "
-                    f"{entry.target_node_id} and does NOT correct the mechanism at "
-                    f"{mechanism.therapeutic_target_node_id}. It must never be presented as "
-                    "disease-modifying."
+                    f"{entry.name} acts on {entry.target_node_id}, not on the mechanism's "
+                    f"therapeutic target {mechanism.therapeutic_target_node_id}: it does NOT "
+                    f"correct the mechanism. It is declared "
+                    f"{entry.intervention_class.value}, but that declaration does not change "
+                    "the structural fact, and it must never be presented as disease-modifying."
                 ),
                 category=EvidenceCategory.DRUG,
                 direction=EvidenceDirection.NEUTRAL,
                 strength=EvidenceStrength.MODERATE,
                 evidence_type=EvidenceType.PIPELINE_INFERENCE,
                 tier=AssertionTier.INFERENCE,
-                method="Compared the catalogue's intervention class and target node with the "
-                "mechanism's therapeutic target node.",
+                method="Compared the catalogue's target node with the mechanism's therapeutic "
+                "target node; the declared intervention class is reported, not relied upon.",
                 limitations=(
-                    "A classification, not an efficacy claim. Symptom control can be the right "
-                    "clinical priority; it is simply a different claim from mechanism correction."
+                    "A structural classification, not an efficacy claim. Symptom control can be "
+                    "the right clinical priority; it is simply a different claim from mechanism "
+                    "correction."
                 ),
                 clock=clock,
                 citation=citation,

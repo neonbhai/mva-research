@@ -2,13 +2,82 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Self
+from typing import Final, Self
 
 from pydantic import Field, computed_field, model_validator
 
 from mva.models.base import FrozenModel
 from mva.models.genome import GenomeBuild, GenomicCoordinate
+
+# ---------------------------------------------------------------------------
+# Shared vocabulary
+#
+# These names are the contract between `mva.ingestion`, which emits them, and
+# `mva.prioritization`, which reacts to them. They live here because GP-01/GP-03
+# forbid either package importing the other, and the alternative — re-typing the
+# string literals in both places — is how `INGESTION_QUALITY_FLAGS` came to name
+# eight flags nothing emitted while missing three that ingestion really raises.
+# One definition, imported by both sides, is the only version a lint can check.
+# ---------------------------------------------------------------------------
+
+#: Normalisation operations recorded in ``VariantRecord.normalisation_ops``.
+OP_SPLIT_MULTIALLELIC: Final = "split_multiallelic"
+OP_TRIM: Final = "trim"
+OP_LEFT_ALIGN: Final = "left_align"
+
+FLAG_REF_ALLELE_MISMATCH: Final = "ref_allele_mismatch"
+FLAG_FILTERED_BY_CALLER: Final = "filtered_by_caller"
+FLAG_NO_CALLER_FILTER: Final = "no_caller_filter"
+FLAG_LOW_DEPTH: Final = "low_depth"
+FLAG_LOW_GQ: Final = "low_gq"
+FLAG_POSSIBLE_MOSAIC: Final = "possible_mosaic"
+FLAG_LOW_ALLELE_BALANCE: Final = "low_allele_balance"
+FLAG_HIGH_ALLELE_BALANCE: Final = "high_allele_balance"
+FLAG_NO_QUALITY_METRICS: Final = "no_quality_metrics"
+
+#: Every QC flag the ingestion stage is entitled to attach to a record. A
+#: downstream stage that reacts to ingestion findings by name checks itself
+#: against this set, so a flag added on one side cannot go unrecognised on the
+#: other.
+INGESTION_QC_FLAGS: Final[frozenset[str]] = frozenset(
+    {
+        FLAG_REF_ALLELE_MISMATCH,
+        FLAG_FILTERED_BY_CALLER,
+        FLAG_NO_CALLER_FILTER,
+        FLAG_LOW_DEPTH,
+        FLAG_LOW_GQ,
+        FLAG_POSSIBLE_MOSAIC,
+        FLAG_LOW_ALLELE_BALANCE,
+        FLAG_HIGH_ALLELE_BALANCE,
+        FLAG_NO_QUALITY_METRICS,
+    }
+)
+
+#: The subset of :data:`INGESTION_QC_FLAGS` that argues the genotype call itself
+#: may not be real. Membership means "do not trust this call", which is a
+#: stronger claim than "something was noted here".
+#:
+#: Three members of :data:`INGESTION_QC_FLAGS` are deliberately absent:
+#:
+#: * ``possible_mosaic`` — a skewed het may be the finding itself in a mosaic
+#:   aneuploidy disorder (ASSUMPTION-MOSAIC-01). Calling it low quality buries
+#:   exactly the signal this pipeline exists to surface.
+#: * ``no_quality_metrics`` — no DP, GQ or AD was reported. That is absence of
+#:   information, not evidence of poor quality (GP-14).
+#: * ``no_caller_filter`` — the caller recorded no FILTER opinion at all. It
+#:   never filtered anything, so it never objected to anything.
+UNTRUSTED_CALL_FLAGS: Final[frozenset[str]] = frozenset(
+    {
+        FLAG_REF_ALLELE_MISMATCH,
+        FLAG_FILTERED_BY_CALLER,
+        FLAG_LOW_DEPTH,
+        FLAG_LOW_GQ,
+        FLAG_LOW_ALLELE_BALANCE,
+        FLAG_HIGH_ALLELE_BALANCE,
+    }
+)
 
 
 class Zygosity(StrEnum):
@@ -54,6 +123,19 @@ class Genotype(FrozenModel):
     ref_reads: int | None = Field(default=None, ge=0)
     alt_reads: int | None = Field(default=None, ge=0)
     genotype_quality: int | None = Field(default=None, ge=0, description="GQ.")
+    alt_allele_index: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "1-based index of THIS record's ALT within the source site's ALT list. "
+            "Set when the record was decomposed from a multiallelic site, where the "
+            "raw GT is retained verbatim and so no longer says which of its allele "
+            "numbers belongs to this record. Without it a phased '1|2' reads as "
+            "'both haplotypes carry an alternate allele' and resolvable phase is "
+            "thrown away. ``None`` means the index is unrecorded, and every consumer "
+            "must fall back to its pre-existing any-alternate-allele behaviour."
+        ),
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -152,6 +234,38 @@ class ClinicalAssertion(FrozenModel):
     conditions: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class FrequencySelection:
+    """Which population frequency was used for rarity, and which were set aside.
+
+    ``excluded`` exists so that skipping an under-powered cohort is a statement a
+    report can make, rather than a silent omission. A reader who disagrees with
+    the threshold can see exactly what it cost them.
+    """
+
+    observed: PopulationFrequency | None
+    excluded: tuple[PopulationFrequency, ...]
+    min_allele_number: int
+
+    @property
+    def has_exclusions(self) -> bool:
+        return bool(self.excluded)
+
+    def describe_exclusions(self) -> str:
+        """One clause naming every skipped cohort, for a rationale sentence."""
+        if not self.excluded:
+            return ""
+        rendered = "; ".join(
+            f"{frequency.provenance_key} at AF {frequency.allele_frequency:.3g} "
+            f"(AC {frequency.allele_count}/AN {frequency.allele_number})"
+            for frequency in self.excluded
+        )
+        return (
+            f"excluded from the maximum for reporting fewer than {self.min_allele_number} "
+            f"alleles: {rendered}"
+        )
+
+
 class VariantRecord(FrozenModel):
     """The canonical per-variant record flowing through the pipeline.
 
@@ -200,6 +314,37 @@ class VariantRecord(FrozenModel):
             seen.setdefault(csq.gene_symbol, None)
         return tuple(seen)
 
+    @property
+    def allele_fraction(self) -> float | None:
+        """The ALT read fraction that the heterozygous band may actually be applied to.
+
+        For a biallelic call this is exactly ``Genotype.allele_balance``.
+
+        For a record decomposed from a multiallelic site it is not, and the
+        difference decides whether a textbook compound heterozygote survives. After
+        splitting ``A>G,GT`` with ``GT=1/2`` and ``AD=2,21,21``, allele 1 holds
+        ``ref_reads=2`` and ``alt_reads=21`` — but those two reads are the *site's*
+        REF depth and exclude the 21 reads carrying the other ALT. ``alt/(ref+alt)``
+        is then 0.91 and looks homozygous, so the call gets flagged as an artifact
+        of its own VCF formatting. Where the site depth is known, the site allele
+        fraction ``alt/DP`` (0.48 here) is the right quantity; where it is not,
+        ``None`` is returned and no caller may raise an allele-balance finding,
+        because a confident wrong flag is worse than no flag (GP-14).
+
+        Lives on the record rather than on ``Genotype`` because deciding which
+        formula applies needs ``normalisation_ops``, which the genotype cannot see.
+        """
+        genotype = self.genotype
+        balance = genotype.allele_balance
+        if OP_SPLIT_MULTIALLELIC not in self.normalisation_ops:
+            return balance
+        depth, alt_reads, ref_reads = genotype.depth, genotype.alt_reads, genotype.ref_reads
+        if depth is None or alt_reads is None:
+            return None
+        if depth <= 0 or depth < (ref_reads or 0) + alt_reads:
+            return balance
+        return alt_reads / depth
+
     def consequences_for_gene(self, gene: str) -> tuple[ConsequenceAnnotation, ...]:
         return tuple(c for c in self.consequences if c.gene_symbol == gene)
 
@@ -218,17 +363,65 @@ class VariantRecord(FrozenModel):
         impacts = [c.impact for c in self.consequences_for_gene(gene)]
         return min(impacts, key=lambda i: order[i]) if impacts else None
 
-    def max_allele_frequency(self) -> PopulationFrequency | None:
-        """Highest observed AF across all recorded populations.
+    def select_max_allele_frequency(self, *, min_allele_number: int = 0) -> FrequencySelection:
+        """Pick the frequency row rarity should be judged on, and say what was skipped.
 
-        Maximum (not global) is the conservative choice for rarity: a variant common
-        in any single ancestry is not a plausible ultra-rare cause, and using the
-        global AF alone systematically under-estimates frequency for variants
-        enriched in populations under-represented in reference cohorts.
+        Maximum (not global) AF is the conservative choice: a variant common in any
+        single ancestry is not a plausible ultra-rare cause, and the global figure
+        systematically under-estimates frequency for alleles enriched in cohorts
+        that reference panels under-sample (ASSUMPTION-FREQUENCY-02).
+
+        Taken raw, though, "maximum" hands the decision to whichever population was
+        sampled least. One allele seen once in a 40-chromosome subpopulation is an
+        AF of 0.025 — above any plausible recessive cut-point — while the same site
+        sits at 8e-6 across 125,000 global chromosomes. The maximum then reports a
+        genuine founder allele as common on the strength of a single observation.
+        gnomAD's grpmax and the ACMG BA1/BS1 rules avoid this with a filtering AF
+        (the lower bound of the 95% CI); requiring a minimum ``allele_number``
+        before a population may set the maximum is the same guard in its simplest
+        form, and it uses a field this model already stores.
+
+        Populations below ``min_allele_number`` are RECORDED in
+        :attr:`FrequencySelection.excluded`, never silently dropped: the caller can
+        state which cohort was set aside and why. A population with no ``allele_number``
+        at all stays eligible — an unreported cohort size is unknown, not small, and
+        excluding it would discard the only record a source supplied (GP-14).
+
+        When every population falls below the threshold, no adequately powered
+        observation exists and ``observed`` is ``None``. Downstream that reads as
+        absence of frequency data, which is scored mid-range rather than as rarity
+        — the honest answer, because a frequency measured on 40 chromosomes
+        establishes neither commonness nor rarity.
+
+        See docs/decisions/0010-filtering-allele-frequency.md.
         """
-        if not self.population_frequencies:
-            return None
-        return max(self.population_frequencies, key=lambda p: p.allele_frequency)
+        eligible: list[PopulationFrequency] = []
+        excluded: list[PopulationFrequency] = []
+        for frequency in self.population_frequencies:
+            powered = (
+                frequency.allele_number is None or frequency.allele_number >= min_allele_number
+            )
+            (eligible if powered else excluded).append(frequency)
+        observed = (
+            max(eligible, key=lambda p: (p.allele_frequency, p.provenance_key))
+            if eligible
+            else None
+        )
+        return FrequencySelection(
+            observed=observed,
+            excluded=tuple(sorted(excluded, key=lambda p: (-p.allele_frequency, p.provenance_key))),
+            min_allele_number=min_allele_number,
+        )
+
+    def max_allele_frequency(self, *, min_allele_number: int = 0) -> PopulationFrequency | None:
+        """Highest AF across populations whose cohort is large enough to be believed.
+
+        Thin accessor over :meth:`select_max_allele_frequency`; use that when the
+        excluded populations need to be reported. The default of ``0`` applies no
+        guard, so a caller with no configured threshold keeps the historical
+        behaviour rather than silently acquiring a new one.
+        """
+        return self.select_max_allele_frequency(min_allele_number=min_allele_number).observed
 
     @property
     def has_frequency_data(self) -> bool:

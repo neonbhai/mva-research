@@ -47,7 +47,13 @@ from mva.models.drug import (
     RejectionReason,
 )
 from mva.models.evidence import EvidenceDirection, EvidenceType
-from mva.models.mechanism import EffectDirection, MechanismHypothesis, directions_agree
+from mva.models.mechanism import (
+    EffectDirection,
+    MechanismHypothesis,
+    MechanismNode,
+    MechanismNodeKind,
+    directions_agree,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 KNOWLEDGE = REPO_ROOT / "knowledge" / "public"
@@ -204,15 +210,19 @@ def test_context_dependent_direction_is_undetermined_penalised_and_flagged(
 ) -> None:
     """SYNTH-DRUG-E is bidirectional in the literature. That is neither agreement nor
     disagreement: it is accepted, penalised, and flagged DIRECTION_UNKNOWN."""
-    synthaxel = _by_id(result, "SYNTH-DRUG-E")
+    synthaxel = _by_id(result, "SYNTH-DRUG-G")
     top = result.accepted[0]
 
-    assert synthaxel.rejected is False
+    assert synthaxel.rejected is False, (
+        "SYNTH-DRUG-G carries the ASSUMPTION-DRUG-02 lesson since ADR 0011: an "
+        "undetermined direction is neither agreement nor a wrong-direction "
+        "rejection. Its CIN risk IS assessed, so nothing else disqualifies it."
+    )
     assert synthaxel.directions_agree is None
     assert synthaxel.observed_direction is EffectDirection.CONTEXT_DEPENDENT
     assert synthaxel.rejection_reasons == (), "an accepted drug carries no rejection reasons"
 
-    row = _record(result, "SYNTH-DRUG-E")
+    row = _record(result, "SYNTH-DRUG-G")
     assert row["rejected"] is False
     reasons = str(row["reasons"])
     assert "direction_unknown" in reasons
@@ -228,7 +238,7 @@ def test_context_dependent_direction_is_undetermined_penalised_and_flagged(
     undetermined = [
         item
         for item in result.evidence
-        if item.subject_id == "SYNTH-DRUG-E" and "UNDETERMINED" in item.claim
+        if item.subject_id == "SYNTH-DRUG-G" and "UNDETERMINED" in item.claim
     ]
     assert len(undetermined) == 1
     assert undetermined[0].direction is EvidenceDirection.NEUTRAL
@@ -236,16 +246,53 @@ def test_context_dependent_direction_is_undetermined_penalised_and_flagged(
 
 @pytest.mark.unit
 def test_unsigned_direction_never_counts_as_agreement() -> None:
-    """Every unsigned direction resolves to None, on both sides of the comparison."""
-    for unsigned in (
-        EffectDirection.UNKNOWN,
-        EffectDirection.CONTEXT_DEPENDENT,
-        EffectDirection.NO_CHANGE,
-    ):
+    """Every unsigned direction resolves to None, on both sides of the comparison.
+
+    `NO_CHANGE` is deliberately NOT in this list. A demonstrated null is a signed,
+    established finding, not an absence of one; see the measured-null test below.
+    """
+    for unsigned in (EffectDirection.UNKNOWN, EffectDirection.CONTEXT_DEPENDENT):
         assert check_direction(required=EffectDirection.RESTORE, observed=unsigned).agrees is None
         assert check_direction(required=unsigned, observed=EffectDirection.RESTORE).agrees is None
         verdict = check_direction(required=EffectDirection.RESTORE, observed=unsigned)
         assert verdict.rejection_reason is RejectionReason.DIRECTION_UNKNOWN
+
+
+@pytest.mark.unit
+def test_a_measured_null_disagrees_and_scores_below_an_unsigned_peer(
+    mechanism: MechanismHypothesis, catalog: DrugCatalog
+) -> None:
+    """A demonstrated `no_change` is evidence AGAINST, not a gap in the record.
+
+    Treating it as unsigned would hand it the undetermined-direction credit and a
+    recommendation to go and measure the sign that has already been measured. It
+    must therefore score strictly below a genuinely `context_dependent` peer, whose
+    sign really is open.
+    """
+    verdict = check_direction(required=EffectDirection.RESTORE, observed=EffectDirection.NO_CHANGE)
+    assert verdict.agrees is False
+    assert "demonstrated null" in verdict.rationale
+    assert "disease direction" not in verdict.rationale, (
+        "a null result does not push the target anywhere; the rationale must not say it does"
+    )
+
+    base = _entry(catalog, "SYNTH-DRUG-A")
+    null_result = replace(
+        base, drug_id="SYNTH-DRUG-NULL", observed_direction=EffectDirection.NO_CHANGE
+    )
+    unsigned_peer = replace(
+        base, drug_id="SYNTH-DRUG-CTX", observed_direction=EffectDirection.CONTEXT_DEPENDENT
+    )
+    triaged = generate_drug_hypotheses(
+        mechanism=mechanism,
+        catalog=DrugCatalog([null_result, unsigned_peer], version=VERSION),
+        clock=demo_clock(),
+    )
+    scored = {d.drug_id: d for d in triaged.all_hypotheses}
+    assert scored["SYNTH-DRUG-NULL"].directions_agree is False
+    assert scored["SYNTH-DRUG-NULL"].rejected is True
+    assert scored["SYNTH-DRUG-CTX"].directions_agree is None
+    assert scored["SYNTH-DRUG-NULL"].score < scored["SYNTH-DRUG-CTX"].score
 
 
 # 10 ------------------------------------------------------------------------
@@ -349,6 +396,7 @@ def test_rejected_drugs_are_preserved_with_their_reasons(
     assert {d.drug_id for d in result.rejected} == {
         "SYNTH-DRUG-B",
         "SYNTH-DRUG-C",
+        "SYNTH-DRUG-E",  # unassessed CIN risk, disqualifying since ADR 0011
         "SYNTH-DRUG-F",
     }
     assert len(result.accepted) + len(result.rejected) == len(catalog)
@@ -385,20 +433,66 @@ def test_accepted_list_is_ranked_with_synthexostat_first(result: DrugTriageResul
 
 @pytest.mark.unit
 def test_golden_outcomes_match_the_locked_expectations(result: DrugTriageResult) -> None:
-    """Lock against tests/golden/expected_drug_outcomes.tsv (GP-32)."""
-    expected: dict[str, tuple[bool, str | None]] = {
-        "SYNTH-DRUG-A": (False, None),
-        "SYNTH-DRUG-B": (True, "wrong_direction"),
-        "SYNTH-DRUG-C": (True, "not_approved"),
-        "SYNTH-DRUG-D": (False, None),
-        "SYNTH-DRUG-E": (False, None),
-        "SYNTH-DRUG-F": (True, "target_not_in_mechanism"),
-    }
-    for drug_id, (rejected, reason) in expected.items():
+    """Lock against tests/golden/expected_drug_outcomes.tsv (GP-32).
+
+    The expectations are READ FROM THE FILE, not restated as a literal here. A
+    reproducibility review found the previous version kept a hardcoded dict whose
+    docstring merely *claimed* to be locked against the TSV — so flipping two
+    verdicts in the golden file left the whole suite green, and the artifact
+    GP-32 protects was decorative.
+    """
+    expected = _read_golden_outcomes()
+    assert expected, "no golden drug outcomes were loaded from the TSV"
+
+    produced = {d.drug_id for d in result.all_hypotheses}
+    assert produced == set(expected), (
+        "the catalogue and the golden expectations have drifted apart: "
+        f"only produced={sorted(produced - set(expected))} "
+        f"only expected={sorted(set(expected) - produced)}"
+    )
+
+    for drug_id, (outcome, reason) in sorted(expected.items()):
         hypothesis = _by_id(result, drug_id)
-        assert hypothesis.rejected is rejected, drug_id
-        if reason is not None:
-            assert hypothesis.rejection_reasons[0].value == reason, drug_id
+        should_reject = outcome == "rejected"
+        assert hypothesis.rejected is should_reject, (
+            f"{drug_id} ({hypothesis.name}): expected {outcome!r}, "
+            f"got rejected={hypothesis.rejected} "
+            f"reasons={[r.value for r in hypothesis.rejection_reasons]}"
+        )
+        if reason:
+            assert hypothesis.rejection_reasons, f"{drug_id} rejected with no reason"
+            assert hypothesis.rejection_reasons[0].value == reason, (
+                f"{drug_id}: leading rejection reason is "
+                f"{hypothesis.rejection_reasons[0].value!r}, expected {reason!r} "
+                f"(all: {[r.value for r in hypothesis.rejection_reasons]})"
+            )
+        if outcome == "accepted_direction_undetermined":
+            assert hypothesis.directions_agree is None, (
+                f"{drug_id} should carry an UNDETERMINED direction; got "
+                f"{hypothesis.directions_agree!r}. 'Cannot determine' and 'agrees' "
+                "are different findings (ASSUMPTION-DRUG-02)."
+            )
+        if outcome == "accepted_symptomatic_only":
+            assert hypothesis.intervention_class is InterventionClass.SYMPTOMATIC, (
+                f"{drug_id} must stay classified symptomatic, not presented as "
+                "correcting the mechanism (ASSUMPTION-DRUG-04)"
+            )
+
+
+def _read_golden_outcomes() -> dict[str, tuple[str, str]]:
+    """Parse tests/golden/expected_drug_outcomes.tsv -> {drug_id: (outcome, reason)}."""
+    import csv
+
+    path = Path(__file__).resolve().parents[1] / "golden" / "expected_drug_outcomes.tsv"
+    rows = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return {
+        row["drug_id"]: (row["expected_outcome"], row["expected_primary_reason"].strip())
+        for row in csv.DictReader(rows, delimiter="\t")
+    }
 
 
 # 15 ------------------------------------------------------------------------
@@ -430,7 +524,7 @@ def test_catalogue_preserves_unknowns_as_unknown(catalog: DrugCatalog) -> None:
     assert synthophore.concentration_achievable is None
     assert synthophore.has_administration_route is False
     assert _entry(catalog, "SYNTH-DRUG-B").approved_name is None
-    assert len(catalog) == 6
+    assert len(catalog) == 7  # A-G; SYNTH-DRUG-G added by ADR 0011
     assert [e.drug_id for e in catalog.for_target_node("N5_process")] == [
         "SYNTH-DRUG-A",
         "SYNTH-DRUG-B",
@@ -495,15 +589,69 @@ def test_unreachable_concentration_is_a_concern(
 
 
 @pytest.mark.unit
-def test_unassessed_cin_risk_is_a_concern_not_a_pass(
+def test_unassessed_cin_risk_blocks_in_a_cin_context(
     mechanism: MechanismHypothesis, catalog: DrugCatalog
 ) -> None:
-    verdict = assess_safety(
-        _entry(catalog, "SYNTH-DRUG-E"), mechanism=mechanism, clock=demo_clock()
-    )
-    assert any("not been assessed" in c.description for c in verdict.concerns)
-    assert verdict.disqualifying is False
+    """Mandatory question 7, unanswered, is a BLOCKING gap here — so it must block.
+
+    The model field, the evidence schema, the rendered report and
+    ASSUMPTION-DRUG-07 all call an unassessed oncogenic risk a blocking gap in a
+    chromosomal-instability disorder. Recording it as a non-fatal concern let such
+    an agent be presented as a ranked candidate in a report that told the reader, in
+    the same paragraph, that the question "must be answered before any further
+    consideration".
+    """
+    assert is_chromosomal_instability_context(mechanism) is True
     assert is_neurological_context(mechanism) is True
+    entry = replace(_entry(catalog, "SYNTH-DRUG-A"), worsens_cin=None)
+    verdict = assess_safety(entry, mechanism=mechanism, clock=demo_clock())
+
+    assert any("not been assessed" in c.description for c in verdict.concerns)
+    assert verdict.disqualifying is True
+    assert RejectionReason.ONCOGENIC_RISK in verdict.reasons
+    blocking = [c for c in verdict.concerns if c.is_disqualifying]
+    assert blocking and blocking[0].concern_id.endswith("-CIN-UNASSESSED")
+
+    triaged = generate_drug_hypotheses(
+        mechanism=mechanism,
+        catalog=DrugCatalog([entry], version=VERSION),
+        clock=demo_clock(),
+    )
+    assert triaged.accepted == ()
+    assert triaged.rejected[0].rejection_reasons[0] is RejectionReason.ONCOGENIC_RISK
+
+
+@pytest.mark.unit
+def test_unassessed_cin_risk_outside_a_cin_context_is_recorded_not_fatal(
+    catalog: DrugCatalog,
+) -> None:
+    """The gate is context-sensitive, not a blanket rule: elsewhere it stays a concern."""
+    benign = MechanismHypothesis(
+        mechanism_id="MECH-BENIGN-01",
+        gene_symbol="SYNTHOTHER1",
+        summary="A synthetic transporter deficiency with no chromosome-segregation component.",
+        nodes=(
+            MechanismNode(
+                node_id="N1_protein",
+                kind=MechanismNodeKind.PROTEIN,
+                label="Synthetic solute transporter",
+                state_in_patient=EffectDirection.LOSS_OF_FUNCTION,
+                deviation_is_pathological=True,
+            ),
+        ),
+        links=(),
+        disease_direction=EffectDirection.LOSS_OF_FUNCTION,
+        therapeutic_target_node_id="N1_protein",
+        required_correction=EffectDirection.RESTORE,
+    )
+    assert is_chromosomal_instability_context(benign) is False
+    verdict = assess_safety(
+        replace(_entry(catalog, "SYNTH-DRUG-A"), worsens_cin=None),
+        mechanism=benign,
+        clock=demo_clock(),
+    )
+    assert verdict.disqualifying is False
+    assert RejectionReason.SAFETY_CONCERN in verdict.reasons
 
 
 @pytest.mark.unit
@@ -610,3 +758,143 @@ def test_audit_rows_are_renderable_scalars(result: DrugTriageResult) -> None:
         assert set(row) >= {"drug_id", "rejected", "primary_reason", "reasons", "rationale"}
         for value in row.values():
             assert isinstance(value, str | bool | int | float | type(None))
+
+
+# compensatory nodes ----------------------------------------------------------
+
+
+def _with_compensatory_node(node_id: str) -> MechanismHypothesis:
+    """The shipped chain, with one node re-marked as a compensatory response.
+
+    Rebuilt through the constructor rather than `model_copy` so the hypothesis
+    validator actually runs on the result.
+    """
+    base = _mechanism()
+    nodes = tuple(
+        node.model_copy(update={"deviation_is_pathological": False})
+        if node.node_id == node_id
+        else node
+        for node in base.nodes
+    )
+    fields = {name: getattr(base, name) for name in MechanismHypothesis.model_fields}
+    fields["nodes"] = nodes
+    return MechanismHypothesis(**fields)
+
+
+@pytest.mark.unit
+def test_a_compensatory_node_yields_no_corrective_direction(
+    mechanism: MechanismHypothesis, catalog: DrugCatalog
+) -> None:
+    """Not every deviation from wild type should be pushed back.
+
+    Clearance of aneuploid progenitors deviates from wild type and is protective;
+    "correcting" it suppresses the response. No corrective sign follows from a
+    compensatory node's state alone, so the check must return UNKNOWN and send the
+    candidate to the "cannot determine" path — never award it agreement.
+    """
+    assert required_direction_for_node(mechanism, "N6_cellphen") is EffectDirection.DECREASE
+    compensatory = _with_compensatory_node("N6_cellphen")
+    assert required_direction_for_node(compensatory, "N6_cellphen") is EffectDirection.UNKNOWN
+
+    # The same agent flips from an apparent agreement to an explicit unknown.
+    suppressor = replace(
+        _entry(catalog, "SYNTH-DRUG-E"),
+        observed_direction=EffectDirection.DECREASE,
+        worsens_cin=False,
+    )
+    as_pathological = generate_drug_hypotheses(
+        mechanism=mechanism,
+        catalog=DrugCatalog([suppressor], version=VERSION),
+        clock=demo_clock(),
+    ).all_hypotheses[0]
+    as_compensatory = generate_drug_hypotheses(
+        mechanism=compensatory,
+        catalog=DrugCatalog([suppressor], version=VERSION),
+        clock=demo_clock(),
+    ).all_hypotheses[0]
+
+    assert as_pathological.directions_agree is True
+    assert as_compensatory.directions_agree is None
+    assert as_compensatory.score < as_pathological.score
+
+
+# non-fatal reasons are carried, not discarded --------------------------------
+
+
+@pytest.mark.unit
+def test_an_accepted_hypothesis_carries_its_non_fatal_reasons(result: DrugTriageResult) -> None:
+    """GP-19: a reason that did not kill the candidate is still a finding.
+
+    Computing `MECHANISM_MISMATCH` and then dropping it on the floor is what left
+    the symptomatic/disease-modifying separation resting on a single curated cell.
+    """
+    synthazepam = _by_id(result, "SYNTH-DRUG-D")
+    assert synthazepam.rejected is False
+    assert synthazepam.rejection_reasons == ()
+    assert RejectionReason.MECHANISM_MISMATCH in synthazepam.concerns
+    # A reason is fatal or a concern, never both.
+    for hypothesis in result.all_hypotheses:
+        assert not (set(hypothesis.concerns) & set(hypothesis.rejection_reasons))
+        if hypothesis.rejected:
+            assert hypothesis.concerns == ()
+
+
+@pytest.mark.unit
+def test_acting_off_the_therapeutic_target_is_stated_whatever_the_declared_class(
+    mechanism: MechanismHypothesis, catalog: DrugCatalog
+) -> None:
+    """The structural claim must not rest on a label.
+
+    Flipping one TSV cell — Synthazepam's `intervention_class` — moved a
+    phenotype-level agent into the disease-modifying section at rank 1, score 1.000,
+    with nothing in the report saying it acts on the organismal phenotype. The
+    statement is therefore gated on the target node, not on the class.
+    """
+    relabelled = replace(
+        _entry(catalog, "SYNTH-DRUG-D"), intervention_class=InterventionClass.DISEASE_MODIFYING
+    )
+    triaged = generate_drug_hypotheses(
+        mechanism=mechanism,
+        catalog=DrugCatalog([relabelled], version=VERSION),
+        clock=demo_clock(),
+    )
+    hypothesis = triaged.all_hypotheses[0]
+    assert hypothesis.intervention_class is InterventionClass.DISEASE_MODIFYING
+    assert hypothesis.target_node_id != mechanism.therapeutic_target_node_id
+    assert RejectionReason.MECHANISM_MISMATCH in hypothesis.concerns
+
+    statements = [
+        item for item in triaged.evidence if "does NOT correct the mechanism" in item.claim
+    ]
+    assert len(statements) == 1
+    assert "never be presented as disease-modifying" in statements[0].claim
+    assert mechanism.therapeutic_target_node_id in statements[0].claim
+
+
+# copies must re-validate -----------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_rejected_wrong_direction_drug_cannot_be_copied_into_acceptance(
+    result: DrugTriageResult,
+) -> None:
+    """`model_copy(update=...)` does not re-run validators; `revalidated_copy` does.
+
+    Without this the contraindicated compound can be flipped to `rejected=False`
+    with no error, after which it matches no report section at all and disappears
+    from the output entirely rather than being flagged.
+    """
+    synthinib = _by_id(result, "SYNTH-DRUG-B")
+    assert synthinib.directions_agree is False and synthinib.rejected is True
+
+    with pytest.raises(ValueError, match="wrong-direction agent must be rejected"):
+        synthinib.revalidated_copy(rejected=False, rejection_reasons=())
+
+    # The bypass still exists in pydantic itself, which is exactly why the pipeline
+    # never uses it and the renderer re-checks.
+    smuggled = synthinib.model_copy(update={"rejected": False, "rejection_reasons": ()})
+    assert smuggled.rejected is False, "model_copy is expected to skip validation"
+
+    # And the rank stamp the pipeline applies goes through the validating path.
+    top = result.accepted[0]
+    assert top.revalidated_copy(rank=7).rank == 7

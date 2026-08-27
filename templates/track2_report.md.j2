@@ -7,6 +7,9 @@
 
 - Target is a node in this mechanism: {{ drug.target_in_mechanism }}
 - Rationale: {{ drug.rationale }}
+{% if drug.concerns %}
+- **Recorded concerns (not disqualifying): {{ drug.concerns | join(", ") }}.** These were raised against this candidate and did not kill it. They are printed here because a candidate whose near misses were computed and then dropped reads as clean when it is only "not disqualified" (GP-19).
+{% endif %}
 
 The eight mandatory questions:
 

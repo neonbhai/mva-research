@@ -22,7 +22,14 @@ from dataclasses import dataclass
 
 from mva.config import FrequencyThresholds, QualityThresholds
 from mva.models.genome import CANONICAL_CONTIGS, GenomeBuild
-from mva.models.variant import FilterStatus, ImpactSeverity, VariantRecord, Zygosity
+from mva.models.variant import (
+    INGESTION_QC_FLAGS,
+    UNTRUSTED_CALL_FLAGS,
+    FilterStatus,
+    ImpactSeverity,
+    VariantRecord,
+    Zygosity,
+)
 
 # ---------------------------------------------------------------------------
 # Reason codes for HARD removal. Every one of these describes a record that is
@@ -81,22 +88,22 @@ SOFT_FLAGS: tuple[str, ...] = (
 #: QC flags an upstream ingestion stage may attach that mean "do not trust this
 #: call". Recognised by name so that `low_quality_call` genuinely *inherits*
 #: upstream findings rather than silently re-deriving a subset of them.
-INGESTION_QUALITY_FLAGS: frozenset[str] = frozenset(
-    {
-        "allele_balance_outlier",
-        "caller_filtered",
-        "filtered_call",
-        "low_allele_balance",
-        "low_complexity_region",
-        "low_depth",
-        "low_genotype_quality",
-        "low_gq",
-        "low_mappability",
-        "low_quality_call",
-        "segmental_duplication",
-        "strand_bias",
-    }
-)
+#:
+#: DERIVED, not re-typed. The hand-written version of this set named eight flags
+#: nothing in `src/` ever emitted (`strand_bias`, `low_mappability`, ...) while
+#: missing three that ingestion really does raise — so a `ref_allele_mismatch`
+#: variant, whose REF disagrees with the reference sequence, reached scoring with
+#: an analytical validity of 1.0 and no contradiction at all: a confidently wrong
+#: coordinate ranking like a clean call. Two packages that may not import each
+#: other (GP-03) share the vocabulary through :mod:`mva.models.variant` instead.
+INGESTION_QUALITY_FLAGS: frozenset[str] = UNTRUSTED_CALL_FLAGS | {FLAG_LOW_QUALITY_CALL}
+
+#: Ingestion findings that are recognised but are NOT quality concerns. Named
+#: rather than omitted, so "considered and deliberately not treated as a defect"
+#: stays distinguishable from "forgotten". Together with
+#: :data:`INGESTION_QUALITY_FLAGS` this partitions :data:`INGESTION_QC_FLAGS`,
+#: and a test holds the two sets to that.
+INGESTION_NEUTRAL_FLAGS: frozenset[str] = INGESTION_QC_FLAGS - INGESTION_QUALITY_FLAGS
 
 #: Impacts that, on their own, do not support a severe loss-of-function hypothesis.
 BENIGN_IMPACTS: frozenset[ImpactSeverity] = frozenset({ImpactSeverity.LOW, ImpactSeverity.MODIFIER})
@@ -206,8 +213,14 @@ def _frequency_flag(variant: VariantRecord, frequency: FrequencyThresholds) -> s
     Maximum rather than global: a variant common in any single ancestry is not a
     plausible ultra-rare cause, and the global figure systematically
     under-estimates frequency for alleles enriched in under-represented cohorts.
+
+    Populations reporting fewer than ``frequency.min_allele_number`` alleles are
+    skipped, because a single observation in a 40-chromosome subpopulation is an
+    AF of 0.025 and would flag a genuine founder allele ``common_variant``
+    (ADR 0010). Where no population is large enough, the result is treated as an
+    absence of frequency data rather than as either rarity or commonness.
     """
-    observed = variant.max_allele_frequency()
+    observed = variant.max_allele_frequency(min_allele_number=frequency.min_allele_number)
     if observed is None:
         return FLAG_NO_FREQUENCY_DATA
     if observed.allele_frequency > frequency.max_plausible_recessive:
@@ -232,15 +245,19 @@ def _quality_flags(variant: VariantRecord, quality: QualityThresholds) -> tuple[
         low_quality = True
 
     mosaic = False
-    balance = genotype.allele_balance
-    if genotype.is_heterozygous and balance is not None:
-        if balance > quality.max_allele_balance_het:
+    # `VariantRecord.allele_fraction`, never `Genotype.allele_balance`: on a
+    # record split out of a multiallelic site the latter is alt/(ref+alt) over
+    # the SITE's ref depth, which reads 0.91 for a textbook compound het and
+    # flags it low quality for the shape of its VCF line (ADR 0010 sibling fix).
+    fraction = variant.allele_fraction
+    if genotype.is_heterozygous and fraction is not None:
+        if fraction > quality.max_allele_balance_het:
             low_quality = True
-        elif balance < quality.min_allele_balance_het:
+        elif fraction < quality.min_allele_balance_het:
             # Below the het band but above the mosaic floor is flagged as
             # possible mosaicism rather than as noise: in a mosaic aneuploidy
             # disorder a skewed allele balance may be the signal itself.
-            if balance >= quality.mosaic_allele_balance_floor:
+            if fraction >= quality.mosaic_allele_balance_floor:
                 mosaic = True
             else:
                 low_quality = True
@@ -313,7 +330,7 @@ def select_candidate_variants(
     for variant in variants:
         if not variant.genotype.carries_alt:
             continue
-        observed = variant.max_allele_frequency()
+        observed = variant.max_allele_frequency(min_allele_number=frequency.min_allele_number)
         if observed is not None and observed.allele_frequency > frequency.max_plausible_recessive:
             continue
         selected.append(variant.with_qc_flags(FLAG_PLAUSIBLE_CANDIDATE))

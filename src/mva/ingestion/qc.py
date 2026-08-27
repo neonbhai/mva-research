@@ -29,7 +29,7 @@ from typing import Final
 
 from mva.clock import Clock
 from mva.config import QualityThresholds
-from mva.ingestion.normalise import OP_SPLIT_MULTIALLELIC, REF_ALLELE_MISMATCH_FLAG
+from mva.ingestion.normalise import REF_ALLELE_MISMATCH_FLAG
 from mva.models.base import AssertionTier
 from mva.models.evidence import (
     EvidenceCategory,
@@ -39,23 +39,32 @@ from mva.models.evidence import (
     EvidenceType,
     make_evidence_id,
 )
-from mva.models.variant import FilterStatus, VariantRecord, Zygosity
+from mva.models.variant import (
+    FLAG_FILTERED_BY_CALLER,
+    FLAG_HIGH_ALLELE_BALANCE,
+    FLAG_LOW_ALLELE_BALANCE,
+    FLAG_LOW_DEPTH,
+    FLAG_LOW_GQ,
+    FLAG_NO_CALLER_FILTER,
+    FLAG_NO_QUALITY_METRICS,
+    FLAG_POSSIBLE_MOSAIC,
+    FilterStatus,
+    VariantRecord,
+    Zygosity,
+)
 
 # ---------------------------------------------------------------------------
 # Flag vocabulary
 # ---------------------------------------------------------------------------
 
-FLAG_FILTERED_BY_CALLER: Final = "filtered_by_caller"
-FLAG_LOW_DEPTH: Final = "low_depth"
-FLAG_LOW_GQ: Final = "low_gq"
-FLAG_POSSIBLE_MOSAIC: Final = "possible_mosaic"
-FLAG_LOW_ALLELE_BALANCE: Final = "low_allele_balance"
-FLAG_HIGH_ALLELE_BALANCE: Final = "high_allele_balance"
-FLAG_NO_QUALITY_METRICS: Final = "no_quality_metrics"
+# The flag names themselves are imported from :mod:`mva.models.variant`, which
+# owns the vocabulary shared with the prioritisation stage; only the emission
+# ORDER and the contradiction classification are this module's business.
 
 #: Canonical emission order, so ``qc_flags`` is deterministic (GP-30).
 FLAG_ORDER: Final[tuple[str, ...]] = (
     FLAG_FILTERED_BY_CALLER,
+    FLAG_NO_CALLER_FILTER,
     FLAG_LOW_DEPTH,
     FLAG_LOW_GQ,
     FLAG_POSSIBLE_MOSAIC,
@@ -98,6 +107,18 @@ _REF_MISMATCH_LIMITATION: Final = (
 _NO_METRICS_LIMITATION: Final = (
     " No depth, genotype-quality or allelic-depth values were reported, so the absence "
     "of a quality flag here is absence of information, not evidence of quality."
+)
+_NO_CALLER_FILTER_LIMITATION: Final = (
+    " The FILTER column was absent, so the caller recorded no opinion either way. That "
+    "is not a passing call and not a rejected one; nothing about site-level filtering "
+    "can be concluded from this record."
+)
+
+#: Flags that are noted but argue neither for nor against the call. Reported so a
+#: reader can see they were considered, and kept out of the concern list so the
+#: claim sentence does not describe them as problems.
+NEUTRAL_FLAGS: Final[frozenset[str]] = frozenset(
+    {FLAG_NO_CALLER_FILTER, FLAG_POSSIBLE_MOSAIC, FLAG_NO_QUALITY_METRICS}
 )
 
 
@@ -165,8 +186,14 @@ def _flags_for(record: VariantRecord, thresholds: QualityThresholds) -> tuple[st
     genotype = record.genotype
     raised: set[str] = set()
 
-    if record.filter_status is not FilterStatus.PASS:
+    # Only a real FILTER entry means the caller objected. A missing FILTER
+    # column means the caller expressed no opinion at all, and reporting that as
+    # "filtered by caller" invents a rejection nobody made — it produced a
+    # CONTRADICTS item on immaculate DP=40/GQ=99 calls.
+    if record.filter_status is FilterStatus.FILTERED:
         raised.add(FLAG_FILTERED_BY_CALLER)
+    elif record.filter_status is FilterStatus.MISSING:
+        raised.add(FLAG_NO_CALLER_FILTER)
     if genotype.depth is not None and genotype.depth < thresholds.min_depth:
         raised.add(FLAG_LOW_DEPTH)
     if (
@@ -192,31 +219,14 @@ def _flags_for(record: VariantRecord, thresholds: QualityThresholds) -> tuple[st
 
 
 def allele_fraction(record: VariantRecord) -> float | None:
-    """The ALT read fraction in a form the het band can actually be applied to.
+    """The ALT read fraction the heterozygous band may be applied to.
 
-    For a biallelic call this is exactly ``Genotype.allele_balance``.
-
-    For a record decomposed from a multiallelic site it is not, and the difference
-    matters. After splitting ``A>G,GT`` with ``GT=1/2`` and ``AD=2,21,21``, allele 1
-    holds ``ref_reads=2`` and ``alt_reads=21`` — but those two reads are the *site's*
-    REF depth and exclude the 21 reads carrying the other ALT. ``alt/(ref+alt)`` is
-    then 0.91 and looks homozygous, so a textbook compound-heterozygous call would
-    be flagged ``high_allele_balance`` and down-ranked for an artifact of the
-    representation. Where the site depth is known, the site allele fraction
-    ``alt/DP`` (0.48 here) is banded instead; where it is not, ``None`` is returned
-    and no allele-balance flag is raised, because a wrong flag is worse than none
-    (GP-14).
+    Delegates to :attr:`VariantRecord.allele_fraction`, which is where the
+    site-aware formula lives so that the prioritisation stage can use the same
+    one without importing this package (GP-01/GP-03). Kept as a function because
+    it is this module's published name for the quantity.
     """
-    genotype = record.genotype
-    balance = genotype.allele_balance
-    if OP_SPLIT_MULTIALLELIC not in record.normalisation_ops:
-        return balance
-    depth, alt_reads, ref_reads = genotype.depth, genotype.alt_reads, genotype.ref_reads
-    if depth is None or alt_reads is None:
-        return None
-    if depth <= 0 or depth < (ref_reads or 0) + alt_reads:
-        return balance
-    return alt_reads / depth
+    return record.allele_fraction
 
 
 def _allele_balance_flag(balance: float, thresholds: QualityThresholds) -> str | None:
@@ -281,11 +291,18 @@ def _evidence_for(
 
 def _claim_for(record: VariantRecord) -> str:
     genotype = record.genotype
-    verdict = (
-        "no analytical concerns were raised"
-        if not record.qc_flags
-        else "analytical concerns raised: " + ", ".join(record.qc_flags)
-    )
+    concerns = [flag for flag in record.qc_flags if flag in CONTRADICTING_FLAGS]
+    noted = [flag for flag in record.qc_flags if flag not in CONTRADICTING_FLAGS]
+    if concerns:
+        verdict = "analytical concerns raised: " + ", ".join(concerns)
+        if noted:
+            verdict += " (also noted: " + ", ".join(noted) + ")"
+    elif noted:
+        # A flag that is not a concern must not be rendered as one. Saying
+        # "analytical concerns raised: no_caller_filter" reads as a rejection.
+        verdict = "no analytical concerns were raised (noted: " + ", ".join(noted) + ")"
+    else:
+        verdict = "no analytical concerns were raised"
     return (
         f"{record.variant_id}: caller-reported depth={_render(genotype.depth)}, "
         f"GQ={_render(genotype.genotype_quality)}, "
@@ -297,7 +314,7 @@ def _claim_for(record: VariantRecord) -> str:
 def _direction_for(record: VariantRecord, concerns: tuple[str, ...]) -> EvidenceDirection:
     if concerns:
         return EvidenceDirection.CONTRADICTS
-    if FLAG_NO_QUALITY_METRICS in record.qc_flags or FLAG_POSSIBLE_MOSAIC in record.qc_flags:
+    if NEUTRAL_FLAGS.intersection(record.qc_flags):
         return EvidenceDirection.NEUTRAL
     return EvidenceDirection.SUPPORTS
 
@@ -336,6 +353,8 @@ def _limitations_for(record: VariantRecord) -> str:
         limitations += _REF_MISMATCH_LIMITATION
     if FLAG_NO_QUALITY_METRICS in record.qc_flags:
         limitations += _NO_METRICS_LIMITATION
+    if FLAG_NO_CALLER_FILTER in record.qc_flags:
+        limitations += _NO_CALLER_FILTER_LIMITATION
     return limitations
 
 
@@ -351,7 +370,7 @@ def _payload_for(
 ) -> dict[str, str | int | float | bool | None]:
     """Structured detail. Aggregate-safe fields only — never the raw GT string."""
     balance = record.genotype.allele_balance
-    fraction = allele_fraction(record)
+    fraction = record.allele_fraction
     return {
         "depth": record.genotype.depth,
         "genotype_quality": record.genotype.genotype_quality,

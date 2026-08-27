@@ -36,6 +36,7 @@ from mva.privacy.classify import (
     is_sensitive_extension,
 )
 from mva.privacy.export import (
+    PUBLIC_EXPORT_ALLOWLIST,
     ExportDecision,
     export_public_artifact,
     gate_public_export,
@@ -55,6 +56,7 @@ from mva.privacy.redact import (
 )
 
 __all__ = [
+    "PUBLIC_EXPORT_ALLOWLIST",
     "RULES",
     "SENSITIVE_EXTENSIONS",
     "AuditReport",

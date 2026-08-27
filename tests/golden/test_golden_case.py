@@ -182,6 +182,30 @@ def test_demo_artifacts_are_all_produced(
     assert not missing, f"demo did not produce: {sorted(missing)}"
 
 
+def test_every_report_carries_the_not_medical_advice_banner(
+    synthetic_config: CaseConfig, synthetic_workspace: Workspace
+) -> None:
+    """Each report is written as its own file and read on its own.
+
+    The rejection record shipped without a banner: read in isolation it names
+    compounds and lists, per compound, what would have to change for the rejection
+    to be revisited. A reader who opens only that file has no warning at all.
+    """
+    execute_pipeline(synthetic_config, synthetic_workspace)
+    reports = sorted(synthetic_workspace.root.glob("runs/*/reports/*.md"))
+    assert reports, "the demo produced no reports to check"
+    missing = [
+        path.name
+        for path in reports
+        if "not medical advice" not in path.read_text(encoding="utf-8").lower()
+    ]
+    assert not missing, (
+        f"Report(s) shipped with no NOT-MEDICAL-ADVICE text: {missing}. Every rendered "
+        "artifact is read on its own; add the banner to its template and to the context "
+        "the builder passes in."
+    )
+
+
 def test_repeat_run_is_byte_identical(
     synthetic_config: CaseConfig, synthetic_workspace: Workspace, tmp_path: Path
 ) -> None:

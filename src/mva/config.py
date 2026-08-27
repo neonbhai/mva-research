@@ -51,6 +51,61 @@ CLOUD_SYNCED_MARKERS: tuple[str, ...] = (
 CLOUD_SYNCED_HOME_DIRS: tuple[str, ...] = ("Desktop", "Documents")
 
 
+def path_is_within(child: Path, parent: Path) -> bool:
+    """Is ``child`` the same directory as ``parent``, or inside it?
+
+    GP-40's containment check cannot be a string comparison, and
+    ``Path.resolve().is_relative_to()`` is a string comparison wearing a costume.
+    ``resolve()`` expands symlinks and ``..`` but does **not** case-fold, and the
+    default macOS filesystem (APFS) is case-INsensitive: ``/x/REPO/ws`` and
+    ``/x/repo/ws`` are one directory with two spellings, and only the second was
+    recognised as being inside ``/x/repo``. Spelling a directory in the wrong case
+    is not an exotic attack — shell completion, a copied path from Finder and a
+    ``$HOME`` written by a different tool all produce it — and the consequence was
+    that a workspace physically inside the repository was accepted.
+
+    ``os.path.normcase`` does not help either: on POSIX it is the identity
+    function, so it is exactly as blind on macOS as ``resolve()`` is.
+
+    So containment is decided on filesystem IDENTITY. ``(st_dev, st_ino)`` names
+    the directory itself rather than a path to it, which is simultaneously robust
+    to case, to a symlinked intermediate component, to a hardlinked directory and
+    to ``..`` games. Every ancestor of the child is compared against the parent,
+    because "inside" means "the parent is one of my ancestors".
+
+    Two fallbacks remain for paths that do not exist yet (a workspace the user has
+    not created): the ordinary resolved-prefix test, and a case-folded prefix test.
+    The case-folded test can in principle produce a false positive on a
+    genuinely case-sensitive filesystem holding two directories that differ only
+    in case. That failure direction is the safe one — it refuses a workspace — and
+    it is far less likely than the failure it replaces.
+    """
+    child_real = Path(os.path.realpath(child))
+    parent_real = Path(os.path.realpath(parent))
+
+    if child_real == parent_real or child_real.is_relative_to(parent_real):
+        return True
+
+    parent_id = _path_identity(parent_real)
+    if parent_id is not None:
+        for ancestor in (child_real, *child_real.parents):
+            if _path_identity(ancestor) == parent_id:
+                return True
+
+    folded_child = str(child_real).casefold()
+    folded_parent = str(parent_real).casefold()
+    return folded_child == folded_parent or folded_child.startswith(folded_parent + os.sep)
+
+
+def _path_identity(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` — the filesystem's own name for a directory, or None."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
 class NetworkProfile(StrEnum):
     """How strictly outbound network is denied during sensitive stages."""
 
@@ -158,6 +213,20 @@ class FrequencyThresholds(StrictModel):
     rare: float = Field(default=1e-4, ge=0.0, le=1.0)
     low_frequency: float = Field(default=1e-3, ge=0.0, le=1.0)
     max_plausible_recessive: float = Field(default=1e-2, ge=0.0, le=1.0)
+    min_allele_number: int = Field(
+        default=2000,
+        ge=0,
+        description=(
+            "Minimum allele number (sampled chromosomes) a population must report "
+            "before it may set the maximum AF. Below it the population is recorded "
+            "as excluded rather than used. Guards the popmax against tiny cohorts: "
+            "AC=1 in AN=40 is an AF of 0.025 and reads as 'common', which is how a "
+            "genuine founder allele gets discarded (ADR 0010, "
+            "ASSUMPTION-FREQUENCY-02). A population that reports no allele number "
+            "at all stays eligible — an unrecorded cohort size is unknown, not "
+            "small (GP-14)."
+        ),
+    )
     absent_frequency_score: float = Field(
         default=0.5,
         ge=0.0,
@@ -365,7 +434,7 @@ def resolve_workspace(
 
     resolved = root.resolve()
 
-    if resolved.is_relative_to(repo) and not allow_inside_repo:
+    if path_is_within(resolved, repo) and not allow_inside_repo:
         msg = (
             f"Workspace resolves inside the repository ({resolved.as_posix()}). Patient "
             "data inside the repo tree is one `git add -A` away from being committed, "

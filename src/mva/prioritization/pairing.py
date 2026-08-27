@@ -19,7 +19,45 @@ from dataclasses import dataclass
 from itertools import combinations
 
 from mva.models.pair import InheritanceModel, PhaseEvidence, PhaseStatus, make_pair_id
-from mva.models.variant import ImpactSeverity, VariantRecord, Zygosity
+from mva.models.variant import FLAG_POSSIBLE_MOSAIC, ImpactSeverity, VariantRecord, Zygosity
+
+#: The mitochondrial contig. Its copy number is per-cell heteroplasmy, not two
+#: gene copies, so nuclear zygosity language does not apply to it at all.
+MITOCHONDRIAL_CONTIG = "chrM"
+
+#: Inheritance models this stage can actually produce from a proband-only VCF.
+#: Asserted by a test against a corpus, so the claim cannot quietly become false.
+PRODUCED_INHERITANCE_MODELS: frozenset[InheritanceModel] = frozenset(
+    {
+        InheritanceModel.COMPOUND_HETEROZYGOUS,
+        InheritanceModel.HOMOZYGOUS_RECESSIVE,
+        InheritanceModel.X_LINKED_RECESSIVE,
+        InheritanceModel.MITOCHONDRIAL,
+        InheritanceModel.MOSAIC,
+        InheritanceModel.UNKNOWN,
+    }
+)
+
+#: Members of :class:`InheritanceModel` this stage CANNOT produce, and why. The
+#: enum is the vocabulary of the domain, not a list of things this pipeline
+#: infers; every one of these needs data a proband-only VCF does not contain, and
+#: fabricating it from a single sample would be inventing an inheritance claim.
+#: ASSUMPTION-INHERITANCE-01 names this dictionary rather than restating it.
+UNPRODUCED_INHERITANCE_MODELS: dict[InheritanceModel, str] = {
+    InheritanceModel.DE_NOVO_DOMINANT: (
+        "de-novo status is a statement about the parents; it requires trio genotypes, "
+        "which this pipeline never receives"
+    ),
+    InheritanceModel.AUTOSOMAL_DOMINANT: (
+        "distinguishing a dominant allele from an incidental heterozygote requires "
+        "segregation in affected relatives or de-novo status; a lone het is scored as "
+        "InheritanceModel.UNKNOWN instead of being promoted"
+    ),
+    InheritanceModel.X_LINKED_DOMINANT: (
+        "same evidence gap as autosomal dominant, plus parental sex-of-transmission, "
+        "none of which a single proband VCF carries"
+    ),
+}
 
 #: Approximate span a short-read fragment can bridge. Beyond this, read-backed
 #: phasing is physically impossible, which is *why* phase is unknown — it says
@@ -86,12 +124,22 @@ class PairCandidate:
         return (self.gene_symbol, self.variant_a.sort_key(), second, self.pair_id)
 
 
-def _alt_haplotype_indices(genotype_string: str) -> frozenset[int] | None:
-    """Haplotype slots carrying an alternate allele in a phased diploid GT.
+def _alt_haplotype_indices(
+    genotype_string: str, alt_allele_index: int | None = None
+) -> frozenset[int] | None:
+    """Haplotype slots carrying THIS record's alternate allele in a phased diploid GT.
 
     ``'1|0'`` -> ``{0}``, ``'0|1'`` -> ``{1}``, ``'1|1'`` -> ``{0, 1}``.
     Returns ``None`` when the genotype is unphased, not diploid, or contains a
-    missing allele — all cases where nothing may be concluded.
+    missing or unparseable allele — all cases where nothing may be concluded.
+
+    ``alt_allele_index`` is the record's own 1-based ALT index, recorded at parse
+    time. It matters at a multiallelic site: the split records keep the site's GT
+    verbatim, so without the index ``'1|2'`` reads as "an alternate allele on both
+    haplotypes" and the pair bails to UNKNOWN — discarding phase the caller had
+    already resolved. With it, allele 1 is unambiguously on slot 0 and allele 2 on
+    slot 1, and a genuine *trans* call survives. ``None`` keeps the historical
+    any-alternate-allele behaviour for records that predate the field.
     """
     if "|" not in genotype_string:
         return None
@@ -100,9 +148,12 @@ def _alt_haplotype_indices(genotype_string: str) -> frozenset[int] | None:
         return None
     indices: set[int] = set()
     for slot, allele in enumerate(alleles):
-        if allele in {".", ""}:
+        if not allele.isdigit():
             return None
-        if allele != "0":
+        value = int(allele)
+        if value == 0:
+            continue
+        if alt_allele_index is None or value == alt_allele_index:
             indices.add(slot)
     return frozenset(indices)
 
@@ -166,8 +217,8 @@ def infer_phase(a: VariantRecord, b: VariantRecord) -> PhaseEvidence:
         and a.genotype.phase_set == b.genotype.phase_set
     )
     if same_phase_set:
-        slots_a = _alt_haplotype_indices(a.genotype.genotype_string)
-        slots_b = _alt_haplotype_indices(b.genotype.genotype_string)
+        slots_a = _alt_haplotype_indices(a.genotype.genotype_string, a.genotype.alt_allele_index)
+        slots_b = _alt_haplotype_indices(b.genotype.genotype_string, b.genotype.alt_allele_index)
         if slots_a is not None and slots_b is not None and len(slots_a) == 1 == len(slots_b):
             if slots_a == slots_b:
                 return PhaseEvidence(
@@ -226,6 +277,10 @@ def _promoted_flags(variants: tuple[VariantRecord, ...]) -> tuple[str, ...]:
 
 def _pair_inheritance_model(a: VariantRecord, b: VariantRecord) -> tuple[InheritanceModel, bool]:
     """Model for a two-variant candidate, plus whether the zygosities are mixed."""
+    if _is_mitochondrial(a) and _is_mitochondrial(b):
+        # Two mtDNA calls are not two gene copies; "compound heterozygous" is not
+        # a statement that can be made about a heteroplasmic multi-copy genome.
+        return InheritanceModel.MITOCHONDRIAL, False
     if a.genotype.zygosity is Zygosity.HET and b.genotype.zygosity is Zygosity.HET:
         return InheritanceModel.COMPOUND_HETEROZYGOUS, False
     # A homozygous or hemizygous member already accounts for both gene copies on
@@ -234,7 +289,25 @@ def _pair_inheritance_model(a: VariantRecord, b: VariantRecord) -> tuple[Inherit
     return InheritanceModel.UNKNOWN, True
 
 
+def _is_mitochondrial(variant: VariantRecord) -> bool:
+    return variant.coordinate.contig == MITOCHONDRIAL_CONTIG
+
+
 def _single_inheritance_model(variant: VariantRecord) -> InheritanceModel:
+    """The model a single call supports, tested most-specific first.
+
+    ``chrM`` comes first because nuclear zygosity is meaningless there: a
+    hemizygous mtDNA call was previously reported as HOMOZYGOUS_RECESSIVE and
+    scored 0.90 for "a single call accounting for both gene copies", which the
+    mitochondrial genome does not have. ``possible_mosaic`` comes next because a
+    call whose allele fraction says a fraction of cells carry it is exactly what
+    MOSAIC represents, and the whole point of this pipeline is not to flatten
+    that into an ordinary germline het.
+    """
+    if _is_mitochondrial(variant):
+        return InheritanceModel.MITOCHONDRIAL
+    if FLAG_POSSIBLE_MOSAIC in variant.qc_flags:
+        return InheritanceModel.MOSAIC
     if variant.genotype.zygosity is Zygosity.HOM_ALT:
         return InheritanceModel.HOMOZYGOUS_RECESSIVE
     if variant.genotype.zygosity is Zygosity.HEMIZYGOUS:
@@ -281,13 +354,20 @@ def _build_single_candidate(gene: str, variant: VariantRecord) -> PairCandidate:
 def _wants_single_candidate(gene: str, variant: VariantRecord) -> bool:
     """Single-variant hypotheses worth carrying alongside the pairs.
 
-    A homozygous (or hemizygous) call explains both gene copies by itself. A
+    A homozygous (or hemizygous) call explains both gene copies by itself, and a
+    mitochondrial or possibly-mosaic call is not a two-copy hypothesis at all. A
     lone heterozygote is kept only when its predicted impact is HIGH, so that a
     dominant or de-novo model stays representable instead of being lost to a
     recessive-shaped pipeline.
     """
     zygosity = variant.genotype.zygosity
     if zygosity in {Zygosity.HOM_ALT, Zygosity.HEMIZYGOUS}:
+        return True
+    if _is_mitochondrial(variant) or FLAG_POSSIBLE_MOSAIC in variant.qc_flags:
+        # Neither hypothesis needs a second allele: mtDNA has no second gene copy
+        # to find, and a mosaic variant is present in a fraction of cells rather
+        # than a fraction of copies. Requiring HIGH impact to keep them would drop
+        # exactly the candidates this disease context exists to surface.
         return True
     return zygosity is Zygosity.HET and variant.worst_impact_for_gene(gene) is ImpactSeverity.HIGH
 

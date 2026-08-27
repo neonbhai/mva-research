@@ -638,7 +638,11 @@ def _filter_status(filters: tuple[str, ...]) -> FilterStatus:
 
 
 def _genotype_for_allele(raw: _RawRecord, allele_index: int, tally: _Tally) -> Genotype:
-    """Derive this allele's call, keeping the site's original GT text verbatim."""
+    """Derive this allele's call, keeping the site's original GT text verbatim.
+
+    ``allele_index`` is 1-based over the site's ALT list and is stored on the
+    genotype, because the verbatim GT alone cannot say which ALT this record is.
+    """
     gt_string = raw.genotype_string if raw.genotype_string is not None else "./."
     alleles = _parse_gt(gt_string)
     zygosity = _zygosity_for_allele(alleles, allele_index)
@@ -659,6 +663,11 @@ def _genotype_for_allele(raw: _RawRecord, allele_index: int, tally: _Tally) -> G
         ref_reads=ref_reads,
         alt_reads=alt_reads,
         genotype_quality=raw.genotype_quality,
+        # The GT text is kept verbatim, so after a multiallelic split it no longer
+        # says WHICH of its allele numbers is this record's. Recording the index
+        # is what lets a phased '1|2' still resolve a haplotype slot instead of
+        # reading as "both haplotypes carry an alternate allele".
+        alt_allele_index=allele_index,
     )
 
 

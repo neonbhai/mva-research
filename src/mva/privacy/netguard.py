@@ -27,6 +27,15 @@ run stops loudly instead of shipping a proband's coordinates to a third party.
 * **In-process bypass is trivial for hostile code.** Any code that can set
   ``mva.privacy.netguard._armed = False`` is past the guard. This defends against
   mistakes, not adversaries.
+* **Only the events in :data:`BLOCKED_EVENTS` are seen.** CPython emits audit
+  events for a specific, finite list of socket operations, and anything not on
+  that list is invisible here regardless of what it does. Raw ``socket.send`` on
+  an already-connected socket, ``sendmsg``, ``os.write`` to a socket file
+  descriptor and an ``AF_UNIX`` hop to a local relay all reach the network
+  without emitting anything this hook can block. ``socket.connect``,
+  ``socket.sendto`` and ``socket.bind`` cover how a datagram or a stream actually
+  gets started from Python, which is where a mistake shows up; they are not a
+  proof that nothing left.
 
 The real boundary is at the OS: ``sandbox-exec``/Seatbelt with a no-network
 profile, a ``pf`` deny rule for the run user, a network namespace on Linux, or —
@@ -61,11 +70,22 @@ from mva.config import resolve_workspace
 from mva.errors import ConfigError, NetworkDeniedError
 
 #: Audit events that constitute outbound network from Python.
+#:
+#: ``socket.sendto`` is the one that matters most and was missing. A connectionless
+#: UDP socket never emits ``socket.connect``: ``sendto()`` puts a datagram on the
+#: wire in a single call, so a few lines of pure Python — no library, no C
+#: extension — could carry a phenotype profile straight out of an armed profile
+#: with nothing firing. ``socket.bind`` covers the listening half (a reverse
+#: channel is still a channel) and ``socket.gethostbyaddr`` the reverse-DNS lookup
+#: that ``getaddrinfo`` blocking left open.
 BLOCKED_EVENTS: Final[frozenset[str]] = frozenset(
     {
         "socket.connect",
+        "socket.sendto",
+        "socket.bind",
         "socket.getaddrinfo",
         "socket.gethostbyname",
+        "socket.gethostbyaddr",
         "urllib.Request",
     }
 )

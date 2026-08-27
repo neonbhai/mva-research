@@ -31,6 +31,7 @@ from mva.ingestion import (
     FLAG_LOW_ALLELE_BALANCE,
     FLAG_LOW_DEPTH,
     FLAG_LOW_GQ,
+    FLAG_NO_CALLER_FILTER,
     FLAG_POSSIBLE_MOSAIC,
     OP_LEFT_ALIGN,
     OP_SPLIT_MULTIALLELIC,
@@ -53,7 +54,13 @@ from mva.models.evidence import (
     EvidenceType,
 )
 from mva.models.genome import GenomeBuild, GenomicCoordinate
-from mva.models.variant import FilterStatus, Genotype, VariantRecord, Zygosity
+from mva.models.variant import (
+    INGESTION_QC_FLAGS,
+    FilterStatus,
+    Genotype,
+    VariantRecord,
+    Zygosity,
+)
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "synthetic" / "synthetic_case.vcf"
 ARTIFACT = "tests/fixtures/synthetic/synthetic_case.vcf"
@@ -746,3 +753,104 @@ def test_trimming_is_idempotent_and_never_empties_an_allele(
     # The reference span may only shrink from the right by what was trimmed.
     assert once.coordinate.end <= record.coordinate.end
     assert OP_LEFT_ALIGN not in once.normalisation_ops
+
+
+# ---------------------------------------------------------------------------
+# 7. Adversarial-review regressions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_missing_filter_is_not_reported_as_filtered_by_caller() -> None:
+    """G5: `FILTER=.` means the caller had no opinion, not that it rejected the call.
+
+    A clean DP=40/GQ=99 call with no FILTER column was flagged
+    ``filtered_by_caller`` and given a CONTRADICTS evidence item claiming
+    "analytical concerns raised" — a rejection nobody made.
+    """
+    record = _variant(filter_status=FilterStatus.MISSING)
+
+    flags = qc_module._flags_for(record, THRESHOLDS)
+
+    assert FLAG_FILTERED_BY_CALLER not in flags
+    assert FLAG_NO_CALLER_FILTER in flags
+
+
+@pytest.mark.unit
+def test_missing_filter_yields_a_neutral_item_not_a_contradiction() -> None:
+    """The distinct `no_caller_filter` finding is reported, and reported as NEUTRAL."""
+    record = _variant(filter_status=FilterStatus.MISSING)
+    qc = assess_quality([record], thresholds=THRESHOLDS, clock=CLOCK)
+
+    flagged = qc.variants[0]
+    item = qc.evidence[0]
+
+    assert flagged.qc_flags == (FLAG_NO_CALLER_FILTER,)
+    assert item.direction is EvidenceDirection.NEUTRAL
+    # The claim must not describe an absent FILTER as a concern.
+    assert "no analytical concerns were raised" in item.claim
+    assert "concerns raised: " not in item.claim
+    assert "no opinion either way" in item.limitations
+
+
+@pytest.mark.unit
+def test_a_genuinely_filtered_call_still_contradicts() -> None:
+    """The G5 fix narrows the flag; it must not disarm it."""
+    record = _variant(filter_status=FilterStatus.FILTERED)
+    qc = assess_quality([record], thresholds=THRESHOLDS, clock=CLOCK)
+
+    assert FLAG_FILTERED_BY_CALLER in qc.variants[0].qc_flags
+    assert FLAG_NO_CALLER_FILTER not in qc.variants[0].qc_flags
+    assert qc.evidence[0].direction is EvidenceDirection.CONTRADICTS
+
+
+@pytest.mark.unit
+def test_every_flag_ingestion_can_emit_is_in_the_shared_vocabulary() -> None:
+    """G4: the flag vocabulary two packages share is discovered, not re-typed.
+
+    `INGESTION_QUALITY_FLAGS` in the prioritisation stage used to be a hand-typed
+    list of string literals. Eight of its twelve names were emitted nowhere, and
+    three flags ingestion really does raise were missing — so a
+    `ref_allele_mismatch` variant reached scoring completely unpenalised. Both
+    sides now import :data:`INGESTION_QC_FLAGS`, and this test proves that set is
+    the truth about what ingestion emits.
+    """
+    emitted: dict[str, str] = {}
+    for module in (qc_module, normalise_module):
+        for name in dir(module):
+            if not (name.startswith("FLAG_") or name.endswith("_FLAG")):
+                continue
+            value = getattr(module, name)
+            if isinstance(value, str):
+                emitted[value] = f"{module.__name__}.{name}"
+
+    unknown = {value: site for value, site in emitted.items() if value not in INGESTION_QC_FLAGS}
+    assert not unknown, (
+        "ingestion emits QC flags that are not in mva.models.variant.INGESTION_QC_FLAGS:\n"
+        + "\n".join(f"  {value!r} from {site}" for value, site in sorted(unknown.items()))
+        + "\n\nRemediation: add the name to INGESTION_QC_FLAGS in "
+        "src/mva/models/variant.py and place it in either UNTRUSTED_CALL_FLAGS "
+        "(the call may not be real) or leave it out of that set deliberately — "
+        "the prioritisation stage derives what it reacts to from those two, so a "
+        "flag missing here is a flag nothing downstream can see."
+    )
+
+    orphans = INGESTION_QC_FLAGS - set(emitted)
+    assert not orphans, "INGESTION_QC_FLAGS names flags ingestion never emits: " + ", ".join(
+        sorted(orphans)
+    )
+
+
+@pytest.mark.unit
+def test_split_multiallelic_record_carries_its_alt_index() -> None:
+    """G7: the ALT index is persisted, because the verbatim GT no longer says which."""
+    result = _read_fixture()
+    chr11 = sorted(
+        (v for v in result.variants if v.coordinate.contig == "chr11"),
+        key=lambda v: v.coordinate.alt,
+    )
+
+    assert [v.coordinate.alt for v in chr11] == ["G", "GT"]
+    assert [v.genotype.alt_allele_index for v in chr11] == [1, 2]
+    # The GT text itself is untouched: the index is what disambiguates it.
+    assert {v.genotype.genotype_string for v in chr11} == {"1/2"}
