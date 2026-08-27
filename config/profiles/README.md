@@ -28,8 +28,15 @@ Today `just snakemake` passes the equivalent flags explicitly:
 ```bash
 just snakemake                 # uv run snakemake --cores 1 --configfile config/synthetic-case.yaml
 just snakemake -n              # dry run; any extra ARGS are forwarded
+just snakemake -- track1       # build only the Track 1 exit (note the `--`)
 just dag                       # render the DAG
 ```
+
+The `--` before a target name is not optional. `just snakemake` appends its
+arguments after `--configfile config/synthetic-case.yaml`, and `--configfile`
+takes one or more values, so a bare `just snakemake track1` is read as a second
+config file and fails with `FileNotFoundError: 'track1'`. `--` ends the option's
+argument list. Flags (`-n`, `--cores 4`) need no separator.
 
 Explicit flags are preferred for the demo because the command a reviewer copies
 should say what it does without requiring them to open a second file.

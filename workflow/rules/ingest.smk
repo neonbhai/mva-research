@@ -17,8 +17,8 @@ rule validate:
     input:
         case_config=CASE_CONFIG,
         defaults=DEFAULTS_CONFIG,
-        vcf=INPUT_VCF,
-        phenotype=INPUT_PHENOTYPE,
+        vcf=VCF_INPUT,
+        phenotype=PHENOTYPE_INPUT,
     output:
         touch(VALIDATED_OK),
     log:
@@ -38,7 +38,7 @@ rule ingest:
     """
     input:
         validated=VALIDATED_OK,
-        vcf=INPUT_VCF,
+        vcf=VCF_INPUT,
     output:
         variants=NORMALISED_VARIANTS,
         qc=QC_REPORT,

@@ -17,7 +17,7 @@ rule annotate:
     """
     input:
         variants=NORMALISED_VARIANTS,
-        phenotype=INPUT_PHENOTYPE,
+        phenotype=PHENOTYPE_INPUT,
     output:
         variants=ANNOTATED_VARIANTS,
     log:
