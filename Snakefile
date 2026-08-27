@@ -242,6 +242,16 @@ LOG_DIR = f"{RUN_DIR}/logs"
 INPUT_VCF = f"{WORKSPACE}/{config['inputs']['vcf']}"
 INPUT_PHENOTYPE = f"{WORKSPACE}/{config['inputs']['phenotype']}"
 
+# Rules declare the case inputs through these lists rather than directly. With no
+# workspace configured the files cannot exist, and Snakemake would refuse to
+# build the DAG at all — so `just dag` and `snakemake --list` would fail on a
+# fresh clone, where drawing the DAG is exactly what someone wants to do. In that
+# state the workflow is documentation, not a plan, so the inputs are omitted.
+# This cannot cause a run without its inputs: the `onstart` handler at the foot
+# of this file refuses to execute whenever the workspace is unset.
+VCF_INPUT = [] if WORKSPACE == WORKSPACE_UNSET else [INPUT_VCF]
+PHENOTYPE_INPUT = [] if WORKSPACE == WORKSPACE_UNSET else [INPUT_PHENOTYPE]
+
 # Gate markers. `mva run validate` and `mva privacy audit` are checks, not
 # producers; a touched marker is how a check becomes a DAG node.
 VALIDATED_OK = f"{STATUS_DIR}/validated.ok"
@@ -286,22 +296,23 @@ def mva_run(stage: str) -> str:
     same config, defaults and workspace.
 
     KNOWN COST, stated rather than hidden: `mva run <stage>` executes the whole
-    PREFIX up to and including that stage (see `_run_partial` in src/mva/cli.py) —
-    stages share a run directory and each depends on its predecessors' artifacts,
-    so the CLI does not pretend they are independently invocable. Two consequences
-    for this workflow:
+    PREFIX up to and including that stage (see `_run_partial` in src/mva/cli.py).
+    Stages share a run directory and each depends on its predecessors' artifacts,
+    so the CLI does not pretend they are independently invocable — and it is right
+    not to. The consequence here is that a full `snakemake` run recomputes the
+    early stages once per rule: measured on the synthetic case, roughly 20s
+    against 3s for a single `mva run all`.
 
-      * a later rule rewrites earlier rules' declared outputs, with identical
-        bytes (GP-30) but a new mtime, so re-invoking Snakemake on a completed run
-        re-runs some rules instead of reporting nothing to do. That costs time,
-        never correctness;
-      * the DAG here buys explicitness, resumability at stage granularity and a
-        rendered `just dag`, not incremental computation.
+    Correctness is unaffected — every re-derivation is byte-identical (GP-30), a
+    completed run reports "nothing to be done" on the next invocation, and a later
+    rule rewriting an earlier rule's output writes the same bytes. So what the DAG
+    buys today is explicitness, a rendered `just dag`, and resumability at stage
+    granularity after a failure; it does not buy incremental computation.
 
-    Making Snakemake incremental needs a resume-from-artifacts mode in the CLI,
-    not a change to these rules. It is deliberately not faked here with `touch()`
-    or `ancient()`: suppressing the re-run would make the timestamps lie about
-    what was recomputed, and provenance is the thing this repository is for.
+    Getting that would need a resume-from-artifacts mode in the CLI, not a change
+    to these rules. It is deliberately NOT faked here with `ancient()`, which
+    would suppress re-runs by declaring inputs timeless and would therefore also
+    suppress the legitimate re-run when the VCF or the config actually changes.
     """
     parts = [
         MVA,

@@ -19,7 +19,7 @@ from mva.annotation.local_tables import load_default_adapters
 from mva.annotation.service import annotate_variants
 from mva.config import CaseConfig, Workspace
 from mva.determinism import canonical_json
-from mva.errors import ConfigError
+from mva.errors import ConfigError, ExportBlockedError
 from mva.evidence.ledger import AssertionResolver, EvidenceLedger
 from mva.evidence.store import EvidenceStore, GraphEdge
 from mva.ingestion.normalise import normalise_variants
@@ -29,10 +29,11 @@ from mva.interventions.catalog import DrugCatalog
 from mva.interventions.generate import generate_drug_hypotheses
 from mva.mechanisms.builder import build_mechanism, mechanism_relevance_score
 from mva.mechanisms.library import MechanismLibrary
+from mva.models.base import Sensitivity
 from mva.models.evidence import EvidenceItem
 from mva.models.mechanism import MechanismHypothesis
 from mva.models.pair import CandidatePair
-from mva.models.provenance import ArtifactKind, RunManifest
+from mva.models.provenance import ArtifactKind, ArtifactProvenance, RunManifest
 from mva.phenotype.hpo import GenePhenotypeIndex
 from mva.phenotype.loader import load_phenotype_profile
 from mva.phenotype.scoring import score_all_genes
@@ -48,8 +49,13 @@ from mva.prioritization.pairing import generate_pairs
 from mva.prioritization.ranking import assign_discriminating_experiments, rank_pairs
 from mva.prioritization.scoring import score_pair
 from mva.privacy.audit import run_audit
+from mva.privacy.export import gate_public_export
 from mva.reporting.dossier import build_candidate_dossier
-from mva.reporting.track1 import build_submission_rows, render_submission_csv
+from mva.reporting.track1 import (
+    build_submission_rows,
+    render_submission_csv,
+    validate_submission,
+)
 from mva.reporting.track2 import (
     build_drug_report,
     build_mechanism_report,
@@ -88,6 +94,40 @@ class PipelineResult:
     warnings: tuple[str, ...] = ()
     ranked_pairs: tuple[CandidatePair, ...] = field(default_factory=tuple)
     mechanism: MechanismHypothesis | None = None
+
+
+#: Filenames permitted to leave the workspace. Deny by default: an artifact absent
+#: from this list is refused even if its classification says PUBLIC (GP-43).
+PUBLIC_EXPORT_ALLOWLIST: tuple[str, ...] = (
+    "track1_submission.csv",
+    "mechanism_report.md",
+    "drug_hypotheses.md",
+    "rejection_record.md",
+    "track2_report.md",
+)
+
+
+def _gate_public_artifact(context: RunContext, artifact: ArtifactProvenance) -> None:
+    """Run the public-export gate over an artifact classified PUBLIC.
+
+    The submission is the one artifact that necessarily leaves the workspace, so
+    it is the one that must not be trusted on its classification alone.
+    Classification is a claim; the allowlist match and the content re-scan are the
+    verification (GP-43). A refusal raises: an invalid public artifact sitting on
+    disk is one someone will find and upload.
+    """
+    if artifact.sensitivity is not Sensitivity.PUBLIC:
+        return
+    path = context.workspace.root / artifact.relative_path
+    decision = gate_public_export(
+        path, declared=artifact.sensitivity, allowlist=PUBLIC_EXPORT_ALLOWLIST
+    )
+    if not decision.allowed:
+        msg = (
+            f"Artifact {artifact.relative_path!r} is classified PUBLIC but failed the "
+            f"export gate: {'; '.join(decision.reasons)}"
+        )
+        raise ExportBlockedError(msg)
 
 
 def _should_run(stage: str, stop_after: str | None) -> bool:
@@ -235,14 +275,26 @@ def execute_pipeline(  # noqa: PLR0915 - the composition root is legitimately lo
     rows = build_submission_rows(
         ranked, proband_id=config.proband_id, max_rows=config.max_submission_rows
     )
-    context.write_text_artifact(
+    submission_text = render_submission_csv(rows)
+
+    # Self-check BEFORE the bytes reach disk: a malformed submission that exists is
+    # worse than one that does not, because it will be uploaded.
+    valid, submission_errors = validate_submission(submission_text)
+    if not valid:
+        msg = "Rendered Track 1 submission failed its own contract check: " + "; ".join(
+            submission_errors
+        )
+        raise ExportBlockedError(msg)
+
+    submission_art = context.write_text_artifact(
         "submission/track1_submission.csv",
-        render_submission_csv(rows),
+        submission_text,
         kind=ArtifactKind.SUBMISSION,
         stage="report",
         upstream=[pairs_art.artifact_id],
         row_count=len(rows),
     )
+    _gate_public_artifact(context, submission_art)
     resolver = AssertionResolver(ledger)
     context.write_text_artifact(
         "reports/candidate_dossier.md",
