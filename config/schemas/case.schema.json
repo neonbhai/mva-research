@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mva-research/config/schemas/case.schema.json",
+  "title": "mva case configuration",
+  "description": "Mirrors src/mva/config.py::CaseConfig. Snakemake validates the loaded config against this file before any stage runs, so a typo in a case file is a loud error rather than a silently ignored setting. Pydantic remains the authority: this schema is the early, cheap check, not the only one.",
+  "type": "object",
+  "required": ["case_id", "proband_id", "genome_build", "synthetic", "inputs"],
+  "additionalProperties": false,
+  "$defs": {
+    "workspaceRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A path relative to the workspace root. Absolute paths and '..' segments are rejected so that no committed config and no provenance manifest records where patient data lives on disk (ADR 0006).",
+      "pattern": "^(?![/~])(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+    },
+    "unitInterval": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0
+    }
+  },
+  "properties": {
+    "case_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_\\-]+$",
+      "description": "Used as a directory name under {workspace}/runs/, so it must be a single safe path segment."
+    },
+    "proband_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier used in the submission. The challenge scorer accepts only 'PROBAND01'; any other value hard-fails with 'Unknown proband_id'. See docs/references/track1-submission-contract.md."
+    },
+    "genome_build": {
+      "type": "string",
+      "enum": ["GRCh38", "GRCh37"],
+      "description": "A coordinate without a build is invalid (GP-11). GRCh37 is modelled so mismatches can be detected and rejected, not so they can be silently accepted."
+    },
+    "synthetic": {
+      "type": "boolean",
+      "description": "Explicit, never inferred. Gates safety checks that must not be relaxed by accident: a real case mislabelled synthetic would skip privacy enforcement."
+    },
+    "description": {
+      "type": "string",
+      "default": ""
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Workspace-relative input locations.",
+      "required": ["vcf", "phenotype"],
+      "additionalProperties": false,
+      "properties": {
+        "vcf": { "$ref": "#/$defs/workspaceRelativePath" },
+        "phenotype": { "$ref": "#/$defs/workspaceRelativePath" },
+        "pedigree": { "$ref": "#/$defs/workspaceRelativePath" },
+        "reference_fasta": { "$ref": "#/$defs/workspaceRelativePath" }
+      }
+    },
+    "knowledge": {
+      "type": "object",
+      "description": "Repo-relative, hash-pinned local knowledge tables. Public reference data only; never a remote endpoint on the sensitive path (PRIV-05).",
+      "additionalProperties": false,
+      "properties": {
+        "gene_panel": { "type": "string", "minLength": 1 },
+        "hpo_terms": { "type": "string", "minLength": 1 },
+        "gene_phenotype": { "type": "string", "minLength": 1 },
+        "drug_catalog": { "type": "string", "minLength": 1 },
+        "mechanism_library": { "type": "string", "minLength": 1 },
+        "manifest": { "type": "string", "minLength": 1 }
+      }
+    },
+    "weights": {
+      "type": "object",
+      "description": "Scoring weights. Heuristics, not calibrated parameters. Changing one requires a decision record, a test and a before/after comparison (GP-32). The seven positive weights must sum to 1.0, which JSON Schema cannot express; src/mva/config.py enforces it.",
+      "additionalProperties": false,
+      "properties": {
+        "analytical_validity": { "$ref": "#/$defs/unitInterval" },
+        "rarity": { "$ref": "#/$defs/unitInterval" },
+        "molecular_consequence": { "$ref": "#/$defs/unitInterval" },
+        "inheritance_consistency": { "$ref": "#/$defs/unitInterval" },
+        "phenotype_similarity": { "$ref": "#/$defs/unitInterval" },
+        "mechanistic_relevance": { "$ref": "#/$defs/unitInterval" },
+        "evidence_quality": { "$ref": "#/$defs/unitInterval" },
+        "contradiction_penalty_weight": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
+    "phase_weights": {
+      "type": "object",
+      "description": "Multipliers applied to inheritance consistency by phase state (GP-15). In-cis is near-disqualifying, not disqualifying: short-read phasing can be wrong.",
+      "additionalProperties": false,
+      "properties": {
+        "trans_confirmed": { "$ref": "#/$defs/unitInterval" },
+        "trans_likely": { "$ref": "#/$defs/unitInterval" },
+        "unknown": { "$ref": "#/$defs/unitInterval" },
+        "cis_likely": { "$ref": "#/$defs/unitInterval" },
+        "cis_confirmed": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
+    "frequency": {
+      "type": "object",
+      "description": "Allele-frequency cut-points for the rarity component. Ranking cut-points, not filters (GP-13).",
+      "additionalProperties": false,
+      "properties": {
+        "ultra_rare": { "$ref": "#/$defs/unitInterval" },
+        "rare": { "$ref": "#/$defs/unitInterval" },
+        "low_frequency": { "$ref": "#/$defs/unitInterval" },
+        "max_plausible_recessive": { "$ref": "#/$defs/unitInterval" },
+        "absent_frequency_score": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "description": "Analytical-validity cut-points. Breaching one flags a call; it does not delete it.",
+      "additionalProperties": false,
+      "properties": {
+        "min_depth": { "type": "integer", "minimum": 0 },
+        "min_genotype_quality": { "type": "integer", "minimum": 0 },
+        "min_allele_balance_het": { "$ref": "#/$defs/unitInterval" },
+        "max_allele_balance_het": { "$ref": "#/$defs/unitInterval" },
+        "mosaic_allele_balance_floor": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
+    "max_submission_rows": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 10,
+      "description": "Challenge hard limit: the scorer raises ValueError above 10 rows."
+    },
+    "max_pairs_per_gene": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 20
+    },
+    "network_profile": {
+      "type": "string",
+      "enum": ["offline_enforced", "offline_best_effort", "online"],
+      "default": "offline_best_effort",
+      "description": "'online' is permitted only for synthetic cases and public-reference acquisition; src/mva/config.py rejects a non-synthetic case that requests it (PRIV-05)."
+    },
+    "workspace": {
+      "type": "string",
+      "description": "WORKFLOW-ONLY override, supplied as `snakemake --config workspace=/abs/path`. It is NEVER a key in a committed case file: the workspace is an external absolute path carried by MVA_WORKSPACE (ADR 0006), and CaseConfig rejects it as an unknown field."
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_\\-.]+$",
+      "description": "WORKFLOW-ONLY override naming the run directory. Must be a single safe path segment; the Snakefile re-checks it because it is the only outside value that reaches an output path."
+    },
+    "defaults_config": {
+      "type": "string",
+      "minLength": 1,
+      "description": "WORKFLOW-ONLY override for the repo-relative defaults file passed to `mva run --defaults`."
+    }
+  }
+}

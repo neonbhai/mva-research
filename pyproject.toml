@@ -87,8 +87,13 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "PLR2004", "ARG001", "ARG002", "T20", "DTZ"]
-"src/mva/cli.py" = ["T20", "PLR0913", "B008"]
+# Tests defer some imports to keep collection fast and to import a module only
+# inside the test that needs it.
+"tests/**" = ["S101", "PLR2004", "ARG001", "ARG002", "T20", "DTZ", "PLC0415"]
+# The CLI defers heavy imports (duckdb, pyarrow, jinja2) into command bodies so
+# that `mva --help` and `mva info` stay fast, and so a broken optional stage
+# cannot break the whole CLI. This is deliberate, not an oversight.
+"src/mva/cli.py" = ["T20", "PLR0913", "B008", "PLC0415"]
 "src/mva/reporting/render.py" = ["T20"]
 
 [tool.ruff.lint.isort]

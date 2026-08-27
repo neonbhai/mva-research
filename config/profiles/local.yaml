@@ -1,0 +1,38 @@
+# Snakemake profile: single-machine, offline, synthetic-first local run.
+#
+# Keys are Snakemake >= 8 command-line flags with the leading `--` removed.
+# See README.md in this directory for how to point `--profile` at it.
+
+# One core. The pipeline is small and every stage is a single `mva` subcommand;
+# parallelism here buys nothing and makes a failure harder to read.
+cores: 1
+
+# Print the exact command each rule ran. The commands contain paths, never
+# records, so this is safe to read and is the fastest way to reproduce a stage by
+# hand (PRIV-03: no stage prints genomic content).
+printshellcmds: true
+
+# Stop at the first failure. `just verify` is a gate, not a report: a run that
+# continues past a failed stage produces artifacts whose provenance is a lie
+# (ADR 0009).
+keep-going: false
+
+# Re-run anything a previous run left half-written rather than trusting it.
+rerun-incomplete: true
+
+# Local disk, no network filesystem: a long latency wait only hides a real error.
+latency-wait: 5
+
+# Show the tail of a failed stage's log inline. Stage logs live inside the
+# workspace and hold paths and counts, not records.
+show-failed-logs: true
+
+# Deliberately NOT set here:
+#   configfile      — passed explicitly by `just snakemake`, so the case in force
+#                     is always visible in the command line rather than inherited
+#                     from a profile a reader may not have opened.
+#   software-deployment-method — the synthetic demo runs in the project venv.
+#                     Add `conda` only for the real-data path, where the pins in
+#                     workflow/envs/mva.yaml matter.
+#   workspace/config overrides — the workspace never comes from a committed file
+#                     (ADR 0006). It comes from MVA_WORKSPACE.

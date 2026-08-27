@@ -1,0 +1,36 @@
+# Conda environment for the workflow's native genomics tools.
+#
+# NOT REQUIRED FOR THE SYNTHETIC DEMO. `just demo` and every rule in this
+# workflow run today through in-process Python backends — cyvcf2 and pysam, which
+# vendor htslib themselves — so nothing here is on the demo path. Snakemake only
+# materialises this environment when invoked with `--software-deployment-method
+# conda`; without that flag the `conda:` directives on the rules are inert.
+#
+# These pins exist for the REAL-DATA path, where the in-process shortcuts stop
+# being sufficient:
+#   * bcftools norm  — left-alignment and multiallelic splitting against a real
+#     reference FASTA. The in-process normaliser is a deterministic
+#     trim/left-align that does not consult a reference; on real data that is a
+#     substitute, not an equivalent (docs/maturity-ledger.md grades it as such).
+#   * samtools / htslib — CRAM decode, BGZF and tabix indexing.
+#
+# PRIVACY NOTE (PRIV-06). htslib's CRAM reader will fetch missing reference
+# sequences from `www.ebi.ac.uk/ena/cram/md5/%s` by default, keyed by the MD5 of
+# the reference — an outbound request triggered by opening a patient file. Any
+# rule that gains a `conda:` environment containing htslib must also pin
+# `REF_PATH=/dev/null` and pass an explicit `-T reference.fa`.
+#
+# Versions are exact, not floors: an environment that resolves differently on two
+# machines cannot support a byte-identical repeat run (GP-30). Bump deliberately,
+# with a decision record if output changes.
+
+name: mva
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+dependencies:
+  - python=3.12.11
+  - htslib=1.21
+  - bcftools=1.21
+  - samtools=1.21

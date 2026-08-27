@@ -1,0 +1,423 @@
+"""The shared detection battery: regexes over BYTES, plus magic-byte sniffers.
+
+Why bytes and not text
+----------------------
+Genomic files are frequently mis-encoded, truncated, or binary with textual
+islands (a BAM header inside BGZF). Decoding first would either raise (losing the
+detection) or silently mangle the very bytes we are trying to recognise. Every
+rule therefore matches ``bytes``; decoding happens only at the reporting edge and
+only for content we never emit.
+
+GP-41 — the cardinal rule
+-------------------------
+This module is a *detector*, not a *reporter*. Nothing here returns, logs or
+stores ``match.group()``. The only permitted derivations of a match are its span,
+its length, the rule ID, the line number and the file path. The scanner's output
+is itself a leak vector: an agent runs the audit and the result lands in a model
+context window, a CI log and a terminal scrollback.
+
+The one concession is :func:`correlation_id`, which lets a caller count *distinct*
+matches (e.g. "three different HPO terms") without ever holding onto them. It is
+keyed by a per-process random salt that is never persisted, because a plain
+truncated hash of a low-entropy value — a seven-digit HPO term, a short MRN — is
+brute-forceable in milliseconds.
+
+False positives are a design input, not an afterthought
+-------------------------------------------------------
+A privacy scanner that cries wolf gets disabled, which is strictly worse than one
+that is narrower. Each rule therefore carries an explicit
+``false_positive_risk`` note, and the two rules with genuinely high collision
+rates against legitimate public data — ``vcf_data_line`` (public coordinate
+tables) and ``hpo_term`` (the public ontology, and code constants) — are ``warn``
+or threshold-gated rather than unconditional failures. Promotion logic lives in
+:mod:`mva.privacy.audit`, which has the whole-file context needed to apply it.
+"""
+
+from __future__ import annotations
+
+import hmac
+import re
+import secrets
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final, Literal
+
+from mva.errors import PrivacyViolationError
+
+#: Rule severities. `fail` blocks; `warn` is recorded and surfaced but does not
+#: block unless the audit is run in strict mode.
+type Severity = Literal["fail", "warn"]
+
+# ---------------------------------------------------------------------------
+# Correlation identifiers (GP-41)
+# ---------------------------------------------------------------------------
+
+#: Random, per-process, NEVER written to disk and never included in any artifact.
+#: Regenerated on every interpreter start, so a correlation ID is meaningful only
+#: within one run and cannot be used to link findings across runs or machines.
+_RUN_SALT: Final[bytes] = secrets.token_bytes(16)
+
+
+def correlation_id(matched: bytes) -> str:
+    """A within-run-stable, non-invertible tag for a matched byte string.
+
+    Use this — and only this — when you need to know whether two matches were the
+    *same* value (counting distinct HPO terms, deduplicating findings) without
+    retaining the value.
+
+    A bare ``sha256(value)[:8]`` would be useless here: HPO terms, MRNs and
+    genomic positions all live in tiny keyspaces, so an unsalted digest is a
+    lookup table away from plaintext. The HMAC key is per-process and unpersisted,
+    which makes the tag meaningless outside the run that produced it.
+    """
+    return hmac.new(_RUN_SALT, matched, "sha256").hexdigest()[:8]
+
+
+def placeholder(rule_id: str, length: int) -> str:
+    """The single approved rendering of a match: rule ID and length, nothing else."""
+    return f"<REDACTED:{rule_id}:len={length}>"
+
+
+# ---------------------------------------------------------------------------
+# Rule type
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Rule:
+    """One detection rule.
+
+    ``severity`` is the rule's severity *in isolation*. Some rules are refined by
+    whole-file context in :mod:`mva.privacy.audit` (see ``vcf_data_line`` and
+    ``hpo_term``); the value here is the floor, never a promotion.
+    """
+
+    rule_id: str
+    pattern: re.Pattern[bytes]
+    severity: Severity
+    description: str
+    false_positive_risk: str
+
+
+# ---------------------------------------------------------------------------
+# Patterns
+#
+# NOTE ON SELF-MATCHING: this file necessarily contains the *source text* of every
+# pattern. It does not match itself, and that is deliberate rather than lucky:
+# the line-structured rules are anchored with ``^`` under re.MULTILINE (a pattern
+# written inside a quoted Python expression is never at the start of a line), and
+# the field-structured rules require literal TAB and NEWLINE bytes, which a Python
+# source file writes as the two-character escapes ``\t`` and ``\n``.
+# ---------------------------------------------------------------------------
+
+_VCF_HEADER: Final = re.compile(rb"^##fileformat=VCFv4\.\d", re.MULTILINE)
+
+_VCF_CHROM_LINE: Final = re.compile(
+    rb"^#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO",
+    re.MULTILINE,
+)
+
+# Five tab-separated VCF columns followed by a sixth field boundary. The trailing
+# \t is load-bearing: it forces at least CHROM/POS/ID/REF/ALT/QUAL, which a
+# two-column coordinate list cannot satisfy.
+_VCF_DATA_LINE: Final = re.compile(
+    rb"^(?:chr)?(?:[0-9]{1,2}|[XYxy]|MT|M)\t[0-9]{1,12}\t"
+    rb"(?:\.|rs[0-9]+|[A-Za-z0-9_:.\-]{1,64})\t"
+    rb"[ACGTNacgtn]{1,200}\t"
+    rb"(?:[ACGTNacgtn,.*]{1,200}|<[A-Za-z0-9:_]{1,20}>)\t",
+    re.MULTILINE,
+)
+
+_GENOTYPE_FIELD: Final = re.compile(rb"\tGT(?::[A-Z]{1,4})*\t[0-9.]+[/|][0-9.]+")
+
+# A FASTQ record is recognised structurally, not by extension: header line,
+# >=25nt of a homogeneous nucleotide alphabet, separator, >=25 quality chars.
+# The homogeneity requirement is what stops ordinary prose from matching.
+_FASTQ_RECORD: Final = re.compile(
+    rb"^@[!-~][ -~]{0,300}\r?\n[ACGTNacgtn]{25,}\r?\n\+[ -~]{0,300}\r?\n[!-~]{25,}",
+    re.MULTILINE,
+)
+
+# @RG SM: carries the sample name a sequencing centre actually used, which in
+# practice is a hospital accession or the proband's initials plus a date.
+_SAM_RG_SAMPLE: Final = re.compile(rb"^@RG\t(?:[^\t\n]*\t)*SM:([!-~]+)", re.MULTILINE)
+
+_HPO_TERM: Final = re.compile(rb"\bHP:\d{7}\b")
+
+# Keyword-anchored ONLY. A bare \d{7,10} run is deliberately NOT matched: it
+# collides with every genomic POS in every VCF, every gnomAD allele count and
+# every byte offset, which would make the rule useless and then ignored.
+# The negative lookahead rejects a purely alphabetic follower, so prose such as
+# "the patient id field" does not match, while the same keyword followed by a
+# separator and an alphanumeric token does. (No worked example is spelled out
+# here: a live one would make this file trip its own scanner, which is both
+# correct behaviour and a permanent false alarm.)
+_MRN: Final = re.compile(
+    rb"(?i:\bMRN\b"
+    rb"|\bmedical[ _-]record[ _-](?:number|no\.?|id)\b"
+    rb"|\bNHS[ _-]number\b"
+    rb"|\bpatient[ _-]?id\b"
+    rb"|\bhospital[ _-]?(?:number|no\.?|id)\b)"
+    rb"[ \t]{0,4}[:=#][ \t]{0,4}(?![A-Za-z]+\b)[A-Za-z0-9][A-Za-z0-9\-]{3,31}\b"
+)
+
+_DOB: Final = re.compile(
+    rb"(?i:\bDOB\b|\bdate[ _-]of[ _-]birth\b|\bbirth[ _-]?date\b|\bdate[ _-]born\b)"
+    rb"[ \t]{0,4}[:=#][ \t]{0,4}"
+    rb"[0-9]{1,4}[/\-.][0-9]{1,2}[/\-.][0-9]{1,4}"
+)
+
+# A bare ISO date is WARN and nothing more: every provenance manifest, changelog
+# and lockfile in the repository is full of them. Escalating this to `fail` would
+# make the audit unrunnable within a day.
+# A trailing \b would miss the commonest form of all, `2026-01-01T00:00:00Z`,
+# because `1` and `T` are both word characters. The boundaries are digit-aware
+# instead, so a date embedded in a timestamp still matches.
+_ISO_DATE_BARE: Final = re.compile(
+    rb"(?<![\d-])(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?!\d)"
+)
+
+_PERSON_NAME_KEYED: Final = re.compile(
+    rb"(?i:(?:patient|proband|child|subject|mother|father)"
+    rb"[ _-]?(?:surname|first[ _-]?name|last[ _-]?name|name))"
+    rb"[ \t]{0,4}[:=#][ \t]{0,4}[A-Z][A-Za-z'\-]{1,30}\b"
+)
+
+
+RULES: Final[tuple[Rule, ...]] = (
+    Rule(
+        rule_id="vcf_header",
+        pattern=_VCF_HEADER,
+        severity="fail",
+        description="VCF format declaration at the start of a line.",
+        false_positive_risk=(
+            "Near zero. Only a real VCF (or a document quoting one at column 0) "
+            "carries this token line-anchored."
+        ),
+    ),
+    Rule(
+        rule_id="vcf_chrom_line",
+        pattern=_VCF_CHROM_LINE,
+        severity="fail",
+        description="VCF column header row; everything after it is genotype data.",
+        false_positive_risk="Near zero. Requires the exact eight-column tab-separated header.",
+    ),
+    Rule(
+        rule_id="vcf_data_line",
+        pattern=_VCF_DATA_LINE,
+        severity="warn",
+        description="Tab-structured CHROM/POS/ID/REF/ALT record line.",
+        false_positive_risk=(
+            "HIGH in isolation. Public coordinate tables (ClinVar exports, gnomAD "
+            "extracts, our own knowledge/public/*.tsv) match legitimately. This is "
+            "why the rule is `warn`; mva.privacy.audit promotes it to `fail` only "
+            "when the same file also matches vcf_header or genotype_field."
+        ),
+    ),
+    Rule(
+        rule_id="genotype_field",
+        pattern=_GENOTYPE_FIELD,
+        severity="fail",
+        description="A FORMAT/GT column paired with an actual called genotype.",
+        false_positive_risk=(
+            "Low. Requires literal tabs around a GT-led format string and a "
+            "phased or unphased allele pair."
+        ),
+    ),
+    Rule(
+        rule_id="fastq_record",
+        pattern=_FASTQ_RECORD,
+        severity="fail",
+        description="Four-line FASTQ record with >=25nt of homogeneous nucleotide alphabet.",
+        false_positive_risk=(
+            "Low. A 25nt run drawn only from ACGTN, sandwiched between an '@' "
+            "header and a '+' separator, does not occur in prose or code."
+        ),
+    ),
+    Rule(
+        rule_id="sam_rg_sample",
+        pattern=_SAM_RG_SAMPLE,
+        severity="fail",
+        description="SAM/BAM @RG read-group line carrying an SM: sample identifier.",
+        false_positive_risk=(
+            "Very low, and the payload is severe: SM: values are real hospital "
+            "sample or accession IDs written by the sequencing centre."
+        ),
+    ),
+    Rule(
+        rule_id="hpo_term",
+        pattern=_HPO_TERM,
+        severity="fail",
+        description="Human Phenotype Ontology term identifier.",
+        false_positive_risk=(
+            "HIGH in isolation. The public ontology tables under knowledge/public/, "
+            "test fixtures and code constants all contain HPO IDs legitimately. "
+            "mva.privacy.audit only fails a NON-allowlisted file carrying >=3 "
+            "DISTINCT terms, on the reasoning that three co-occurring phenotypes "
+            "start to be a clinical profile rather than a reference."
+        ),
+    ),
+    Rule(
+        rule_id="mrn",
+        pattern=_MRN,
+        severity="fail",
+        description="Keyword-anchored medical record / patient / NHS identifier.",
+        false_positive_risk=(
+            "Low, and deliberately so. The rule is anchored on the keyword and "
+            "MUST NOT match a bare \\d{7,10} run, which would collide with every "
+            "genomic POS and make the scanner unusable."
+        ),
+    ),
+    Rule(
+        rule_id="dob",
+        pattern=_DOB,
+        severity="fail",
+        description="Keyword-anchored date of birth.",
+        false_positive_risk="Low; requires an explicit DOB-style keyword and a separator.",
+    ),
+    Rule(
+        rule_id="iso_date_bare",
+        pattern=_ISO_DATE_BARE,
+        severity="warn",
+        description="An unkeyed ISO-8601 calendar date.",
+        false_positive_risk=(
+            "Very high by construction: provenance timestamps, lockfiles and "
+            "changelogs are made of these. Kept as `warn` for visibility only, and "
+            "exempted from log redaction (see REDACTION_EXEMPT_RULES)."
+        ),
+    ),
+    Rule(
+        rule_id="person_name_keyed",
+        pattern=_PERSON_NAME_KEYED,
+        severity="fail",
+        description="A relationship/role keyword bound to a capitalised personal name.",
+        false_positive_risk=(
+            "Low. Requires keyword + explicit separator + a capitalised token, so "
+            "'patient name field' in prose does not match."
+        ),
+    ),
+)
+
+_RULES_BY_ID: Final[dict[str, Rule]] = {rule.rule_id: rule for rule in RULES}
+
+
+def rule_by_id(rule_id: str) -> Rule:
+    """Look up a rule, failing loudly on an unknown ID."""
+    try:
+        return _RULES_BY_ID[rule_id]
+    except KeyError:
+        known = ", ".join(sorted(_RULES_BY_ID))
+        msg = f"Unknown privacy rule {rule_id!r}. Known rules: {known}."
+        raise KeyError(msg) from None
+
+
+#: Rules whose matches are NOT stripped from log records. Redacting every ISO date
+#: would erase the provenance timestamps that make a log readable, for a rule that
+#: is warn-only precisely because it is dominated by false positives.
+REDACTION_EXEMPT_RULES: Final[frozenset[str]] = frozenset({"iso_date_bare"})
+
+#: Rules applied by :func:`mva.privacy.redact.redact_text`.
+REDACTION_RULES: Final[tuple[Rule, ...]] = tuple(
+    rule for rule in RULES if rule.rule_id not in REDACTION_EXEMPT_RULES
+)
+
+#: Rules that are threshold- or context-gated by the audit rather than absolute.
+CONTEXT_GATED_RULES: Final[frozenset[str]] = frozenset({"vcf_data_line", "hpo_term"})
+
+#: Distinct HPO terms in one non-allowlisted file before the finding becomes `fail`.
+HPO_DISTINCT_FAIL_THRESHOLD: Final[int] = 3
+
+
+# ---------------------------------------------------------------------------
+# Magic-byte sniffing (NOT regex)
+# ---------------------------------------------------------------------------
+
+#: BAM/CRAM/BGZF are containers. A regex over compressed bytes finds nothing, and
+#: an extension check is trivially defeated by a rename, so the container is
+#: identified from its header bytes.
+_CRAM_MAGIC: Final = b"CRAM"
+_BGZF_MAGIC: Final = b"\x1f\x8b\x08\x04"
+_BGZF_EXTRA: Final = b"BC\x02\x00"
+_BAM_MAGIC: Final = b"BAM\x01"
+
+#: Severity for each sniffed container type. BGZF alone is `warn` because every
+#: bgzipped PUBLIC resource (reference FASTA, GTF, dbSNP) has exactly this header.
+BINARY_SEVERITY: Final[dict[str, Severity]] = {
+    "cram": "fail",
+    "bam": "fail",
+    "bgzf": "warn",
+}
+
+
+def _first_bgzf_block_is_bam(head: bytes) -> bool:
+    """Inflate the first BGZF block and look for the BAM magic.
+
+    Uses the BSIZE field from the BGZF extra subfield to bound the block, then
+    inflates with a gzip-aware window. Any zlib failure is treated as "not BAM":
+    a truncated head is a normal condition when only the first few KiB were read.
+    """
+    if len(head) < 18:
+        return False
+    bsize = int.from_bytes(head[16:18], "little") + 1
+    block = head[:bsize] if 0 < bsize <= len(head) else head
+    try:
+        decompressed = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(block, 64)
+    except zlib.error:
+        return False
+    return decompressed[:4] == _BAM_MAGIC
+
+
+def sniff_binary(head: bytes) -> str | None:
+    """Identify a genomic container from its leading bytes.
+
+    Returns ``"cram"``, ``"bam"``, ``"bgzf"`` or ``None``. Never returns any of
+    the bytes it inspected.
+    """
+    if head[:4] == _CRAM_MAGIC:
+        return "cram"
+    if head[:4] == _BGZF_MAGIC and head[12:16] == _BGZF_EXTRA:
+        return "bam" if _first_bgzf_block_is_bam(head) else "bgzf"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Safe file reading
+# ---------------------------------------------------------------------------
+
+#: Files larger than this are not content-scanned. A 60 GiB CRAM is identified by
+#: its magic bytes and its extension; reading it would be pointless and slow.
+MAX_SCAN_BYTES: Final[int] = 8 * 1024 * 1024
+
+#: Enough for every container header we sniff, and for a BGZF first block.
+HEAD_BYTES: Final[int] = 65536
+
+
+def read_capped(path: Path, limit: int = MAX_SCAN_BYTES) -> bytes:
+    """Read at most ``limit`` bytes. Always binary; never decodes."""
+    with path.open("rb") as handle:
+        return handle.read(limit)
+
+
+def decode_scrubbed(data: bytes, *, path: Path) -> str:
+    """Strict-decode bytes, converting a decode failure into a content-free error.
+
+    ``UnicodeDecodeError`` embeds the offending bytes in ``str(exc)``. Letting one
+    escape would defeat every other control in this package, because a traceback
+    travels to the terminal, the CI log and the model context. So the original is
+    raised ``from None`` — chaining it with ``from exc`` would re-attach the very
+    message we are suppressing to the ``__cause__`` of the new one.
+    """
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        msg = (
+            f"Undecodable bytes in {path.as_posix()} at offset {exc.start} "
+            f"(run of {exc.end - exc.start} bytes). Content withheld under GP-41."
+        )
+        raise PrivacyViolationError(msg) from None
+
+
+def decode_lossy(data: bytes) -> str:
+    """Decode for scanning purposes only. Never raises; never round-trips."""
+    return data.decode("utf-8", errors="replace")
