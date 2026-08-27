@@ -71,10 +71,28 @@ test-golden:
 arch:
     uv run pytest -q tests/unit/test_architecture.py tests/unit/test_docs_integrity.py
 
+# `demo-determinism` is part of the gate, not a separate step: GP-30 makes
+# byte-identical repeat runs an acceptance criterion, and a criterion checked
+# only when someone remembers is not a criterion. `workflow-check` runs a
+# Snakemake DRY RUN -- `--list` only parses, so the DAG can be logically broken
+# while the gate stays green.
+#
 # THE GATE. Everything must pass; nothing here is advisory (ADR 0009).
-verify: lint typecheck arch test privacy-audit
+verify: lint typecheck arch test workflow-check demo-determinism privacy-audit
     @echo ""
     @echo "  verify: all gates passed"
+
+# Fast gate for the inner loop: skips the two end-to-end runs.
+verify-fast: lint typecheck arch test privacy-audit
+    @echo ""
+    @echo "  verify-fast: passed (skipped demo-determinism and workflow-check)"
+
+# Assert the Snakemake DAG actually resolves, not merely that it parses.
+workflow-check:
+    @just _seed-workspace "{{DEMO_WORKSPACE}}"
+    @MVA_WORKSPACE="{{DEMO_WORKSPACE}}" uv run snakemake --dry-run --quiet \
+        --configfile config/synthetic-case.yaml > /dev/null
+    @echo "  workflow: DAG resolves"
 
 # ---------------------------------------------------------------- privacy
 

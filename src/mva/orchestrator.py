@@ -30,6 +30,7 @@ from mva.interventions.generate import generate_drug_hypotheses
 from mva.mechanisms.builder import build_mechanism, mechanism_relevance_score
 from mva.mechanisms.library import MechanismLibrary
 from mva.models.base import Sensitivity
+from mva.models.drug import DrugHypothesis
 from mva.models.evidence import EvidenceItem
 from mva.models.mechanism import MechanismHypothesis
 from mva.models.pair import CandidatePair
@@ -41,6 +42,7 @@ from mva.pipeline import (
     RunContext,
     artifact_digest,
     build_run_manifest,
+    reference_versions_from_manifest,
     validate_case,
     write_provenance_manifest,
 )
@@ -94,6 +96,18 @@ class PipelineResult:
     warnings: tuple[str, ...] = ()
     ranked_pairs: tuple[CandidatePair, ...] = field(default_factory=tuple)
     mechanism: MechanismHypothesis | None = None
+    #: Every drug hypothesis considered, accepted and rejected alike. Exposed so
+    #: acceptance tests can assert against what the pipeline DID, rather than
+    #: against the expectation file they were given (GP-19).
+    accepted_drugs: tuple[DrugHypothesis, ...] = field(default_factory=tuple)
+    rejected_drugs: tuple[DrugHypothesis, ...] = field(default_factory=tuple)
+
+    def drug(self, drug_id: str) -> DrugHypothesis | None:
+        """Look up a drug hypothesis by ID across both accepted and rejected."""
+        for hypothesis in (*self.accepted_drugs, *self.rejected_drugs):
+            if hypothesis.drug_id == drug_id:
+                return hypothesis
+        return None
 
 
 #: Filenames permitted to leave the workspace. Deny by default: an artifact absent
@@ -151,7 +165,18 @@ def execute_pipeline(  # noqa: PLR0915 - the composition root is legitimately lo
     knowledge_root = repo_root / KNOWLEDGE_ROOT_NAME
 
     # ---------------------------------------------------------------- validate
-    context = validate_case(config, workspace, allow_workspace_in_repo=allow_workspace_in_repo)
+    # Reference hashes are resolved BEFORE the run id is derived: two runs over
+    # different knowledge tables must not collide in the same run directory
+    # (they previously did, silently overwriting each other's submission).
+    manifest_path = knowledge_root / "manifests" / "knowledge.yaml"
+    reference_versions = reference_versions_from_manifest(manifest_path)
+
+    context = validate_case(
+        config,
+        workspace,
+        allow_workspace_in_repo=allow_workspace_in_repo,
+        reference_versions=reference_versions,
+    )
     ledger = EvidenceLedger(run_id=context.run_id)
 
     # ---------------------------------------------------------------- ingest
@@ -189,9 +214,7 @@ def execute_pipeline(  # noqa: PLR0915 - the composition root is legitimately lo
         return _finish(context, repo_root=repo_root, ledger=ledger, ranked=[])
 
     # ---------------------------------------------------------------- annotate
-    adapters = load_default_adapters(
-        knowledge_root, knowledge_root / "manifests" / "knowledge.yaml"
-    )
+    adapters = load_default_adapters(knowledge_root, manifest_path)
     annotation = annotate_variants(qc.variants, adapters=adapters, clock=context.clock)
     ledger.extend(annotation.evidence)
     context.warnings.extend(annotation.warnings)
@@ -429,6 +452,8 @@ def _finish(
         warnings=tuple(context.warnings),
         ranked_pairs=tuple(ranked),
         mechanism=mechanism,
+        accepted_drugs=tuple(d for d in accepted if isinstance(d, DrugHypothesis)),
+        rejected_drugs=tuple(d for d in rejected if isinstance(d, DrugHypothesis)),
     )
 
 

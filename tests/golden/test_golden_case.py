@@ -115,15 +115,45 @@ def test_wrong_direction_drug_is_rejected(
     """
     result = execute_pipeline(synthetic_config, synthetic_workspace)
     assert result.mechanism is not None, "no mechanism was built for the top gene"
-    assert result.drugs_rejected > 0, "no drug was rejected; the direction check did nothing"
 
-    expected_rejected = {
-        row["drug_id"]: row["expected_primary_reason"]
-        for row in expected_drugs
-        if row["expected_outcome"] == "rejected"
-    }
-    assert "SYNTH-DRUG-B" in expected_rejected
-    assert expected_rejected["SYNTH-DRUG-B"] == "wrong_direction"
+    # Assert against what the PIPELINE produced, not against the expectation file.
+    # An earlier version of this test read both sides from expected_drugs and was
+    # therefore a tautology: it stayed green with the direction check inverted.
+    for row in expected_drugs:
+        drug_id = row["drug_id"]
+        hypothesis = result.drug(drug_id)
+        assert hypothesis is not None, (
+            f"{drug_id} was in the catalogue but the pipeline produced no hypothesis "
+            "for it — a candidate must never be silently dropped (GP-19)"
+        )
+
+        outcome = row["expected_outcome"]
+        if outcome == "rejected":
+            assert hypothesis.rejected, (
+                f"{drug_id} ({hypothesis.name}) was expected to be REJECTED but was accepted"
+            )
+            reasons = [r.value for r in hypothesis.rejection_reasons]
+            expected_reason = row["expected_primary_reason"]
+            assert reasons, f"{drug_id} is rejected but records no reason"
+            assert reasons[0] == expected_reason, (
+                f"{drug_id} rejected for {reasons[0]!r}, expected {expected_reason!r} "
+                f"as the leading reason (all reasons: {reasons})"
+            )
+        else:
+            assert not hypothesis.rejected, (
+                f"{drug_id} was expected to be accepted ({outcome}) but was rejected "
+                f"for {[r.value for r in hypothesis.rejection_reasons]}"
+            )
+
+    # The headline criterion, stated directly against the result.
+    synthinib = result.drug("SYNTH-DRUG-B")
+    assert synthinib is not None
+    assert synthinib.rejected
+    assert synthinib.directions_agree is False, (
+        "the wrong-direction agent must be recorded as DISAGREEING, not as "
+        "undetermined — 'cannot tell' and 'disagrees' are different findings"
+    )
+    assert "wrong_direction" in [r.value for r in synthinib.rejection_reasons]
 
 
 def test_demo_artifacts_are_all_produced(
@@ -162,3 +192,39 @@ def test_repeat_run_is_byte_identical(
     second = execute_pipeline(synthetic_config, synthetic_workspace)
     identical, differences = verify_determinism(first.digest, second.digest)
     assert identical, "repeat run produced different artifacts:\n" + "\n".join(differences)
+
+
+def test_direction_check_is_load_bearing(
+    synthetic_config: CaseConfig, synthetic_workspace: Workspace
+) -> None:
+    """Guard against the direction gate becoming a no-op.
+
+    A previous version of the Track 2 acceptance test passed with
+    `agrees is False` inverted to `True`, because it only ever compared the
+    expectation file against itself. This asserts the distribution the gate
+    actually produces: at least one drug disagrees, at least one agrees, and at
+    least one is undeterminable — so a gate that collapsed to a constant would
+    fail here regardless of which constant it collapsed to.
+    """
+    result = execute_pipeline(synthetic_config, synthetic_workspace)
+    verdicts = [d.directions_agree for d in (*result.accepted_drugs, *result.rejected_drugs)]
+    assert verdicts, "no drug hypotheses were produced at all"
+    assert False in verdicts, "no drug DISAGREES; the direction check may be a no-op"
+    assert True in verdicts, "no drug AGREES; the direction check may be inverted"
+    assert None in verdicts, (
+        "no drug has an undeterminable direction; the tri-state may have collapsed "
+        "to a boolean, which is how 'cannot tell' becomes 'agrees'"
+    )
+
+
+def test_no_accepted_drug_disagrees_with_the_required_direction(
+    synthetic_config: CaseConfig, synthetic_workspace: Workspace
+) -> None:
+    """The central Track 2 claim, asserted over the whole accepted set."""
+    result = execute_pipeline(synthetic_config, synthetic_workspace)
+    for drug in result.accepted_drugs:
+        assert drug.directions_agree is not False, (
+            f"{drug.drug_id} ({drug.name}) acts {drug.observed_direction.value!r} "
+            f"where {drug.required_direction.value!r} is required, yet was accepted. "
+            "A wrong-direction agent must never reach the accepted set (GP-16)."
+        )

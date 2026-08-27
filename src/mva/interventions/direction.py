@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 from mva.models.drug import RejectionReason
 from mva.models.mechanism import (
+    CORRECTIVE_DIRECTION,
     DOWNWARD_DIRECTIONS,
     UNSIGNED_DIRECTIONS,
     UPWARD_DIRECTIONS,
@@ -50,18 +51,9 @@ __all__ = [
 #: The therapeutic requirement implied by a node's state in the patient: what a
 #: therapy would have to do to move that node back toward wild type. Deliberately
 #: partial — every unsigned state maps to `UNKNOWN` rather than to a guess.
-_CORRECTIVE_DIRECTION: dict[EffectDirection, EffectDirection] = {
-    EffectDirection.DECREASE: EffectDirection.INCREASE,
-    EffectDirection.INCREASE: EffectDirection.DECREASE,
-    EffectDirection.LOSS_OF_FUNCTION: EffectDirection.RESTORE,
-    EffectDirection.GAIN_OF_FUNCTION: EffectDirection.DECREASE,
-    EffectDirection.DESTABILISE: EffectDirection.STABILISE,
-    EffectDirection.STABILISE: EffectDirection.DESTABILISE,
-    EffectDirection.RESTORE: EffectDirection.UNKNOWN,
-    EffectDirection.NO_CHANGE: EffectDirection.UNKNOWN,
-    EffectDirection.UNKNOWN: EffectDirection.UNKNOWN,
-    EffectDirection.CONTEXT_DEPENDENT: EffectDirection.UNKNOWN,
-}
+# The corrective sign table lives in mva.models.mechanism so that the
+# MechanismHypothesis validator and this check cannot drift apart.
+_CORRECTIVE_DIRECTION = CORRECTIVE_DIRECTION
 
 
 @dataclass(frozen=True)
@@ -122,6 +114,15 @@ def required_direction_for_node(
         return mechanism.required_correction
     for node in mechanism.nodes:
         if node.node_id == target_node_id:
+            if not node.deviation_is_pathological:
+                # The node's deviation is COMPENSATORY. Pushing it back towards
+                # wild type suppresses a protective response, so no corrective
+                # direction can be derived from its state alone. Returning UNKNOWN
+                # sends the candidate to the "cannot determine" path instead of
+                # awarding it agreement -- which is what a naive inversion did,
+                # scoring an agent that suppresses clearance of aneuploid cells at
+                # 1.000 in a chromosomal-instability disorder.
+                return EffectDirection.UNKNOWN
             return corrective_direction(node.state_in_patient)
     return EffectDirection.UNKNOWN
 

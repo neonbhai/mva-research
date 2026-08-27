@@ -1,17 +1,17 @@
 # SYNTHETIC mechanism chain for the demo gene SYNTHKIN1.
 # Shape mirrors the real, published spindle-assembly-checkpoint logic, but every
 # node, link and identifier here is FICTIONAL. See docs/scientific-assumptions.md.
-mechanism_id	gene_symbol	node_id	node_kind	node_label	node_identifier	state_in_patient	link_id	source_node_id	target_node_id	relation	direction	tier	strength	is_directly_demonstrated	uncertainty
-MECH-SYNTHKIN1-01	SYNTHKIN1	N1_variant	variant	Biallelic SYNTHKIN1 variants	SYNTHG0001	loss_of_function								
-MECH-SYNTHKIN1-01	SYNTHKIN1	N2_transcript	transcript	SYNTHKIN1 mRNA	SYNTHT0001.1	decrease								
-MECH-SYNTHKIN1-01	SYNTHKIN1	N3_protein	protein	SynthKin1 checkpoint protein	SYNTHP0001	decrease								
-MECH-SYNTHKIN1-01	SYNTHKIN1	N4_complex	complex	Synthetic mitotic checkpoint complex	SYNTHC0001	loss_of_function								
-MECH-SYNTHKIN1-01	SYNTHKIN1	N5_process	cellular_process	Spindle assembly checkpoint signalling	GO:0031577	loss_of_function								
-MECH-SYNTHKIN1-01	SYNTHKIN1	N6_cellphen	cellular_phenotype	Chromosome missegregation / aneuploidy	HP:0200024	increase								
-MECH-SYNTHKIN1-01	SYNTHKIN1	N7_organism	organismal_phenotype	Growth restriction and microcephaly	HP:0000252	increase								
-MECH-SYNTHKIN1-01	SYNTHKIN1							L1	N1_variant	N2_transcript	truncating_allele_triggers_nmd	decrease	literature_mechanism	strong	1	Second allele is missense; residual transcript level not quantified in this synthetic case.
-MECH-SYNTHKIN1-01	SYNTHKIN1							L2	N2_transcript	N3_protein	reduces_protein_abundance	decrease	literature_mechanism	strong	1	Residual protein activity of the missense allele is unmeasured.
-MECH-SYNTHKIN1-01	SYNTHKIN1							L3	N3_protein	N4_complex	fails_to_assemble	loss_of_function	literature_mechanism	moderate	1	Stoichiometry threshold for complex failure is not established.
-MECH-SYNTHKIN1-01	SYNTHKIN1							L4	N4_complex	N5_process	fails_to_inhibit_anaphase_promoting_activity	loss_of_function	literature_mechanism	strong	1	
-MECH-SYNTHKIN1-01	SYNTHKIN1							L5	N5_process	N6_cellphen	permits_premature_anaphase	increase	literature_mechanism	strong	1	
-MECH-SYNTHKIN1-01	SYNTHKIN1							L6	N6_cellphen	N7_organism	impairs_progenitor_expansion	increase	inference	moderate	0	INFERRED, not demonstrated. Which tissues and which developmental windows dominate the organismal phenotype is unresolved.
+mechanism_id	gene_symbol	node_id	node_kind	node_label	node_identifier	state_in_patient	deviation_is_pathological	link_id	source_node_id	target_node_id	relation	direction	tier	strength	is_directly_demonstrated	uncertainty
+MECH-SYNTHKIN1-01	SYNTHKIN1	N1_variant	variant	Biallelic SYNTHKIN1 variants	SYNTHG0001	loss_of_function	1									
+MECH-SYNTHKIN1-01	SYNTHKIN1	N2_transcript	transcript	SYNTHKIN1 mRNA	SYNTHT0001.1	decrease	1									
+MECH-SYNTHKIN1-01	SYNTHKIN1	N3_protein	protein	SynthKin1 checkpoint protein	SYNTHP0001	decrease	1									
+MECH-SYNTHKIN1-01	SYNTHKIN1	N4_complex	complex	Synthetic mitotic checkpoint complex	SYNTHC0001	loss_of_function	1									
+MECH-SYNTHKIN1-01	SYNTHKIN1	N5_process	cellular_process	Spindle assembly checkpoint signalling	GO:0031577	loss_of_function	1									
+MECH-SYNTHKIN1-01	SYNTHKIN1	N6_cellphen	cellular_phenotype	Chromosome missegregation / aneuploidy	HP:0200024	increase	1									
+MECH-SYNTHKIN1-01	SYNTHKIN1	N7_organism	organismal_phenotype	Growth restriction and microcephaly	HP:0000252	increase	1									
+MECH-SYNTHKIN1-01	SYNTHKIN1								L1	N1_variant	N2_transcript	truncating_allele_triggers_nmd	decrease	literature_mechanism	strong	1	Second allele is missense; residual transcript level not quantified in this synthetic case.
+MECH-SYNTHKIN1-01	SYNTHKIN1								L2	N2_transcript	N3_protein	reduces_protein_abundance	decrease	literature_mechanism	strong	1	Residual protein activity of the missense allele is unmeasured.
+MECH-SYNTHKIN1-01	SYNTHKIN1								L3	N3_protein	N4_complex	fails_to_assemble	loss_of_function	literature_mechanism	moderate	1	Stoichiometry threshold for complex failure is not established.
+MECH-SYNTHKIN1-01	SYNTHKIN1								L4	N4_complex	N5_process	fails_to_inhibit_anaphase_promoting_activity	loss_of_function	literature_mechanism	strong	1	
+MECH-SYNTHKIN1-01	SYNTHKIN1								L5	N5_process	N6_cellphen	permits_premature_anaphase	increase	literature_mechanism	strong	1	
+MECH-SYNTHKIN1-01	SYNTHKIN1								L6	N6_cellphen	N7_organism	impairs_progenitor_expansion	increase	inference	moderate	0	INFERRED, not demonstrated. Which tissues and which developmental windows dominate the organismal phenotype is unresolved.

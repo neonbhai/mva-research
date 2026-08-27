@@ -49,6 +49,7 @@ _NODE_FIELDS: tuple[str, ...] = (
     "node_label",
     "node_identifier",
     "state_in_patient",
+    "deviation_is_pathological",
 )
 
 #: The link block of the chain table, in file order.
@@ -107,7 +108,10 @@ def _read_table(path: Path, *, expected_header: Sequence[str]) -> tuple[tuple[st
     if missing:
         msg = (
             f"Mechanism table {path.name} is missing {len(missing)} required "
-            f"column(s): {', '.join(missing)}."
+            f"column(s): {', '.join(missing)}. Add the column and give every row an "
+            "explicit value. A missing column is never filled with a default here: the "
+            "fields this loader requires are exactly the ones whose wrong-by-default "
+            "value would invert a downstream sign check."
         )
         raise IngestionError(msg)
     return tuple(rows[1:])
@@ -146,9 +150,12 @@ def _resolve_row(row: Sequence[str], *, source: str, line_no: int) -> tuple[str,
             msg = f"{source} line {line_no}: row populates both the node and the link block."
             raise IngestionError(msg)
         mapping = {**keys, **dict(zip(_NODE_FIELDS, block, strict=True))}
-        for field in ("node_id", "node_kind", "node_label", "state_in_patient"):
+        for field in _REQUIRED_NODE_FIELDS:
             if not mapping[field]:
-                msg = f"{source} line {line_no}: node row is missing required field {field!r}."
+                msg = (
+                    f"{source} line {line_no}: node row is missing required field {field!r}. "
+                    "It has no default; supply the value."
+                )
                 raise IngestionError(msg)
         return "node", mapping
 
@@ -285,6 +292,9 @@ def _build_node(mapping: dict[str, str], *, ctx: str) -> MechanismNode:
         identifier=mapping["node_identifier"] or None,
         state_in_patient=_parse_enum(
             EffectDirection, mapping["state_in_patient"], field="state_in_patient", ctx=ctx
+        ),
+        deviation_is_pathological=_parse_bool(
+            mapping["deviation_is_pathological"], field="deviation_is_pathological", ctx=ctx
         ),
     )
 
