@@ -16,7 +16,7 @@ intent: `tests/unit/test_docs_integrity.py` asserts every package under
 | `models` | real | All domain contracts, validators, invariants. | — | — |
 | `config` | real | Typed config, workspace boundary, cloud-sync rejection. | — | — |
 | `clock` / `determinism` / `errors` | real | Injectable clock, canonical hashing, typed errors. | — | — |
-| `privacy` | real | Scanner, redaction, export gate, audit checks. | Network denial is Python-level; C extensions and subprocesses bypass it. | TD-06 |
+| `privacy` | real | Scanner (11 checks), redaction on every handler, export gate acting on its verdict, containment by (st_dev, st_ino). | `netguard` is best-effort and must be labelled so: C extensions and subprocesses bypass it. The declared-synthetic downgrade is defeatable by a deliberate lie, not by accident. | TD-06 |
 | `ingestion` | real | VCF parsing (cyvcf2 + pure-Python), multiallelic splitting, trimming, QC flagging. | Left-alignment requires a reference FASTA; without one only trimming is claimed. | — |
 | `annotation` | **synthetic-substitute** | Adapter protocols, manifest hash-pinning, multi-transcript preservation, "no data ≠ rare" handling. | **Consequence and frequency values are fabricated.** Not VEP, not gnomAD, not ClinVar, not SpliceAI. | TD-01 |
 | `phenotype` | **synthetic-substitute** | Four-valued observation logic, gene–phenotype scoring, contradiction handling. | Gene–phenotype associations are fabricated. No HPO ontology graph, so no ancestor propagation. | TD-04 |

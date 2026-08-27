@@ -11,30 +11,30 @@ If it passes, the repo is in a good state and the next step is below. If it
 fails, fix the failure before anything else — `just verify` is a blocking gate by
 design (ADR 0009).
 
-## Immediate (Phase 3 completion)
+## Immediate
 
-1. Write `src/mva/pipeline.py` (composition root) and `src/mva/cli.py` (Typer).
-2. Run `just demo` and fix whatever breaks.
-3. Confirm the two acceptance criteria by inspecting artifacts, not by trusting
-   tests: the synthetic causal pair ranks **first**, and the wrong-direction drug
-   is **rejected with `WRONG_DIRECTION`**.
-4. Run `just demo-determinism` and confirm byte-identical artifacts.
+Phases 1-5 are complete: the pipeline runs end to end, `just verify` is green,
+and both acceptance criteria are confirmed in the artifacts.
 
-## Phase 4 (adversarial review)
+The highest-value next step is **TD-02, known-answer validation** — see
+`docs/validation-plan.md` Level 3. Until it is done, the synthetic case proves
+the machinery and nothing about calibration, and no real-world sensitivity claim
+is supportable.
 
-Run each brief in `prompts/` as a separate reviewer with no stake in the
-implementation:
+## Phase 4 review: one brief not yet run
+
+Four of the five reviewer briefs have been run and their findings integrated
+(genomic validity, pharmacology, privacy, reproducibility). **The architecture
+brief has not been run:**
 
 ```
 prompts/review-architecture.md
-prompts/review-genomic-validity.md
-prompts/review-pharmacology.md
-prompts/review-privacy.md
-prompts/review-reproducibility.md
 ```
 
-**Every accepted finding is promoted into a test or a lint — never left as prose.**
-A finding that cannot be mechanically enforced has not really been fixed.
+Run it the same way, and promote every accepted finding into a test or a lint —
+never leave one as prose. A finding that cannot be mechanically enforced has not
+really been fixed. The other four briefs are re-runnable and worth re-running
+after any significant change.
 
 ## Before connecting real data — the exact sequence
 
