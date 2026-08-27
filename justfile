@@ -128,12 +128,18 @@ clean-demo:
 # ---------------------------------------------------------------- workflow
 
 # Run the Snakemake DAG for the synthetic case.
+#
+# `--configfile` is placed LAST on purpose: it takes nargs="+", so anything
+# following it is greedily swallowed. With it last, a bare target parses
+# correctly. Usage: `just snakemake track1`, `just snakemake -n`.
 snakemake *ARGS:
-    uv run snakemake --cores 1 --configfile config/synthetic-case.yaml {{ARGS}}
+    MVA_WORKSPACE="{{DEMO_WORKSPACE}}" uv run snakemake --cores 1 {{ARGS}} \
+        --configfile config/synthetic-case.yaml
 
 # Render the workflow DAG.
 dag:
-    uv run snakemake --dag --configfile config/synthetic-case.yaml | head -50
+    @MVA_WORKSPACE="{{DEMO_WORKSPACE}}" uv run snakemake --dag \
+        --configfile config/synthetic-case.yaml | head -50
 
 # ---------------------------------------------------------------- housekeeping
 

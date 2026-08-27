@@ -14,4 +14,6 @@ paying it down. Ordered by that cost, not by effort.
 | TD-07 | No trio/segregation support | Phase stays UNKNOWN for every pair, capping the inheritance component. This is the single largest score-limiting gap. | If parental data becomes available. |
 | TD-08 | Drug catalogue is synthetic | Track 2 output demonstrates the reasoning machinery, not a real repurposing candidate. | Before any external presentation of a specific compound. |
 | TD-09 | No human domain-expert review | Model-based adversarial review is a filter, not a substitute. | Before submission. |
+| TD-11 | Snakemake rules re-run the stage prefix | `mva run <stage>` executes everything up to that stage, so a full DAG run recomputes early stages once per rule (~20s vs ~3s for `mva run all`). Correctness is unaffected. | If DAG runtime becomes a constraint; fix is a resume-from-artifacts CLI mode. |
+| TD-12 | Container base image is not digest-pinned | `workflow/containers/Dockerfile` carries a `<PASTE HERE>` placeholder rather than a fabricated digest. The image is reproducible by tag only. | Before using the container for a reproducibility claim. |
 | TD-10 | `epcr` is a rank-ordering confidence, not a calibrated probability | The challenge's F-max metric sweeps EPCR thresholds, so miscalibration costs points even when the ranking is right. | If F-max matters more than rank points. |
