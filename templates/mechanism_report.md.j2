@@ -1,0 +1,95 @@
+## Mechanism — {{ mechanism.gene_symbol }} (`{{ mechanism.mechanism_id }}`)
+
+> {{ not_medical_advice }}
+
+- Generated: {{ generated_at }}
+- Anchored to candidate pair: {{ pair_id }}
+
+**Summary.** {{ mechanism.summary }}
+
+### Developmental window
+
+{{ mechanism.developmental_window_caveat }}
+
+### The therapeutic requirement
+
+- Therapeutic target node: `{{ mechanism.target_node_id }}` — {{ mechanism.target_label }}
+- State of that node in the patient: {{ mechanism.target_state }}
+- Disease direction: {{ mechanism.disease_direction }}
+- **Required correction: {{ mechanism.required_correction }}** — every drug is checked against this sign, and disagreement is disqualifying (GP-16).
+
+### Nodes
+
+{{ nodes_table }}
+
+### Links
+
+{{ links_table }}
+
+Each link, with what is unresolved about it:
+
+{% for link in links %}
+- **{{ link.link_id }}** — {{ link.statement }}
+  - Directly demonstrated: {{ link.is_directly_demonstrated }}
+  - Evidence: {{ link.basis }}
+  - Unresolved: {{ link.uncertainty }}
+{% if link.contradictions %}
+  - Contradicting evidence: {{ link.contradictions | join(", ") }}
+{% endif %}
+{% endfor %}
+
+### Weak points of the chain
+
+{% if mechanism.inferred_links %}
+These links are **inferred, not directly demonstrated**. A chain is only as strong
+as its weakest link, and these are the ones (ASSUMPTION-MECHANISM-01):
+
+{% for link in mechanism.inferred_links %}
+- {{ link }}
+{% endfor %}
+{% else %}
+Every link in this chain is directly demonstrated in a relevant system.
+{% endif %}
+
+{% if mechanism.unsourced_links %}
+The following links cite **no evidence at all**. They are recorded as gaps and are
+not asserted as claims (GP-10):
+
+{% for link in mechanism.unsourced_links %}
+- {{ link }}
+{% endfor %}
+{% endif %}
+
+### Uncertainties
+
+{% if mechanism.uncertainties %}
+{% for uncertainty in mechanism.uncertainties %}
+- {{ uncertainty }}
+{% endfor %}
+{% else %}
+- None recorded. An empty uncertainty list is a gap in the record, not a claim of certainty (GP-14).
+{% endif %}
+
+### Contradicting evidence (retained — GP-19)
+
+{% if contradictions %}
+{% for item in contradictions %}
+- `{{ item.evidence_id }}` {{ item.marker }} **{{ item.claim }}** — {{ item.strength }} / {{ item.evidence_type }}, source {{ item.source }}. Limitations: {{ item.limitations }}
+{% endfor %}
+{% else %}
+- None recorded.
+{% endif %}
+
+### Discriminating experiments
+
+{% if experiments %}
+{% for experiment in experiments %}
+- **{{ experiment.experiment_id }}** ({{ experiment.feasibility }}): {{ experiment.description }}
+  - Measures: {{ experiment.measures }}
+  - Distinguishes from: {{ experiment.distinguishes_from }}
+  - Expected if true: {{ experiment.expected_if_true }}
+  - Expected if false: {{ experiment.expected_if_false }}
+{% endfor %}
+{% else %}
+- None recorded. Without a discriminating experiment this mechanism cannot be separated from its alternatives on evidence.
+{% endif %}

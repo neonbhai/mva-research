@@ -8,17 +8,15 @@
 
 
 rule prioritise:
-    """Annotated variants -> candidate pairs, ranked.
+    """Annotated variants -> candidate pairs, scored and ranked.
 
     Phase is never assumed: two heterozygous variants in one gene are a compound
     heterozygote only if in trans, and PhaseStatus.UNKNOWN survives end to end
-    (GP-15, ASSUMPTION-PHASE-01).
+    rather than being silently upgraded (GP-15, ASSUMPTION-PHASE-01).
     """
     input:
         variants=ANNOTATED_VARIANTS,
-        profile=PHENOTYPE_PROFILE,
     output:
-        pairs=CANDIDATE_PAIRS,
         ranked=RANKED_PAIRS,
     log:
         f"{LOG_DIR}/prioritise.log",

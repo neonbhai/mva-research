@@ -703,8 +703,14 @@ def _component_evidence(
     clock: Clock,
     payload: dict[str, str | int | float | bool | None],
 ) -> EvidenceItem:
+    # A low component score is WEAK SUPPORT, not opposition. Emitting CONTRADICTS
+    # here would conflate "this component scored poorly" with "there is evidence
+    # against this hypothesis", which floods the dossier's contradiction section
+    # with noise and devalues GP-19. Genuine contradictions come from
+    # `collect_contradictions` (in-cis phase, common allele frequency, population
+    # homozygotes) and are the only things that feed the subtracted penalty.
     direction = (
-        EvidenceDirection.SUPPORTS if score >= SUPPORT_THRESHOLD else EvidenceDirection.CONTRADICTS
+        EvidenceDirection.SUPPORTS if score >= SUPPORT_THRESHOLD else EvidenceDirection.NEUTRAL
     )
     return EvidenceItem(
         evidence_id=make_evidence_id(
@@ -731,6 +737,23 @@ def _component_evidence(
 def _contradiction_evidence(
     contradiction: Contradiction, pair_id: str, clock: Clock
 ) -> EvidenceItem:
+    """Build a contradicting evidence item.
+
+    The payload carries ``pair_id`` **only when the contradiction is genuinely
+    about the pair** (e.g. in-cis phase). A variant-level fact — "this allele is
+    common", "the cohort contains homozygotes" — is true independently of which
+    pair we happened to be considering when we noticed it, and the same variant
+    participates in several pairs. Stamping the pair into a variant-level claim
+    produced the same content-derived evidence ID with differing payloads, which
+    the ledger correctly rejected as a collision. The pair -> evidence link is
+    already carried by ``CandidatePair.contradicting_evidence_ids``; it does not
+    need to be duplicated into the evidence itself.
+    """
+    is_pair_level = contradiction.subject_id == pair_id
+    payload: dict[str, str | int | float | bool | None] = {"contradiction_code": contradiction.code}
+    if is_pair_level:
+        payload["pair_id"] = pair_id
+
     return EvidenceItem(
         evidence_id=make_evidence_id(
             subject_id=contradiction.subject_id,
@@ -739,7 +762,7 @@ def _contradiction_evidence(
             tool=TOOL_NAME,
         ),
         subject_id=contradiction.subject_id,
-        subject_kind="pair" if contradiction.subject_id == pair_id else "variant",
+        subject_kind="pair" if is_pair_level else "variant",
         claim=contradiction.claim,
         category=contradiction.category,
         direction=EvidenceDirection.CONTRADICTS,
@@ -759,7 +782,7 @@ def _contradiction_evidence(
         ),
         timestamp=clock.now(),
         numeric_value=contradiction.magnitude,
-        payload={"contradiction_code": contradiction.code, "pair_id": pair_id},
+        payload=payload,
     )
 
 

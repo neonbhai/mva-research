@@ -8,7 +8,7 @@ previous run's artifacts.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -48,7 +48,7 @@ def synthetic_workspace(tmp_path: Path) -> Iterator[Workspace]:
     yield Workspace(root=tmp_path.resolve(), repo_root=REPO_ROOT)
 
 
-def read_golden_tsv(name: str) -> list[dict[str, str]]:
+def _read_golden_tsv(name: str) -> list[dict[str, str]]:
     """Read a golden expectation file, skipping comment lines."""
     import csv
 
@@ -59,3 +59,13 @@ def read_golden_tsv(name: str) -> list[dict[str, str]]:
         if line.strip() and not line.lstrip().startswith("#")
     ]
     return list(csv.DictReader(lines, delimiter="\t"))
+
+
+@pytest.fixture(scope="session")
+def golden() -> Callable[[str], list[dict[str, str]]]:
+    """Reader for `tests/golden/*.tsv`.
+
+    Exposed as a fixture because `tests/` is deliberately not an importable
+    package -- test modules should not import from each other.
+    """
+    return _read_golden_tsv

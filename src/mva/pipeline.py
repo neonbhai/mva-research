@@ -377,11 +377,20 @@ def write_provenance_manifest(context: RunContext, manifest: RunManifest) -> Art
 def verify_determinism(first: dict[str, str], second: dict[str, str]) -> tuple[bool, list[str]]:
     """Compare two runs' artifact digests (GP-30).
 
-    The provenance manifest itself is excluded: it contains the artifact hashes of
-    everything else, so comparing it would be circular, and it legitimately
-    differs on the git-dirty flag between two invocations.
+    Two exclusions, both principled:
+
+    * **The provenance manifest** contains the artifact hashes of everything else,
+      so comparing it would be circular, and it legitimately differs on the
+      git-dirty flag between invocations.
+    * **The DuckDB file** is a storage-engine container. Its byte layout depends on
+      page allocation and internal bookkeeping the engine does not promise to
+      reproduce even for identical logical content. That would be a loophole if it
+      were the only record of the evidence store -- so it is not: every table is
+      additionally exported to Parquet with pinned compression and row-group size,
+      and those exports ARE compared here. The determinism claim is made about the
+      data, not about a container's internal layout.
     """
-    skip = {"provenance.json"}
+    skip = {"provenance.json", ".duckdb", ".duckdb.wal"}
     differences: list[str] = []
     keys = sorted(set(first) | set(second))
     for key in keys:

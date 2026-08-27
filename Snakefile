@@ -149,22 +149,66 @@ if WORKSPACE == WORKSPACE_UNSET:
     )
 
 
-def _resolve_run_id() -> str:
-    """One run directory per invocation, named by a value that cannot escape.
+def _run_id_from_pipeline() -> str:
+    """Ask the pipeline what it will call this run, rather than guessing.
 
-    There are no wildcards anywhere in this workflow, so this is the only value
-    that reaches a path from outside. It is checked here so that no output can be
-    steered out of the workspace by a crafted `--config run_id=...`.
+    Snakemake and `mva` must agree on the run directory or the DAG would track
+    files that nothing writes. `mva.pipeline.make_run_id` derives it from the case
+    id and the hash of the RESOLVED config — case merged over defaults — and
+    deliberately takes no clock, because a timestamped run id would break
+    byte-identical repeat runs (GP-30). Calling it here means the two cannot
+    drift; re-implementing the rule in this file is how they would.
+
+    This is config resolution, not analysis logic, so it does not violate the
+    thin-rules constraint of ADR 0001: no rule body gains a line from it.
     """
-    raw = str(config.get("run_id") or os.environ.get("MVA_RUN_ID") or CASE_ID)
-    if raw != Path(raw).name or raw in {"", ".", ".."} or raw.startswith("-"):
+    try:
+        from mva.cli import load_case_config_with_defaults
+        from mva.pipeline import make_run_id
+    except ImportError:
+        # A checkout where `mva` is not installed can still be inspected with
+        # --list and --dag; it just cannot be run.
+        logger.warning(
+            "`mva` is not importable, so the run id cannot be derived from the "
+            f"resolved config. Falling back to {CASE_ID!r}, which will NOT match the "
+            "directory the pipeline writes to. Install the project (`uv sync`) before "
+            "running this workflow for real."
+        )
+        return CASE_ID
+
+    try:
+        case = load_case_config_with_defaults(
+            REPO_ROOT / CASE_CONFIG, REPO_ROOT / DEFAULTS_CONFIG
+        )
+    except Exception as exc:
         msg = (
-            f"run_id {raw!r} is not a single safe path segment. It must contain no "
+            f"Could not resolve {CASE_CONFIG} over {DEFAULTS_CONFIG}: {exc}\n"
+            "The workflow needs a valid case configuration before it can name the run "
+            "directory. Fix the config; `mva run validate --config <cfg> --defaults "
+            "<def> --workspace <ws>` reports the same error in full."
+        )
+        raise WorkflowError(msg) from exc
+    return make_run_id(case)
+
+
+def _resolve_run_id() -> str:
+    """The run directory name — the only outside value that reaches a path.
+
+    There are no wildcards anywhere in this workflow, by design. This value is the
+    single exception, so it is checked here: nothing supplied through
+    `--config run_id=...` or `MVA_RUN_ID` may steer an output out of the
+    workspace (ADR 0006).
+    """
+    override = config.get("run_id") or os.environ.get("MVA_RUN_ID")
+    run_id = str(override) if override else _run_id_from_pipeline()
+    if run_id != Path(run_id).name or run_id in {"", ".", ".."} or run_id.startswith("-"):
+        msg = (
+            f"run_id {run_id!r} is not a single safe path segment. It must contain no "
             "'/', no '..' and no leading '-', because it is interpolated directly "
             "into every output path under the workspace (ADR 0006)."
         )
         raise WorkflowError(msg)
-    return raw
+    return run_id
 
 
 RUN_ID = _resolve_run_id()
@@ -173,17 +217,25 @@ RUN_ID = _resolve_run_id()
 # --------------------------------------------------------------------------
 # Artifact layout — every path below is rooted at WORKSPACE (ADR 0006)
 # --------------------------------------------------------------------------
+# These paths MIRROR what src/mva/orchestrator.py writes. They are not a naming
+# scheme this file is free to choose: Snakemake's DAG is only meaningful if the
+# files it tracks are the files the pipeline actually produces. If a stage's
+# output moves, it moves here in the same commit.
 RUN_DIR = f"{WORKSPACE}/runs/{RUN_ID}"
 
+VARIANTS_DIR = f"{RUN_DIR}/variants"
+QC_DIR = f"{RUN_DIR}/qc"
+CANDIDATES_DIR = f"{RUN_DIR}/candidates"
+SUBMISSION_DIR = f"{RUN_DIR}/submission"
+REPORTS_DIR = f"{RUN_DIR}/reports"
+EVIDENCE_DIR = f"{RUN_DIR}/evidence"
+
+# Workflow-only, not pipeline artifacts: gate markers and stage logs. They live
+# beside the artifacts (inside the workspace, never in the repo) and are excluded
+# from the provenance digest, which enumerates registered artifacts rather than
+# scanning the directory.
 STATUS_DIR = f"{RUN_DIR}/status"
 LOG_DIR = f"{RUN_DIR}/logs"
-INGEST_DIR = f"{RUN_DIR}/ingest"
-ANNOTATE_DIR = f"{RUN_DIR}/annotate"
-PRIORITISE_DIR = f"{RUN_DIR}/prioritise"
-MECHANISM_DIR = f"{RUN_DIR}/mechanism"
-INTERVENTION_DIR = f"{RUN_DIR}/interventions"
-REPORT_DIR = f"{RUN_DIR}/report"
-PROVENANCE_DIR = f"{RUN_DIR}/provenance"
 
 # Inputs are workspace-relative in the case config, so the absolute location of
 # patient data appears in no committed file and in no provenance manifest.
@@ -196,18 +248,19 @@ VALIDATED_OK = f"{STATUS_DIR}/validated.ok"
 PROVENANCE_OK = f"{STATUS_DIR}/provenance.ok"
 PRIVACY_AUDIT_OK = f"{STATUS_DIR}/privacy-audit.ok"
 
-NORMALISED_VARIANTS = f"{INGEST_DIR}/normalised_variants.parquet"
-QC_REPORT = f"{INGEST_DIR}/qc_report.json"
-ANNOTATED_VARIANTS = f"{ANNOTATE_DIR}/annotated_variants.parquet"
-PHENOTYPE_PROFILE = f"{ANNOTATE_DIR}/phenotype_profile.json"
-CANDIDATE_PAIRS = f"{PRIORITISE_DIR}/candidate_pairs.parquet"
-RANKED_PAIRS = f"{PRIORITISE_DIR}/ranked_pairs.tsv"
-MECHANISM_REPORT = f"{MECHANISM_DIR}/mechanism_report.json"
-DRUG_HYPOTHESES = f"{INTERVENTION_DIR}/drug_hypotheses.parquet"
-REJECTED_DRUGS = f"{INTERVENTION_DIR}/rejected_drugs.parquet"
-TRACK1_SUBMISSION = f"{REPORT_DIR}/track1_submission.csv"
-TRACK1_DOSSIER = f"{REPORT_DIR}/track1_dossier.md"
-TRACK2_REPORT = f"{REPORT_DIR}/track2_report.md"
+PROVENANCE_MANIFEST = f"{RUN_DIR}/provenance.json"
+EVIDENCE_DB = f"{EVIDENCE_DIR}/evidence.duckdb"
+
+NORMALISED_VARIANTS = f"{VARIANTS_DIR}/normalised.json"
+QC_REPORT = f"{QC_DIR}/qc_report.json"
+ANNOTATED_VARIANTS = f"{VARIANTS_DIR}/annotated.json"
+RANKED_PAIRS = f"{CANDIDATES_DIR}/ranked_pairs.json"
+TRACK1_SUBMISSION = f"{SUBMISSION_DIR}/track1_submission.csv"
+TRACK1_DOSSIER = f"{REPORTS_DIR}/candidate_dossier.md"
+MECHANISM_REPORT = f"{REPORTS_DIR}/mechanism_report.md"
+DRUG_HYPOTHESES = f"{REPORTS_DIR}/drug_hypotheses.md"
+REJECTION_RECORD = f"{REPORTS_DIR}/rejection_record.md"
+TRACK2_REPORT = f"{REPORTS_DIR}/track2_report.md"
 
 TRACK1_ARTIFACTS = [TRACK1_SUBMISSION, TRACK1_DOSSIER]
 TRACK2_ARTIFACTS = [TRACK2_REPORT]
@@ -231,6 +284,24 @@ def mva_run(stage: str) -> str:
     This is the ONLY place a command line is constructed. Keeping it here is what
     keeps the rules one line long (ADR 0001) and guarantees every stage sees the
     same config, defaults and workspace.
+
+    KNOWN COST, stated rather than hidden: `mva run <stage>` executes the whole
+    PREFIX up to and including that stage (see `_run_partial` in src/mva/cli.py) —
+    stages share a run directory and each depends on its predecessors' artifacts,
+    so the CLI does not pretend they are independently invocable. Two consequences
+    for this workflow:
+
+      * a later rule rewrites earlier rules' declared outputs, with identical
+        bytes (GP-30) but a new mtime, so re-invoking Snakemake on a completed run
+        re-runs some rules instead of reporting nothing to do. That costs time,
+        never correctness;
+      * the DAG here buys explicitness, resumability at stage granularity and a
+        rendered `just dag`, not incremental computation.
+
+    Making Snakemake incremental needs a resume-from-artifacts mode in the CLI,
+    not a change to these rules. It is deliberately not faked here with `touch()`
+    or `ancient()`: suppressing the re-run would make the timestamps lie about
+    what was recomputed, and provenance is the thing this repository is for.
     """
     parts = [
         MVA,
@@ -261,14 +332,12 @@ ALL_ARTIFACTS = [
     NORMALISED_VARIANTS,
     QC_REPORT,
     ANNOTATED_VARIANTS,
-    PHENOTYPE_PROFILE,
-    CANDIDATE_PAIRS,
     RANKED_PAIRS,
     TRACK1_SUBMISSION,
     TRACK1_DOSSIER,
     MECHANISM_REPORT,
     DRUG_HYPOTHESES,
-    REJECTED_DRUGS,
+    REJECTION_RECORD,
     TRACK2_REPORT,
     PROVENANCE_OK,
     PRIVACY_AUDIT_OK,
@@ -292,7 +361,7 @@ rule track2:
     """Stop after the Track 2 mechanism-and-intervention report."""
     input:
         DRUG_HYPOTHESES,
-        REJECTED_DRUGS,
+        REJECTION_RECORD,
         TRACK2_ARTIFACTS,
 
 

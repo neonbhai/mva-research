@@ -11,12 +11,12 @@ rule mechanism:
     """Ranked pair -> a graded mechanistic chain.
 
     Every link in the chain is graded individually (ASSUMPTION-MECHANISM-01); the
-    chain is never asserted at the strength of its strongest link. Direction of
-    effect is mandatory and signed, and "unknown" is a third state that never
-    counts as agreement (GP-16).
+    chain is never asserted at the strength of its strongest link, and an
+    inferred link is marked as inferred. Direction of effect is mandatory and
+    signed, and "unknown" is a third state that never counts as agreement
+    (GP-16).
     """
     input:
-        pairs=CANDIDATE_PAIRS,
         ranked=RANKED_PAIRS,
     output:
         mechanism=MECHANISM_REPORT,
@@ -31,16 +31,17 @@ rule mechanism:
 rule drugs:
     """Mechanism -> drug hypotheses, accepted and rejected.
 
-    Rejections are an output, not a side effect: contradicting evidence and
-    failed candidates are persisted with their reasons (GP-19). A drug whose
+    The rejection record is an output, not a side effect: contradicting evidence
+    and failed candidates are persisted with their reasons (GP-19). A drug whose
     observed direction disagrees with the required correction cannot be
-    constructed as an accepted hypothesis (ASSUMPTION-DRUG-01).
+    constructed as an accepted hypothesis at all (ASSUMPTION-DRUG-01), so the
+    rejections are where most of the reasoning is visible.
     """
     input:
         mechanism=MECHANISM_REPORT,
     output:
         accepted=DRUG_HYPOTHESES,
-        rejected=REJECTED_DRUGS,
+        rejected=REJECTION_RECORD,
     log:
         f"{LOG_DIR}/drugs.log",
     conda:
