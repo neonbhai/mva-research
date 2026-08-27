@@ -22,7 +22,6 @@ LAYERS: dict[str, int] = {
     "errors": 1,
     "determinism": 1,
     "clock": 1,
-    "logging_setup": 1,
     "config": 2,
     "privacy": 3,
     "ingestion": 4,
