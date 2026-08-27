@@ -1,0 +1,265 @@
+# =====================================================================
+# mva-research .gitignore
+# PRIVACY-CRITICAL FILE. Philosophy: DENY BY DEFAULT for anything that
+# could carry patient-derived genomic or clinical data.
+#
+# Git rule that constrains this file: you CANNOT re-include a file if
+# any PARENT DIRECTORY is excluded. Therefore all genomic denials below
+# are FILE-PATTERN denials (never bare directory denials), so that the
+# narrow synthetic-fixture negations at the bottom can take effect.
+# See docs/privacy-model.md.
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# 1. Sensitive workspace roots (patient data must live OUTSIDE the repo)
+# ---------------------------------------------------------------------
+workspace/
+/workspace
+work/
+.work/
+private/
+sensitive/
+patient/
+case_data/
+real-case/
+runs/
+out/
+output/
+results/
+
+# ---------------------------------------------------------------------
+# 2. Variant call formats
+# ---------------------------------------------------------------------
+*.vcf
+*.vcf.gz
+*.vcf.bgz
+*.gvcf
+*.gvcf.gz
+*.g.vcf
+*.g.vcf.gz
+*.bcf
+*.bcf.gz
+*.tbi
+*.csi
+*.idx
+
+# ---------------------------------------------------------------------
+# 3. Alignment formats
+# ---------------------------------------------------------------------
+*.bam
+*.bai
+*.cram
+*.crai
+*.sam
+*.sam.gz
+*.sai
+
+# ---------------------------------------------------------------------
+# 4. Raw reads
+# ---------------------------------------------------------------------
+*.fastq
+*.fq
+*.fastq.gz
+*.fq.gz
+*.fastq.bz2
+*.fq.bz2
+*.ubam
+*.sra
+*.bcl
+
+# ---------------------------------------------------------------------
+# 5. Reference / interval / array / pedigree / clinical
+# ---------------------------------------------------------------------
+*.fa
+*.fasta
+*.fa.gz
+*.fasta.gz
+*.fai
+*.2bit
+*.dict
+*.gtf
+*.gtf.gz
+*.gff
+*.gff3
+*.ped
+*.fam
+*.bim
+*.bed
+*.pgen
+*.psam
+*.pvar
+*.cnv
+*.seg
+*.idat
+*.gtc
+*.phenopacket.json
+*.mrn
+*.phi
+# Tabular formats are denied by default: variant tables, phenotype exports and
+# submission CSVs all use them. Narrow negations at the bottom re-admit the
+# handful of public/synthetic tables that legitimately live in the repo.
+*.tsv
+*.csv
+
+# ---------------------------------------------------------------------
+# 6. Derived analytical artifacts (may contain genotypes)
+# ---------------------------------------------------------------------
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+*.feather
+*.arrow
+*.h5
+*.hdf5
+*.npz
+*.pkl
+*.pickle
+
+# ---------------------------------------------------------------------
+# 7. Secrets & credentials
+# ---------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.keystore
+credentials.json
+secrets.yaml
+secrets.yml
+.netrc
+.htpasswd
+
+# ---------------------------------------------------------------------
+# 8. Logs, temp, crash dumps (may echo records)
+# ---------------------------------------------------------------------
+*.log
+logs/
+*.log.*
+crash*.txt
+core
+core.*
+*.stackdump
+*.dmp
+.tmp/
+tmp/
+*.tmp
+*.swp
+*.swo
+*~
+.snakemake/
+.snakemake_timestamp
+
+# ---------------------------------------------------------------------
+# 9. Notebooks (outputs can embed patient records)
+# ---------------------------------------------------------------------
+*.ipynb
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------
+# 10. Python / tooling
+# ---------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.eggs/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# ---------------------------------------------------------------------
+# 11. macOS / editor / cloud-sync detritus
+# ---------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+.DocumentRevisions-V100
+*.icloud
+.dropbox
+.dropbox.attr
+desktop.ini
+.idea/
+.vscode/
+!.vscode/extensions.json
+
+# =====================================================================
+# 12. NARROW NEGATIONS — synthetic, non-patient fixtures ONLY
+#
+# Every path below is asserted to be fully synthetic. The privacy audit
+# re-validates these files on every run (check: synthetic_fixture_scan).
+# NEVER add a negation outside tests/fixtures/synthetic/ or
+# knowledge/public/.
+# =====================================================================
+# Re-include the directory levels first. Git never descends into an excluded
+# directory, so a file negation is dead unless every parent is re-included.
+# (None of the rules above exclude these directories, but the explicit
+# re-inclusion makes the intent robust against future edits.)
+!tests/
+!tests/**/
+!knowledge/
+!knowledge/**/
+!config/
+!config/**/
+!templates/
+!templates/**/
+
+# Synthetic fixtures. Every file matched here is additionally required by the
+# privacy audit (check: synthetic_fixtures_marked) to carry the marker
+# `##mva_synthetic=true` (or a SYNTH- prefixed sample ID), so a real VCF
+# accidentally dropped into this directory FAILS the audit instead of sliding in.
+!tests/fixtures/synthetic/**/*.vcf
+!tests/fixtures/synthetic/**/*.ped
+!tests/fixtures/synthetic/**/*.fa
+!tests/fixtures/synthetic/**/*.fai
+!tests/fixtures/synthetic/**/*.bed
+!tests/fixtures/synthetic/**/*.tsv
+!tests/fixtures/synthetic/**/*.csv
+!tests/fixtures/synthetic/**/*.txt
+
+# Public knowledge tables (curated from public databases; no patient content).
+!knowledge/public/**/*.tsv
+!knowledge/public/**/*.csv
+!knowledge/manifests/**/*.tsv
+
+# Configuration and report templates.
+!config/**/*.csv
+!config/**/*.tsv
+!templates/**/*.csv
+
+# Demo outputs are written to an external workspace, never committed.
+demo-workspace/
+.demo/
+
+# Golden expectation locks (synthetic-derived, public by construction).
+!tests/golden/**/*.csv
+!tests/golden/**/*.tsv
+!tests/golden/**/*.txt
+
+# macOS indexing/backup opt-out markers should be committed where they guard
+# repo-local scratch space.
+!.metadata_never_index
