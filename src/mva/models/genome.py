@@ -15,7 +15,7 @@ from typing import Self
 
 from pydantic import Field, field_validator, model_validator
 
-from mva.models.base import FrozenModel
+from mva.models.base import FrozenModel, error_token
 
 
 class GenomeBuild(StrEnum):
@@ -81,7 +81,12 @@ def normalise_contig(raw: str, style: ContigStyle = ContigStyle.UCSC) -> str:
     """
     match = _CONTIG_RE.match(raw.strip())
     if match is None:
-        msg = f"Non-canonical contig {raw!r} (alt/decoy/unplaced contigs are not supported)"
+        msg = (
+            f"Non-canonical contig <contig:{error_token(raw)}> is not supported "
+            "(alt, decoy and unplaced contigs are out of scope). The name is "
+            "tokenised rather than echoed: error text reaches terminals, logs and "
+            "agent context (PRIV-09)."
+        )
         raise ValueError(msg)
     core = match.group(1).upper()
     if core in {"M", "MT"}:
@@ -120,14 +125,21 @@ class GenomicCoordinate(FrozenModel):
             # independently rankable candidates; ingestion filters them earlier.
             return upper
         if not _ALLELE_RE.match(upper):
-            msg = f"Invalid allele {value!r}: expected IUPAC ACGTN, '*' or '.'"
+            msg = (
+                f"Invalid allele of length {len(upper)}: expected IUPAC ACGTN, "
+                "'*' or '.'. The value is not echoed (PRIV-09)."
+            )
             raise ValueError(msg)
         return upper
 
     @model_validator(mode="after")
     def _ref_alt_distinct(self) -> Self:
         if self.ref == self.alt:
-            msg = f"REF and ALT are identical ({self.ref!r}) at {self.contig}:{self.position}"
+            msg = (
+                "REF and ALT are identical, so this record describes no variant. "
+                f"Site handle <site:{error_token((self.contig, self.position))}>; "
+                "the coordinate is tokenised rather than echoed (PRIV-09)."
+            )
             raise ValueError(msg)
         return self
 
@@ -153,9 +165,11 @@ class GenomicCoordinate(FrozenModel):
         """Guard every cross-variant comparison. Never coerce; always raise."""
         if self.build is not other.build:
             msg = (
-                f"Genome build mismatch: {self.variant_id} ({self.build.value}) vs "
-                f"{other.variant_id} ({other.build.value}). Cross-build comparison is "
-                "refused; lift-over must be an explicit, provenance-tracked stage."
+                f"Genome build mismatch: <variant:{error_token(self.variant_id)}> is "
+                f"{self.build.value} but <variant:{error_token(other.variant_id)}> is "
+                f"{other.build.value}. Cross-build comparison is refused; lift-over "
+                "must be an explicit, provenance-tracked stage. Coordinates are "
+                "tokenised rather than echoed (PRIV-09)."
             )
             raise ValueError(msg)
 

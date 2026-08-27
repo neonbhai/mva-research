@@ -74,6 +74,6 @@ tables:
     name: mechanisms
     path: public/mechanisms.tsv
     retrieved: '2026-08-27'
-    sha256: 523c4eb13ca938df445f645510d64cc8fe9ab0e969eece246ffa3ee27897b89a
+    sha256: 0c4759f022802f366a5b557cf7bca8a486e110271a49d463c5f9c3626190e394
     synthetic: true
     version: synthetic-v0.0
