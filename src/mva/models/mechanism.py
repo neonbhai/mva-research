@@ -14,8 +14,9 @@ that node be pushed?
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from mva.models.base import AssertionTier, FrozenModel
 from mva.models.evidence import EvidenceStrength
@@ -75,9 +76,18 @@ UPWARD_DIRECTIONS: frozenset[EffectDirection] = frozenset(
 )
 
 #: Directions from which no sign can be derived. Never treat these as agreement.
+#:
+#: ``NO_CHANGE`` is deliberately NOT here. A demonstrated null result is a signed,
+#: established finding — usually the strongest evidence *against* the hypothesis
+#: that this agent corrects this node. Filing it as "unknown" would award it the
+#: undetermined-direction credit and a recommendation to go and measure the sign
+#: that has already been measured.
 UNSIGNED_DIRECTIONS: frozenset[EffectDirection] = frozenset(
-    {EffectDirection.UNKNOWN, EffectDirection.CONTEXT_DEPENDENT, EffectDirection.NO_CHANGE}
+    {EffectDirection.UNKNOWN, EffectDirection.CONTEXT_DEPENDENT}
 )
+
+#: A direction that was measured and found to be null.
+NULL_DIRECTIONS: frozenset[EffectDirection] = frozenset({EffectDirection.NO_CHANGE})
 
 
 def directions_agree(required: EffectDirection, observed: EffectDirection) -> bool | None:
@@ -90,9 +100,47 @@ def directions_agree(required: EffectDirection, observed: EffectDirection) -> bo
     """
     if required in UNSIGNED_DIRECTIONS or observed in UNSIGNED_DIRECTIONS:
         return None
+    if observed in NULL_DIRECTIONS:
+        # A measured null does not push the node in the required direction. This
+        # is a disagreement with evidence behind it, not an open question.
+        return False
+    if required in NULL_DIRECTIONS:
+        return None
     both_up = required in UPWARD_DIRECTIONS and observed in UPWARD_DIRECTIONS
     both_down = required in DOWNWARD_DIRECTIONS and observed in DOWNWARD_DIRECTIONS
     return both_up or both_down
+
+
+#: The direction a therapy must push a node, given how that node deviates in the
+#: patient. Defined here rather than in the interventions layer so that the
+#: `MechanismHypothesis` validator and the drug direction check cannot drift apart
+#: -- two copies of a sign table is one copy too many.
+CORRECTIVE_DIRECTION: dict[EffectDirection, EffectDirection] = {
+    EffectDirection.DECREASE: EffectDirection.INCREASE,
+    EffectDirection.INCREASE: EffectDirection.DECREASE,
+    EffectDirection.LOSS_OF_FUNCTION: EffectDirection.RESTORE,
+    EffectDirection.GAIN_OF_FUNCTION: EffectDirection.DECREASE,
+    EffectDirection.DESTABILISE: EffectDirection.STABILISE,
+    EffectDirection.STABILISE: EffectDirection.DESTABILISE,
+    EffectDirection.RESTORE: EffectDirection.UNKNOWN,
+    EffectDirection.NO_CHANGE: EffectDirection.UNKNOWN,
+    EffectDirection.UNKNOWN: EffectDirection.UNKNOWN,
+    EffectDirection.CONTEXT_DEPENDENT: EffectDirection.UNKNOWN,
+}
+
+
+def corrective_direction(state: EffectDirection) -> EffectDirection:
+    """The direction a therapy must push a node deviating by ``state``."""
+    return CORRECTIVE_DIRECTION.get(state, EffectDirection.UNKNOWN)
+
+
+def same_sign(a: EffectDirection, b: EffectDirection) -> bool:
+    """Whether two signed directions point the same way."""
+    if a in UNSIGNED_DIRECTIONS or b in UNSIGNED_DIRECTIONS:
+        return a is b
+    return (a in UPWARD_DIRECTIONS and b in UPWARD_DIRECTIONS) or (
+        a in DOWNWARD_DIRECTIONS and b in DOWNWARD_DIRECTIONS
+    )
 
 
 class MechanismNode(FrozenModel):
@@ -104,6 +152,18 @@ class MechanismNode(FrozenModel):
     identifier: str | None = Field(default=None, description="External ID: HGNC, UniProt, GO, HPO.")
     state_in_patient: EffectDirection = Field(
         description="How this node deviates from wild type in the affected individual."
+    )
+    deviation_is_pathological: bool = Field(
+        description=(
+            "Whether this node's deviation is part of the DISEASE or part of a "
+            "COMPENSATORY response. Mandatory and un-defaulted, because the naive "
+            "assumption -- that every deviation from wild type should be pushed back "
+            "-- inverts the sign on compensatory nodes. Suppressing a protective "
+            "response, such as clearance of aneuploid progenitors, 'corrects' a "
+            "deviation and is exactly the wrong thing to do. Where a node is "
+            "compensatory, no corrective direction can be derived from its state "
+            "alone and the direction check must return UNKNOWN rather than guess."
+        )
     )
     description: str = ""
 
@@ -198,3 +258,62 @@ class MechanismHypothesis(FrozenModel):
             f"{self.therapeutic_target_node_id!r}, which is not among its nodes."
         )
         raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _direction_triple_is_consistent(self) -> Self:
+        """The three curated direction cells must agree.
+
+        ``disease_direction``, ``required_correction`` and the target node's
+        ``state_in_patient`` are authored independently, and the drug direction
+        check compares an agent's observed direction against
+        ``required_correction`` alone. Without this validator a single mistyped
+        cell silently inverts the entire Track 2 gate: the contraindicated
+        checkpoint inhibitor is then reported as "direction AGREES" and the
+        correct stabiliser is rejected as wrong-direction, with the report
+        printing its own refutation and nothing reading it.
+
+        So the invariant is enforced at construction, where it cannot be skipped:
+        the required correction must be the corrective direction of both the
+        disease direction and the target node's patient state.
+        """
+        if not self.nodes:
+            return self
+
+        target = self.target_node()
+
+        if not target.deviation_is_pathological:
+            msg = (
+                f"Mechanism {self.mechanism_id!r} designates {target.node_id!r} as the "
+                "therapeutic target, but that node is marked compensatory "
+                "(deviation_is_pathological=False). Pushing a compensatory response "
+                "back towards wild type suppresses a protective mechanism. Choose a "
+                "pathological node as the target, or correct the node's flag."
+            )
+            raise ValueError(msg)
+
+        expected_from_state = corrective_direction(target.state_in_patient)
+        if expected_from_state is not EffectDirection.UNKNOWN and not same_sign(
+            self.required_correction, expected_from_state
+        ):
+            msg = (
+                f"Mechanism {self.mechanism_id!r} requires "
+                f"{self.required_correction.value!r} at target {target.node_id!r}, but "
+                f"that node's patient state is {target.state_in_patient.value!r}, whose "
+                f"correction is {expected_from_state.value!r}. These point opposite ways. "
+                "A sign error here inverts the entire drug direction check, so it is "
+                "refused at construction rather than reported."
+            )
+            raise ValueError(msg)
+
+        expected_from_disease = corrective_direction(self.disease_direction)
+        if expected_from_disease is not EffectDirection.UNKNOWN and not same_sign(
+            self.required_correction, expected_from_disease
+        ):
+            msg = (
+                f"Mechanism {self.mechanism_id!r} declares disease_direction "
+                f"{self.disease_direction.value!r}, whose correction is "
+                f"{expected_from_disease.value!r}, but required_correction is "
+                f"{self.required_correction.value!r}. These point opposite ways."
+            )
+            raise ValueError(msg)
+        return self

@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from mva.clock import Clock, SystemClock, demo_clock
 from mva.config import CaseConfig, NetworkProfile, Workspace
 from mva.determinism import canonical_json, hash_file, hash_text, short_hash
@@ -31,6 +33,7 @@ from mva.models.provenance import (
     ArtifactProvenance,
     CommandRecord,
     InputRecord,
+    ReferenceVersion,
     RunManifest,
     ToolVersion,
 )
@@ -85,6 +88,7 @@ class RunContext:
     commands: list[CommandRecord] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     allow_workspace_in_repo: bool = False
+    reference_versions: list[ReferenceVersion] = field(default_factory=list)
 
     def artifact_path(self, relative: str) -> Path:
         path = self.run_dir / relative
@@ -170,7 +174,50 @@ class RunContext:
 # ---------------------------------------------------------------------------
 
 
-def make_run_id(config: CaseConfig) -> str:
+def reference_versions_from_manifest(manifest_path: Path) -> tuple[ReferenceVersion, ...]:
+    """Record every knowledge table this run depended on, with its content hash.
+
+    Without this, two runs over *different reference data* were indistinguishable:
+    the same case config produced the same `config_hash`, the same `run_id`, the
+    same input hashes and the same run directory, while emitting a different
+    submission. A manifest that cannot tell those apart is not a reproduction
+    record, so the reference hashes are recorded here AND folded into the run
+    identity by `make_run_id`.
+    """
+    try:
+        raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(raw, dict):
+        return ()
+    tables = raw.get("tables")
+    if not isinstance(tables, dict):
+        return ()
+
+    versions: list[ReferenceVersion] = []
+    for name in sorted(tables):
+        entry = tables[name]
+        if not isinstance(entry, dict):
+            continue
+        versions.append(
+            ReferenceVersion(
+                name=str(name),
+                version=str(entry.get("version", "unknown")),
+                checksum=str(entry.get("sha256", "")) or None,
+                retrieved=str(entry.get("retrieved", "")) or None,
+            )
+        )
+    return tuple(versions)
+
+
+def reference_fingerprint(versions: Sequence[ReferenceVersion]) -> str:
+    """A single stable digest over every reference the run consumed."""
+    if not versions:
+        return "no-references"
+    return short_hash([(v.name, v.version, v.checksum) for v in versions], 12)
+
+
+def make_run_id(config: CaseConfig, *, reference_fingerprint_value: str = "") -> str:
     """Deterministic run identifier.
 
     Derived from the case id and the config hash rather than from the clock or a
@@ -181,6 +228,9 @@ def make_run_id(config: CaseConfig) -> str:
     Note the deliberate absence of a `clock` parameter: taking one would invite a
     timestamped run id, which is exactly what breaks byte-identical repeat runs.
     """
+    if reference_fingerprint_value:
+        combined = short_hash([config.config_hash(), reference_fingerprint_value], 12)
+        return f"{config.case_id}-{combined}"
     return f"{config.case_id}-{config.config_hash()[:12]}"
 
 
@@ -249,6 +299,7 @@ def validate_case(
     *,
     clock: Clock | None = None,
     allow_workspace_in_repo: bool = False,
+    reference_versions: Sequence[ReferenceVersion] = (),
 ) -> RunContext:
     """Validate the case and open a run context.
 
@@ -256,7 +307,9 @@ def validate_case(
     the mistake is already irreversible.
     """
     active_clock = clock or (demo_clock() if config.synthetic else SystemClock())
-    run_id = make_run_id(config)
+    run_id = make_run_id(
+        config, reference_fingerprint_value=reference_fingerprint(reference_versions)
+    )
     run_dir = workspace.runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -268,6 +321,7 @@ def validate_case(
         run_dir=run_dir,
         started_at=active_clock.now(),
         allow_workspace_in_repo=allow_workspace_in_repo,
+        reference_versions=list(reference_versions),
     )
 
     vcf_path = workspace.path(config.inputs.vcf)
@@ -322,6 +376,7 @@ def build_run_manifest(context: RunContext, *, repo_root: Path) -> RunManifest:
         artifacts=tuple(context.artifacts),
         commands=tuple(context.commands),
         tool_versions=collect_tool_versions(),
+        reference_versions=tuple(context.reference_versions),
         python_version=platform.python_version(),
         platform=f"{platform.system()}-{platform.machine()}",
         network_profile=context.config.network_profile.value,
