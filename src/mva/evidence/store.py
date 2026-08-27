@@ -384,7 +384,7 @@ class EvidenceStore:
                         "is_mane_select": csq.is_mane_select,
                         "consequence_terms": _text_list(csq.consequence_terms),
                         "most_severe_term": csq.most_severe_term,
-                        "impact": csq.impact.value,
+                        "impact": None if csq.impact is None else csq.impact.value,
                         "hgvs_c": csq.hgvs_c,
                         "hgvs_p": csq.hgvs_p,
                         "exon": csq.exon,

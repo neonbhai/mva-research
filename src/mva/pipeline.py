@@ -15,7 +15,7 @@ import json
 import platform
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -57,11 +57,21 @@ ARTIFACT_SENSITIVITY: dict[ArtifactKind, Sensitivity] = {
     ArtifactKind.RUN_MANIFEST: Sensitivity.DERIVED_SAFE,
     ArtifactKind.PROVENANCE_MANIFEST: Sensitivity.DERIVED_SAFE,
     ArtifactKind.PRIVACY_AUDIT: Sensitivity.DERIVED_SAFE,
-    # The submission necessarily carries coordinates: that IS the challenge
-    # format. It still passes the export gate, which re-scans it.
+    # The submission is the ONE artifact permitted to carry proband coordinates
+    # while classified PUBLIC: that IS the challenge format, and there is no way
+    # to submit without them. It writes chrom/pos/ref/alt as separate CSV columns
+    # and passes the export gate, which re-scans the bytes.
     ArtifactKind.SUBMISSION: Sensitivity.PUBLIC,
     # Track 2 outputs concern public gene/mechanism/drug knowledge, not the
     # proband's genotypes.
+    #
+    # That sentence used to be false for TRACK2_REPORT, which rendered
+    # `pair.variant_ids` into its "Anchoring variant pair" section — a
+    # build-qualified coordinate and both alleles, for a real proband, in a file
+    # classified PUBLIC and on the export allowlist. The report now names the pair
+    # by `pair_id` only; the coordinates stay in `candidate_pairs.json`, which is
+    # SENSITIVE and never leaves the workspace. See
+    # `mva.reporting.track2._pair_context`.
     ArtifactKind.MECHANISM_REPORT: Sensitivity.PUBLIC,
     ArtifactKind.DRUG_HYPOTHESES: Sensitivity.PUBLIC,
     ArtifactKind.REJECTION_RECORD: Sensitivity.PUBLIC,
@@ -89,6 +99,17 @@ class RunContext:
     warnings: list[str] = field(default_factory=list)
     allow_workspace_in_repo: bool = False
     reference_versions: list[ReferenceVersion] = field(default_factory=list)
+
+    #: Called with every artifact the instant it is registered, before the caller
+    #: gets it back. `mva.orchestrator` sets this to the public-export gate.
+    #:
+    #: It is a hook on the funnel rather than a call at each site because the
+    #: failure it replaces was exactly a missed call site: the gate ran on the
+    #: submission and on nothing else, while four more artifacts were classified
+    #: PUBLIC. A per-site call is a rule a future stage author must remember; a
+    #: hook on `register_artifact` is a rule they cannot get wrong, because there
+    #: is no other way to produce an artifact.
+    on_register: Callable[[RunContext, ArtifactProvenance], None] | None = None
 
     def artifact_path(self, relative: str) -> Path:
         path = self.run_dir / relative
@@ -123,6 +144,8 @@ class RunContext:
             notes=notes,
         )
         self.artifacts.append(provenance)
+        if self.on_register is not None:
+            self.on_register(self, provenance)
         return provenance
 
     def write_text_artifact(

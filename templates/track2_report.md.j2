@@ -94,7 +94,7 @@ Uncertainties:
 ## Anchoring variant pair
 
 - Pair: `{{ pair.pair_id }}` in {{ pair.gene_symbol }} ({{ pair.inheritance_model }})
-- Variants: {{ pair.variant_ids | join(", ") }}
+- Variants in the pair: {{ pair.variant_count }} (coordinates withheld — see below)
 - Phase: {{ pair.phase_status }}
 - Composite score: {{ pair.composite_score }}
 - Flags: {% if pair.flags %}{{ pair.flags | join(", ") }}{% else %}none{% endif %}
@@ -102,6 +102,12 @@ Uncertainties:
 
 A drug hypothesis that is not anchored to a ranked variant pair is not grounded in
 anything; this is the pair this report is anchored to.
+
+This report is classified PUBLIC, so it names the pair by its identifier and not
+by its coordinates. `{{ pair.pair_id }}` resolves to the exact variants in
+`candidates/ranked_pairs.json`, which is classified SENSITIVE and never leaves the
+workspace. A reader entitled to the genotypes looks them up there; nothing in the
+argument below depends on having them here.
 {% endif %}
 
 ## Disease-modifying candidates — direction AGREES

@@ -98,3 +98,63 @@ is **`chr`-prefixed**: the docs example is `chr15`, the template uses
 1. The scorer evaluates only `next(iter(submissions))` — the first proband
    encountered. A stray `proband_id` hard-fails the whole submission.
 2. Chromosome strings are compared raw. See the warning above.
+
+---
+
+# Re-verified against the real scorer source — 2026-08-28
+
+The whole of `evaluation.py` was read directly from the Space
+(`raw/main/evaluation.py`, public, no authentication) and its logic
+re-implemented and executed. Everything above is confirmed. The results below
+are **verified by execution**, not inferred, and they determine how we submit.
+
+## Confirmed mechanics
+
+- F-max thresholds are **the unique EPCR values present in our own submission**,
+  swept descending — not a fixed grid. The comparison is `row.epcr >= t`.
+- Consequence: both metrics depend only on the **order and tie structure** of our
+  EPCRs, never on their magnitude. Any strictly increasing reparameterisation
+  scores identically. Calibrating EPCR toward a "true probability" is worth
+  exactly zero points; **injectivity is worth a great deal** (see below).
+- Full match is `row.variants == true_variants` (frozenset equality), `break` on
+  the first. Partial match is searched **only if no full match exists**, and only
+  for a compound-het answer.
+- `_parse_variant` applies `.strip()` to chrom and `.upper()` to ref/alt. There is
+  **no chr-prefix normalisation** anywhere.
+
+## The four results that decide our submission
+
+| Submission shape | Rank points | F-max |
+|---|---|---|
+| True pair alone, one row | **100.0** | **1.0000** |
+| True pair + 4 wrong rows at *lower* EPCR | **100.0** | **1.0000** |
+| True pair tied with a wrong pair | 100.0 | 0.6667 |
+| Same tie, wrong row first in file order | **50.0** | 0.6667 |
+| True pair split into two single-variant rows | **50.0** | 1.0000 |
+| One true + one wrong variant, rank 1 | 50.0 | 0.5000 |
+| True pair, bare contig `15` instead of `chr15` | **0.0** | **0.0000** |
+
+**1. Fill all ten rows.** Rows with EPCR strictly below the answer's cannot lower
+either metric — F-max is a maximum over thresholds, and a lower threshold never
+displaces the better one. Unused rows are forfeited upside, not saved risk.
+
+**2. Never emit two equal EPCRs.** A tie at the answer's threshold pulls a wrong
+row into the same prediction set: precision halves and F-max falls 1.0 → 0.667.
+If file order puts the wrong row first it also takes rank 1, costing a further
+50 rank points. Strict separation is order-preserving and therefore free.
+
+**3. Never split a candidate pair across two rows.** Two single-variant rows can
+still reach F-max 1.0, but `row.variants == true_variants` is then never true, so
+the best available is partial credit: **100 → 50 rank points for nothing**.
+A compound-het proposal is one row, using the `_2` columns.
+
+**4. The chr prefix is worth the entire submission.** A correct answer emitted as
+`15` rather than `chr15` scores 0.0 on both metrics while looking right to a human
+reader. This is the single highest-consequence formatting detail in the project.
+
+## Still not verifiable from here
+
+The answer key (`gold_standard_track1.json`) lives in the private
+`SageBio/mva-hackathon-2026-gt` dataset. Nothing above depends on its contents —
+only on its *shape*, which `score_proband` fixes as a frozenset of 1 or 2
+`(chrom, pos, ref, alt)` tuples.

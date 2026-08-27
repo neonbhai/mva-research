@@ -11,14 +11,24 @@ structure-anchored, which is the property the tests below verify.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from mva.config import find_repo_root, path_is_within, resolve_workspace
+from mva.cli import load_case_config_with_defaults
+from mva.config import (
+    CaseConfig,
+    NetworkProfile,
+    Workspace,
+    find_repo_root,
+    path_is_within,
+    resolve_workspace,
+)
 from mva.errors import (
     ExportBlockedError,
     NetworkDeniedError,
@@ -26,6 +36,7 @@ from mva.errors import (
     WorkspaceError,
 )
 from mva.models.base import Sensitivity
+from mva.privacy import audit
 from mva.privacy.audit import (
     CONTENT_ALLOWLIST_PREFIXES,
     PATH_DOWNGRADABLE_RULES,
@@ -1202,3 +1213,422 @@ def test_the_pre_commit_subset_also_scans_the_path(tmp_path: Path) -> None:
     report = run_audit(repo, staged_only=True)
     assert "git_staged_sensitive" in report.failed_checks
     assert NHS_DIGITS not in report.to_markdown()
+
+
+# ---------------------------------------------------------------------------
+# 20. The offline guard is ARMED by the composition root, not merely installed
+#     (C2). `_install_privacy_guards` used to install a permanently inert audit
+#     hook, set two htslib variables, and return the string "offline_enforced"
+#     for the CLI to print. `is_armed()` was False for the whole run and a DNS
+#     lookup succeeded. `OfflineProfile` and `is_armed` appeared nowhere in
+#     `src/` — only in this file, testing a mechanism no production path used.
+# ---------------------------------------------------------------------------
+
+
+def test_install_privacy_guards_arms_the_offline_profile(tmp_path: Path) -> None:
+    """After the composition root returns, outbound network is actually denied."""
+    from mva.cli import _install_privacy_guards
+    from mva.config import NetworkProfile, Workspace
+    from mva.privacy import netguard
+
+    repo = find_repo_root()
+    config = load_case_config_with_defaults(
+        repo / "config" / "synthetic-case.yaml", repo / "config" / "default.yaml"
+    ).model_copy(update={"network_profile": NetworkProfile.OFFLINE_ENFORCED})
+    workspace = Workspace(root=tmp_path.resolve(), repo_root=repo)
+
+    assert not netguard.is_armed(), "a previous test leaked an armed profile"
+    previous_env = {key: os.environ.get(key) for key in ("REF_PATH", "REF_CACHE")}
+    try:
+        profile = _install_privacy_guards(config, workspace)
+
+        assert profile == "offline_enforced"
+        assert netguard.hook_installed() is True
+        assert netguard.is_armed() is True, (
+            "the CLI printed '(network: offline_enforced)' while the guard was "
+            "disarmed. NetworkProfile.OFFLINE_ENFORCED is documented as 'audit "
+            "hook armed AND an OS-level control asserted'; the label must report "
+            "state, not assert it."
+        )
+        # And the arming has the effect the profile name claims.
+        with pytest.raises(NetworkDeniedError):
+            socket.getaddrinfo("example.invalid", 443)
+    finally:
+        # `arm_for_process` is deliberately one-way, so this test unwinds the
+        # module state itself rather than being handed a disarm function.
+        netguard._armed = False
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    assert not netguard.is_armed()
+
+
+def test_the_offline_profile_is_armed_while_the_annotate_stage_executes(
+    synthetic_config: CaseConfig, synthetic_workspace: Workspace
+) -> None:
+    """Stage-level: the guard holds where patient data is actually being read.
+
+    Arming only in `mva.cli` would leave every other caller of `execute_pipeline`
+    — Snakemake, this test, a notebook — unguarded, so the arming lives in
+    `execute_pipeline` too. The probe wraps the name as the orchestrator has it
+    bound, which is the call the stage graph actually makes.
+    """
+    from mva import orchestrator
+    from mva.privacy import netguard
+
+    observed: list[bool] = []
+    real = orchestrator.annotate_variants
+
+    def probe(*args: object, **kwargs: object) -> object:
+        observed.append(netguard.is_armed())
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    assert synthetic_config.network_profile is not NetworkProfile.ONLINE
+    assert not netguard.is_armed(), "the guard must not already be armed"
+
+    orchestrator.annotate_variants = probe  # type: ignore[assignment]
+    try:
+        orchestrator.execute_pipeline(synthetic_config, synthetic_workspace, stop_after="annotate")
+    finally:
+        orchestrator.annotate_variants = real  # type: ignore[assignment]
+
+    assert observed == [True], (
+        "the offline profile was not armed while `annotate` ran. Every stage "
+        f"between validate and report is on the patient-data path; observed={observed}"
+    )
+    # And it unwinds: the pipeline does not leave the interpreter armed.
+    assert not netguard.is_armed()
+
+
+# ---------------------------------------------------------------------------
+# 21. The audit report is byte-stable across processes (M2, GP-30).
+#
+#     `redact_path` keyed its tag with `patterns._RUN_SALT`, a
+#     `secrets.token_bytes(16)` regenerated at every interpreter start, so
+#     `privacy/privacy_audit.md` -- a registered DERIVED_SAFE artifact that is NOT
+#     in `verify_determinism`'s skip set -- was a random function of a secret. It
+#     was green only because a clean tree yields zero redacted paths, and because
+#     `just demo-determinism` runs both passes in ONE interpreter, where the salt
+#     is constant. No in-process test can observe this; hence the subprocesses.
+# ---------------------------------------------------------------------------
+
+
+_RENDER_AUDIT_REPORT = """
+import sys
+from mva.privacy.audit import AuditReport, CheckResult, Finding
+
+finding = Finding(
+    check="content_scan",
+    path="data/NHS{digits}_x.vcf",
+    line=12,
+    rule_id="path_identifier",
+    span_len=10,
+    severity="fail",
+    detail="An identifier-length digit run in a path component.",
+)
+other = Finding(
+    check="content_scan",
+    path="data/MRN{digits}_y.vcf",
+    line=3,
+    rule_id="path_identifier",
+    span_len=10,
+    severity="fail",
+    detail="An identifier-length digit run in a path component.",
+)
+result = CheckResult(
+    name="content_scan",
+    passed=False,
+    severity="fail",
+    findings=(finding, other, finding),
+    summary="2 files",
+)
+report = AuditReport(results=(result,), passed=False, failed_checks=("content_scan",))
+sys.stdout.buffer.write(report.to_markdown().encode("utf-8"))
+"""
+
+
+def _render_audit_report_in_a_fresh_process() -> bytes:
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _RENDER_AUDIT_REPORT.format(digits=NHS_DIGITS)],
+        capture_output=True,
+        check=False,
+        cwd=find_repo_root(),
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    return proc.stdout
+
+
+def test_audit_report_markdown_is_stable_across_processes() -> None:
+    """Two interpreters, two salts, identical bytes."""
+    first = _render_audit_report_in_a_fresh_process()
+    second = _render_audit_report_in_a_fresh_process()
+
+    assert first == second, (
+        "privacy_audit.md differs between processes. It is a registered artifact "
+        "inside the GP-30 byte-identity claim and is not skipped by "
+        "`verify_determinism`, so a per-process random ingredient in it is a "
+        "determinism bug that only a cross-process check can see."
+    )
+    text = first.decode("utf-8")
+    # The redaction itself is not weakened by being deterministic.
+    assert NHS_DIGITS not in text
+    assert "NHS" not in text
+    assert "data/<REDACTED:path:" in text
+    assert ".vcf" in text
+    # Distinctness survives: two different components get two different labels,
+    # and the repeated finding reuses the first one.
+    assert text.count("<REDACTED:path:001>") == 2
+    assert "<REDACTED:path:002>" in text
+
+
+def test_the_path_label_is_not_a_function_of_the_path() -> None:
+    """A counter carries no information about what it replaced.
+
+    Stronger than the HMAC it replaces, not weaker: there is no key to leak and no
+    keyspace to search, because the label depends on position in the report rather
+    than on the component.
+    """
+    from mva.privacy.audit import PathRedactor
+
+    left = PathRedactor()
+    right = PathRedactor()
+    a = f"data/NHS{NHS_DIGITS}_{FAKE_SURNAME}.vcf"
+    b = f"data/MRN{RECORD_ID}00_{FAKE_SURNAME}.vcf"
+
+    assert left.redact(a) == right.redact(b), (
+        "two different paths redacted first in their own reports must yield the "
+        "same label; if they differ, the label is still a function of the value"
+    )
+    # Within ONE report the two remain distinguishable, which is the whole point.
+    assert left.redact(b) != left.redact(a)
+    assert left.redact(a) == left.redact(a), "the same component must keep its label"
+
+
+def test_correlation_id_keeps_its_random_salt_for_in_memory_counting() -> None:
+    """The fix must not silently make the distinct-counting tag guessable."""
+    from mva.privacy.patterns import correlation_id
+
+    value = f"HP:{HPO_DIGITS}".encode()
+    assert correlation_id(value) == correlation_id(value), "not stable within a process"
+    assert correlation_id(value) != correlation_id(f"HP:{HPO_DIGITS_2}".encode())
+
+    proc = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-c",
+            f"from mva.privacy.patterns import correlation_id;print(correlation_id({value!r}))",
+        ],
+        capture_output=True,
+        check=False,
+        cwd=find_repo_root(),
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    assert proc.stdout.decode().strip() != correlation_id(value), (
+        "correlation_id is now stable across processes, which means its salt is "
+        "no longer per-process. It is keyed that way because a truncated digest "
+        "of an HPO term or an MRN is a lookup table away from plaintext."
+    )
+
+
+# ---------------------------------------------------------------------------
+# 22. `hpo_term` in committed public-reference locations (M9).
+#
+#     `content_scan` FAILed on `knowledge/disease/mva_panel_sources.md` (a
+#     gene->phenotype panel table) and `tools/build_knowledge/build.py` (the HPO
+#     frequency subontology, HP:0040280-HP:0040284 -- ontology metadata). Neither
+#     is a person. The rule was behaving as designed: a cluster of distinct HPO
+#     terms is identifying BECAUSE IT IS TIED TO A SUBJECT, and a table keyed by
+#     gene, disease or ontology term has no subject to identify.
+#
+#     The downgrade is therefore two-sided: an allowed path AND bytes that do not
+#     have per-subject phenotype-profile shape. The threshold is untouched -- the
+#     one place the check genuinely matters is the workspace, and lowering
+#     sensitivity there to fix a repo-path problem would be the wrong trade.
+# ---------------------------------------------------------------------------
+
+
+def _profile_bytes(terms: tuple[str, ...]) -> bytes:
+    """A phenotype profile in the format `mva.phenotype.loader` reads."""
+    rows = "\n".join(
+        f"{hpo(t)}\tSome finding\tobserved\tcongenital\textracted\t0.9\t-" for t in terms
+    )
+    return (
+        f"hpo_id\tlabel\tstatus\tonset\tprovenance\textraction_confidence\tnotes\n{rows}\n".encode()
+    )
+
+
+def test_a_gene_keyed_reference_table_is_not_a_phenotype_profile() -> None:
+    """The committed public-reference files that triggered M9."""
+    from mva.privacy.audit import has_phenotype_profile_shape
+
+    repo = find_repo_root()
+    for relative in (
+        "knowledge/disease/mva_panel_sources.md",
+        "tools/build_knowledge/build.py",
+        "knowledge/public/gene_phenotype.tsv",
+        "src/mva/phenotype/hpo.py",
+    ):
+        path = repo / relative
+        if not path.is_file():  # concurrent work may rename these; the rule is the point
+            continue
+        assert not has_phenotype_profile_shape(path.read_bytes()), (
+            f"{relative} was classified as a per-subject phenotype profile. It is "
+            "keyed by gene, disease or ontology term, and has no subject to "
+            "identify. Naming the format is not being the format."
+        )
+
+
+def test_a_phenotype_profile_is_recognised_by_shape_not_by_path() -> None:
+    """The predicate must fire on the bytes wherever they are (ADR 0012)."""
+    from mva.privacy.audit import has_phenotype_profile_shape
+
+    profile = _profile_bytes((HPO_DIGITS, HPO_DIGITS_2, HPO_DIGITS_3))
+    assert has_phenotype_profile_shape(profile)
+    # Headerless, but still per-term clinical status on delimited rows.
+    assert has_phenotype_profile_shape(profile.split(b"\n", 1)[1])
+    # Same terms with no observation status: a reference listing, not a profile.
+    stripped = profile.replace(b"\tobserved\t", b"\tMONDO:0009759\t")
+    assert not has_phenotype_profile_shape(stripped.split(b"\n", 1)[1])
+
+
+def test_a_phenotype_profile_under_a_reference_prefix_still_fails(tmp_path: Path) -> None:
+    """The path downgrade must not become a way to smuggle a profile in.
+
+    This is the regression that matters: `knowledge/` and `tools/` were added to
+    `HPO_CODE_PREFIXES`, and a path allowlist alone would have made those two
+    directories a blind spot for exactly the file the rule exists to catch.
+    """
+    from mva.privacy.audit import HPO_DISTINCT_FAIL_THRESHOLD
+
+    terms = (HPO_DIGITS, HPO_DIGITS_2, HPO_DIGITS_3)
+    assert len(terms) >= HPO_DISTINCT_FAIL_THRESHOLD, "fixture is below the fail threshold"
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    smuggled = repo / "knowledge" / "disease" / "proband_terms.tsv"
+    smuggled.parent.mkdir(parents=True)
+    smuggled.write_bytes(_profile_bytes(terms))
+    # Forced: `.gitignore` denies `.tsv` by default, and `content_scan` scans what
+    # git would let you commit. Staging it is the committing mistake being modelled.
+    git(repo, "add", "-f", str(smuggled.relative_to(repo)), check=True)
+
+    report = run_audit(repo)
+    assert "content_scan" in report.failed_checks, (
+        "a per-subject phenotype profile committed under knowledge/ passed the "
+        "audit. The hpo_term path downgrade is conditioned on the BYTES not "
+        "having profile shape precisely so that this cannot happen."
+    )
+    assert any(f.rule_id == "hpo_term" and f.severity == "fail" for f in report.findings)
+
+
+def test_the_reference_prefixes_downgrade_only_hpo_term(tmp_path: Path) -> None:
+    """Adding knowledge/ and tools/ must not soften any other rule there."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    leaky = repo / "tools" / "build_knowledge" / "notes.txt"
+    leaky.parent.mkdir(parents=True)
+    leaky.write_text(vcf_document(), encoding="utf-8")
+
+    report = run_audit(repo)
+    assert "content_scan" in report.failed_checks
+    failed_rules = {f.rule_id for f in report.findings if f.severity == "fail"}
+    assert {"vcf_header", "vcf_chrom_line"} & failed_rules, (
+        "VCF-shaped content under tools/ was downgraded. The reference-path "
+        "downgrade is scoped to hpo_term alone; every other rule keeps full "
+        "strength there."
+    )
+
+
+def test_the_hpo_fail_threshold_was_not_raised() -> None:
+    """The rejected alternative, locked so it cannot be taken quietly.
+
+    Raising the threshold would have fixed the repo paths by reducing sensitivity
+    everywhere -- including inside `$MVA_WORKSPACE`, which is the one place a
+    cluster of HPO terms really is a patient.
+    """
+    from mva.privacy.patterns import HPO_DISTINCT_FAIL_THRESHOLD
+
+    assert HPO_DISTINCT_FAIL_THRESHOLD == 3, (
+        "HPO_DISTINCT_FAIL_THRESHOLD changed. Do not relax it to quiet a "
+        "false positive on a public reference table: scope the exemption to the "
+        "path AND the byte-shape instead (see has_phenotype_profile_shape)."
+    )
+
+
+# --------------------------------------------------------------------------
+# ADR 0012 — public reference fixtures are a distinct category from synthetic.
+# The exemption rests on a property of the BYTES (no sample columns), not on
+# provenance stated in a comment, so these tests attack the predicate directly.
+# --------------------------------------------------------------------------
+
+_SITES_ONLY_VCF = (
+    b"##fileformat=VCFv4.2\n"
+    b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+    b"15\t40200000\t.\tC\tT\t.\tPASS\tAF=0.001\n"
+)
+
+_GENOTYPED_VCF = (
+    b"##fileformat=VCFv4.2\n"
+    b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tPROBAND01\n"
+    b"15\t40200000\t.\tC\tT\t.\tPASS\tAF=0.001\tGT:AD:DP\t0/1:12,14:26\n"
+)
+
+
+@pytest.mark.unit
+def test_a_sites_only_vcf_declares_no_sample_columns(tmp_path: Path) -> None:
+    path = tmp_path / "sites.vcf"
+    path.write_bytes(_SITES_ONLY_VCF)
+    assert audit.vcf_declares_sample_columns(path) is False
+
+
+@pytest.mark.unit
+def test_a_genotyped_vcf_declares_sample_columns(tmp_path: Path) -> None:
+    """The exemption must be lost the moment a genotype column appears."""
+    path = tmp_path / "genotyped.vcf"
+    path.write_bytes(_GENOTYPED_VCF)
+    assert audit.vcf_declares_sample_columns(path) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["junk.vcf.gz", "absent.vcf"])
+def test_an_unreadable_file_never_earns_the_reference_exemption(tmp_path: Path, name: str) -> None:
+    """Fails closed: unreadable or malformed is treated as declaring samples."""
+    path = tmp_path / name
+    if name.endswith(".gz"):
+        path.write_bytes(b"this is not gzip")
+    assert audit.vcf_declares_sample_columns(path) is True
+
+
+@pytest.mark.unit
+def test_the_reference_exemption_downgrades_only_with_the_flag() -> None:
+    """A genotype-shaped hit is a fail unless the file is a verified sites-only slice."""
+    without = audit.scan_bytes(
+        _GENOTYPED_VCF,
+        check="t",
+        path_label="tests/fixtures/clinvar/x.vcf",
+        sites_only_reference=False,
+    )
+    with_flag = audit.scan_bytes(
+        _GENOTYPED_VCF,
+        check="t",
+        path_label="tests/fixtures/clinvar/x.vcf",
+        sites_only_reference=True,
+    )
+    assert "fail" in {f.severity for f in without}
+    assert "fail" not in {f.severity for f in with_flag}
+
+
+@pytest.mark.unit
+def test_the_synthetic_fixture_cannot_borrow_the_reference_exemption() -> None:
+    """The two categories must not share a code path (ADR 0012).
+
+    The synthetic case VCF genuinely carries sample columns, so it is excluded
+    from the reference-fixture exemption by the predicate itself — it qualifies
+    under the synthetic marker instead, which asserts something different.
+    """
+    synthetic = Path("tests/fixtures/synthetic/synthetic_case.vcf")
+    if not synthetic.is_file():
+        pytest.skip("synthetic fixture not present")
+    assert audit.vcf_declares_sample_columns(synthetic) is True

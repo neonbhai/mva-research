@@ -516,6 +516,26 @@ def _link_context(link: MechanismLink, checker: AssertionChecker) -> dict[str, o
 
 
 def _pair_context(pair: CandidatePair | None) -> dict[str, object] | None:
+    """The anchoring pair, named by handle rather than by coordinate.
+
+    This used to pass ``variant_ids`` straight through, and the template rendered
+    them: ``- Variants: GRCh38:chr15:40200000:C:T, GRCh38:chr15:40210500:G:A`` in
+    ``reports/track2_report.md`` — an artifact classified PUBLIC and sitting on the
+    export allowlist. For a real proband those two strings are the genotype
+    observation, and the file they were in is the one intended to be shared.
+
+    The anchor is kept, because a drug hypothesis that is not tied to a ranked pair
+    is not grounded in anything. What is dropped is the part of the anchor that
+    identifies the patient rather than the reasoning: ``pair_id`` is the join key
+    into ``candidates/ranked_pairs.json``, which is SENSITIVE and stays inside the
+    workspace, and ``gene_symbol`` is public knowledge. A reader who is entitled to
+    the coordinates looks them up there; a reader who has only this report gets the
+    argument without the patient.
+
+    ``variant_count`` replaces the list because the count is what the argument
+    actually uses — two variants is a compound heterozygote, one is not — and a
+    count of a set is not a member of it.
+    """
     if pair is None:
         return None
     return {
@@ -524,7 +544,7 @@ def _pair_context(pair: CandidatePair | None) -> dict[str, object] | None:
         "inheritance_model": pair.inheritance_model.value,
         "phase_status": pair.phase.status.value,
         "composite_score": f"{pair.composite_score:.3f}",
-        "variant_ids": list(pair.variant_ids),
+        "variant_count": len(pair.variant_ids),
         "flags": sorted(pair.flags),
     }
 

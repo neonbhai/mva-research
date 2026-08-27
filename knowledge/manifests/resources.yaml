@@ -1,0 +1,709 @@
+# Versioned index of the public reference resources this project's ACQUISITION TOOL
+# has fetched (or attempted to fetch) into the external resource root.
+#
+# GENERATED FILE - do not hand-edit. Regenerate with:
+#
+#   uv run python -m tools.acquire write-manifest
+#
+# `path` on each entry is relative to the resource root: $MVA_RESOURCES if set,
+# otherwise ~/Contri/bio-hackathon/mva-resources (tools.acquire.fetch
+# .resolve_resource_root). This file intentionally does NOT store that root as an
+# absolute path -- it differs per machine, and the manifest must stay correct on
+# everyone's.
+#
+# `sha256`, `size_bytes` and `retrieved` are null for any resource whose status is
+# `not_fetched`: not yet started, still downloading, or present but failed a content
+# sanity check (see `notes` on that entry). NEVER hand-fill these for a resource that
+# is not actually, verifiably complete -- see tools/acquire/survey.py and
+# knowledge/adapters/README.md, "Why no adapter here may touch the network (PRIV-05)".
+#
+# Every resource here is real public reference data: `synthetic: false` throughout.
+# The synthetic demo tables live in knowledge/manifests/knowledge.yaml, not this file.
+generated_by: tools.acquire.manifest.render_resources_yaml
+manifest_version: 1
+paths_relative_to: resource_root
+resources:
+  clingen_gene_validity:
+    description: ClinGen Gene-Disease Validity curations, all genes and classifications.
+    license: CC0 1.0 Universal (public domain dedication) -- ClinGen Gene-Disease Validity curations; see https://search.clinicalgenome.org/kb/gene-validity.
+    notes: ''
+    path: genepanels/clingen_gene_validity.csv
+    retrieved: '2026-08-27'
+    sha256: f8d78e1cefca5f41fd792335093d551ffcb960ce3a3559e6dfe6e7a3feafc709
+    size_bytes: 1119208
+    status: fetched
+    synthetic: false
+    url: https://search.clinicalgenome.org/kb/gene-validity/download
+    version: '2026-08-27'
+  clinvar_vcf:
+    description: ClinVar clinical variant assertions, GRCh38 weekly VCF release.
+    license: 'Public domain (NCBI / U.S. Government work); no usage restriction. Citation requested: Landrum MJ et al., ''ClinVar: improving access to variant interpretations and supporting evidence'', Nucleic Acids Res. 2018.'
+    notes: ''
+    path: clinvar/clinvar.vcf.gz
+    retrieved: '2026-08-27'
+    sha256: d66b75c1cc433dd63471444fbf980fbc6ee07d6060f3b62b8f1910d52650933d
+    size_bytes: 193420805
+    status: fetched
+    synthetic: false
+    url: https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz
+    version: '2026-08-22'
+  clinvar_vcf_tbi:
+    description: Tabix index for the ClinVar GRCh38 weekly VCF.
+    license: 'Public domain (NCBI / U.S. Government work); no usage restriction. Citation requested: Landrum MJ et al., ''ClinVar: improving access to variant interpretations and supporting evidence'', Nucleic Acids Res. 2018.'
+    notes: ''
+    path: clinvar/clinvar.vcf.gz.tbi
+    retrieved: '2026-08-27'
+    sha256: 4bc81ef519b77ea8c89b6345bb74537a408ad3466dc19f29a4025d61e771cbbb
+    size_bytes: 610582
+    status: fetched
+    synthetic: false
+    url: https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz.tbi
+    version: '2026-08-22'
+  ddg2p_dd_panel:
+    description: Gene2Phenotype Developmental Disorders (DD) gene panel, CSV export -- the successor to the DDG2P dataset (gene-disease associations with allelic requirement, mutation consequence and confidence).
+    license: 'EMBL-EBI terms of use (https://www.ebi.ac.uk/about/terms-of-use): EMBL-EBI imposes no additional restriction beyond the data owner''s own terms, and expects attribution in line with good scientific practice. Cite: Thormann A et al., ''Flexible and scalable diagnostic filtering of genomic variants using G2P with Ensembl VEP'', Nat Commun 2019, and the DD (Developmental Disorders) panel curators at https://www.ebi.ac.uk/gene2phenotype.'
+    notes: ''
+    path: genepanels/DDG2P.csv
+    retrieved: '2026-08-27'
+    sha256: 8030a189f399c13239e9c5d3a6f2010323d6aa56bc14f5d880f6b03b5bf9d4d9
+    size_bytes: 1919272
+    status: fetched
+    synthetic: false
+    url: https://www.ebi.ac.uk/gene2phenotype/api/panel/DD/download/
+    version: DD-panel-2026-08-27
+  gnomad_constraint_metrics:
+    description: gnomAD v4.1 per-transcript constraint metrics (pLI, LOEUF, missense o/e).
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: ''
+    path: gnomad/gnomad.v4.1.constraint_metrics.tsv
+    retrieved: '2026-08-27'
+    sha256: 68d8abdb7fc48f570869b02dfaa74b9fecaece7fcc5f301ddca40ec1ce12da00
+    size_bytes: 95546041
+    status: fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/constraint/gnomad.v4.1.constraint_metrics.tsv
+    version: '4.1'
+  gnomad_exomes_chr1:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 1.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr1.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr1.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr10:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 10.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr10.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr10.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr10_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 10.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr10.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr10.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr11:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 11.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr11.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr11.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr11_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 11.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr11.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr11.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr12:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 12.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr12.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr12.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr12_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 12.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr12.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr12.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr13:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 13.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr13.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr13.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr13_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 13.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr13.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr13.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr14:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 14.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr14.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr14.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr14_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 14.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr14.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr14.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr15:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 15.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr15.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr15.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr15_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 15.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr15.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr15.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr16:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 16.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr16.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr16.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr16_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 16.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr16.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr16.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr17:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 17.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'download in progress: size grew during a 2s observation window (observed 3468029952 bytes); refusing to hash a moving target'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr17.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr17.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr17_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 17.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr17.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr17.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr18:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 18.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'download in progress: size grew during a 2s observation window (observed 3146018816 bytes); refusing to hash a moving target'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr18.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr18.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr18_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 18.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr18.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr18.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr19:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 19.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'download in progress: size grew during a 2s observation window (observed 3789533184 bytes); refusing to hash a moving target'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr19.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr19.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr19_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 19.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr19.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr19.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr1_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 1.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr1.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr1.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr2:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 2.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr2.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr2.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr20:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 20.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'download in progress: size grew during a 2s observation window (observed 3673567232 bytes); refusing to hash a moving target'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr20.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr20.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr20_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 20.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr20.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr20.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr21:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 21.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: ''
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz
+    retrieved: '2026-08-27'
+    sha256: 59128b32d3fafce1e127e0d8af20f1dc4602d3baf3376ee5b34b20a200bbf5f8
+    size_bytes: 2250319809
+    status: fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr21_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 21.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: ''
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz.tbi
+    retrieved: '2026-08-27'
+    sha256: 68419eea06e00001d4888bc49f1eb92f5ea0339911182e03f68a12f135ea3650
+    size_bytes: 14118
+    status: fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr22:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 22.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'download in progress: size grew during a 2s observation window (observed 3226087424 bytes); refusing to hash a moving target'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr22.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr22.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr22_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 22.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr22.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr22.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr2_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 2.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr2.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr2.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr3:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 3.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr3.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr3.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr3_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 3.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr3.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr3.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr4:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 4.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr4.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr4.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr4_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 4.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr4.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr4.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr5:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 5.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr5.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr5.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr5_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 5.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr5.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr5.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr6:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 6.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr6.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr6.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr6_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 6.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr6.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr6.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr7:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 7.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr7.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr7.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr7_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 7.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr7.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr7.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr8:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 8.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr8.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr8.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr8_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 8.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr8.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr8.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chr9:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome 9.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr9.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr9.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chr9_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome 9.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chr9.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr9.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chrX:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome X.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chrX.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chrX.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chrX_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome X.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chrX.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chrX.vcf.bgz.tbi
+    version: '4.1'
+  gnomad_exomes_chrY:
+    description: gnomAD v4.1 exome sites-only VCF (no genotypes), chromosome Y.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chrY.vcf.bgz
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chrY.vcf.bgz
+    version: '4.1'
+  gnomad_exomes_chrY_tbi:
+    description: Tabix index for the gnomAD v4.1 exome sites-only VCF, chromosome Y.
+    license: CC0 1.0 Universal (public domain dedication). No usage restriction, but the gnomAD consortium requests citation of the relevant flagship paper (Chen S et al., 'A genomic mutational constraint map using variation in 76,156 human genomes', Nature 2024, for v4; Karczewski KJ et al., Nature 2020, for the original gnomAD paper) -- see https://gnomad.broadinstitute.org/about.
+    notes: 'not yet fetched: no local file at the declared path'
+    path: gnomad/v4.1_exomes/gnomad.exomes.v4.1.sites.chrY.vcf.bgz.tbi
+    retrieved: null
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+    url: https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chrY.vcf.bgz.tbi
+    version: '4.1'
+  hpo_disease_annotations:
+    description: HPO disease-to-phenotype annotation table (phenotype.hpoa).
+    license: CC BY 4.0 (Human Phenotype Ontology Consortium). Attribution required; see https://hpo.jax.org/app/license.
+    notes: ''
+    path: hpo/phenotype.hpoa
+    retrieved: '2026-08-27'
+    sha256: 89004f85b253f980ffe84218d2c080665cbf67a57bbb322111d6a2db5eb31dff
+    size_bytes: 35672303
+    status: fetched
+    synthetic: false
+    url: https://github.com/obophenotype/human-phenotype-ontology/releases/latest/download/phenotype.hpoa
+    version: '2026-06-23'
+  hpo_genes_to_phenotype:
+    description: HPO gene-to-phenotype association table.
+    license: CC BY 4.0 (Human Phenotype Ontology Consortium). Attribution required; see https://hpo.jax.org/app/license.
+    notes: ''
+    path: hpo/genes_to_phenotype.txt
+    retrieved: '2026-08-27'
+    sha256: 26cb7ee00c73b5777f6e5ad43323c941e1fcef1d191592f332d7929f3ea1ab3f
+    size_bytes: 20732778
+    status: fetched
+    synthetic: false
+    url: https://github.com/obophenotype/human-phenotype-ontology/releases/latest/download/genes_to_phenotype.txt
+    version: '2026-06-23'
+  hpo_ontology:
+    description: Human Phenotype Ontology, OBO format.
+    license: CC BY 4.0 (Human Phenotype Ontology Consortium). Attribution required; see https://hpo.jax.org/app/license.
+    notes: ''
+    path: hpo/hp.obo
+    retrieved: '2026-08-27'
+    sha256: a5092cbdf605f568403cf7380d9173014015692433b2cc631bc5c1b053876b1b
+    size_bytes: 11222341
+    status: fetched
+    synthetic: false
+    url: https://github.com/obophenotype/human-phenotype-ontology/releases/latest/download/hp.obo
+    version: '2026-06-23'
+  hpo_phenotype_to_genes:
+    description: HPO phenotype-to-gene association table.
+    license: CC BY 4.0 (Human Phenotype Ontology Consortium). Attribution required; see https://hpo.jax.org/app/license.
+    notes: ''
+    path: hpo/phenotype_to_genes.txt
+    retrieved: '2026-08-27'
+    sha256: 1386a4dd3ea046f5a5971f4011a3711a9d7928d60961e2e7b757b6860c63c778
+    size_bytes: 66907216
+    status: fetched
+    synthetic: false
+    url: https://github.com/obophenotype/human-phenotype-ontology/releases/latest/download/phenotype_to_genes.txt
+    version: '2026-06-23'

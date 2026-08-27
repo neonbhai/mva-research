@@ -43,6 +43,25 @@ the control that never has a bug — the Wi-Fi switch. ``NetworkProfile.OFFLINE_
 in :mod:`mva.config` means "this hook is armed **and** an OS control is asserted";
 ``OFFLINE_BEST_EFFORT`` means only this hook, and the run manifest records which.
 
+Who arms it
+-----------
+For a long time: nobody. ``OfflineProfile`` was exercised only by its own unit
+tests, ``_armed`` was never set anywhere in ``src/``, and the CLI printed
+``(network: offline_enforced)`` over a disarmed hook while a DNS lookup succeeded.
+Both halves of the profile's meaning were false, not just the OS half.
+
+Arming now happens in two places, deliberately:
+
+* :func:`arm_for_process`, called by ``mva.cli._install_privacy_guards`` for the
+  whole CLI process; and
+* an :class:`OfflineProfile` scope inside ``mva.orchestrator.execute_pipeline``,
+  which covers every OTHER caller of the pipeline — Snakemake, tests, notebooks.
+
+They nest, which this class is built for. What remains unverified is the OS
+control that distinguishes ``OFFLINE_ENFORCED`` from ``OFFLINE_BEST_EFFORT``:
+nothing in this process can confirm it, so the CLI prints that it is the
+operator's assertion rather than an observation (TD-06).
+
 The CRAM reference trap
 -----------------------
 htslib, when it opens a CRAM whose reference sequences are not local, fetches them
@@ -147,6 +166,31 @@ def arm_audit_hook() -> None:
     _hook_installed_flag = True
 
 
+def arm_for_process(workspace_root: Path | None = None) -> None:
+    """Arm the offline profile for the remainder of this interpreter's life.
+
+    :class:`OfflineProfile` is the right shape for a nested scope or a test, which
+    has an "after". A CLI process that is about to touch patient data does not: it
+    arms once at startup and exits. Using the context manager there would mean
+    either wrapping every command body in a ``with`` (and the first one someone
+    forgets is the one that leaks) or entering a context that is never exited,
+    which is a lie about what the object is doing.
+
+    This is the same bargain :func:`configure_reference_cache` already makes for
+    the htslib environment, and it is deliberately one-way: there is no
+    ``disarm_for_process``. A function that turns the guard off is a function
+    someone will call from the stage that needed the network.
+
+    ``workspace_root`` also applies the CRAM reference-cache environment, since a
+    caller arming the hook is by definition on the patient-data path.
+    """
+    global _armed  # noqa: PLW0603 - the module flag IS the arming mechanism
+    arm_audit_hook()
+    if workspace_root is not None:
+        configure_reference_cache(workspace_root)
+    _armed = True
+
+
 def is_armed() -> bool:
     """Whether outbound network is currently being denied at the Python level."""
     return _armed
@@ -211,10 +255,17 @@ class OfflineProfile:
     ``strict=True`` additionally blocks process spawning and ``ctypes.dlopen``.
     Use it only around pure-Python analysis; it will break any stage that invokes
     an external binary.
+
+    ``workspace_root`` names where htslib may cache reference sequences. Pass it
+    whenever the caller already knows the workspace — the fallback resolves
+    ``$MVA_WORKSPACE``, which is an environment read in the middle of the guarded
+    path and is exactly the kind of ambient dependency the composition root exists
+    to remove.
     """
 
-    def __init__(self, *, strict: bool = False) -> None:
+    def __init__(self, *, strict: bool = False, workspace_root: Path | None = None) -> None:
         self._strict = strict
+        self._workspace_root = workspace_root
         self._previous_armed = False
         self._previous_strict = False
         self._previous_env: dict[str, str | None] = {}
@@ -229,7 +280,8 @@ class OfflineProfile:
         self._previous_armed = _armed
         self._previous_strict = _strict_mode
 
-        for key, value in reference_cache_env(_ref_cache_root()).items():
+        root = self._workspace_root if self._workspace_root is not None else _ref_cache_root()
+        for key, value in reference_cache_env(root).items():
             self._set_env(key, value)
 
         _armed = True

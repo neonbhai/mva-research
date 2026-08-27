@@ -107,7 +107,7 @@ indent-style = "space"
 # Pyright (strict)
 # ---------------------------------------------------------------------------
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "tools"]
 exclude = ["**/__pycache__", ".venv", "workflow/containers"]
 pythonVersion = "3.12"
 pythonPlatform = "Darwin"

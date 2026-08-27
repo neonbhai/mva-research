@@ -39,6 +39,7 @@ which is almost never "someone published a VCF on purpose":
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
@@ -119,6 +120,19 @@ CONTENT_ALLOWLIST_PREFIXES: Final[tuple[str, ...]] = (
 #: are precisely what a real file trips.
 PATH_DOWNGRADABLE_RULES: Final[frozenset[str]] = frozenset({"vcf_data_line", "hpo_term"})
 
+#: Softened for a PUBLIC REFERENCE SLICE that structurally carries no sample
+#: columns (ADR 0012). A sites-only VCF necessarily looks like a VCF — that is
+#: what it is — and it has no individual in it to disclose. ``genotype_field`` is
+#: included for a specific reason: when the ``#CHROM`` line declares no sample
+#: columns, a genotype-shaped match CANNOT be a genotype, so it is a pattern
+#: coincidence in INFO text rather than a finding.
+#:
+#: The ``magic:*`` container rules are deliberately absent, keeping full strength
+#: everywhere, per the reasoning in :func:`_resolve_context`.
+SITES_ONLY_DOWNGRADABLE_RULES: Final[frozenset[str]] = frozenset(
+    {"vcf_header", "vcf_chrom_line", "vcf_data_line", "genotype_field"}
+)
+
 #: Rules an allowlisted path may soften ONLY when the file also carries a verified
 #: synthetic declaration (see :func:`declares_synthetic`). This is what keeps
 #: ``tests/fixtures/synthetic/synthetic_case.vcf`` — a deliberately VCF-shaped
@@ -156,7 +170,164 @@ SYNTHETIC_MARKER_BYTES: Final[int] = 4096
 #: in a ``.py`` file. Without this, a docstring showing the canonical ``HP:``
 #: format and a test fixture listing three phenotypes both fail forever, and an
 #: audit that is permanently red is an audit that gets switched off.
-HPO_CODE_PREFIXES: Final[tuple[str, ...]] = ("src/", "tests/", "docs/", "prompts/")
+#: ``knowledge/``, ``tools/`` and ``docs/`` are added for the same reason and
+#: under the same rule as ``src/``: they hold gene→phenotype panel tables, the HPO
+#: frequency subontology (``HP:0040280`` to ``HP:0040284``, which is ontology
+#: *metadata*), and reviewed prose about both. What makes a cluster of distinct
+#: HPO terms identifying is that it is **tied to a subject**; a table keyed by gene,
+#: by disease or by ontology term has no subject to identify. That danger model is
+#: NOT weakened here — see :func:`has_phenotype_profile_shape`, which is the other
+#: half of the condition and is checked against the bytes.
+HPO_CODE_PREFIXES: Final[tuple[str, ...]] = (
+    "src/",
+    "tests/",
+    "docs/",
+    "prompts/",
+    "knowledge/",
+    "tools/",
+)
+
+#: Clinical observation statuses (`mva.models.phenotype.PhenotypeStatus`) as a
+#: whole DELIMITED FIELD. A term carrying one of these has been *asserted about
+#: somebody*, which a gene- or ontology-keyed reference table never does.
+#:
+#: Anchored to field boundaries, not to ``\b``: a bare word match hit every
+#: docstring containing "observed" and every prose line containing "excluded",
+#: which is most of the phenotype package.
+_PHENOTYPE_STATUS_FIELD: Final = re.compile(
+    rb"(?:^|[\t,])(?:observed|excluded|not_assessed)(?:[\t,]|$)"
+)
+
+#: The header row of a loadable phenotype profile
+#: (`mva.phenotype.loader.REQUIRED_COLUMNS` = ``hpo_id``, ``label``, ``status``).
+#: Anchored to the START of a line and followed by a delimiter, so the mere
+#: MENTION of ``hpo_id`` — in the loader, in a builder, in a test, in a docstring —
+#: is not a profile. That distinction is the whole check: code that reads the
+#: format names the column; only the data itself has it as a header.
+_PHENOTYPE_HEADER_ROW: Final = re.compile(rb"^[\"']?hpo_id[\"']?[\t,]")
+
+_HPO_TERM_BYTES: Final = re.compile(rb"HP:\d{7}")
+
+#: How many HPO terms must sit on status-bearing DATA ROWS before the file is
+#: treated as a profile. One is a code constant or a doc example; a cluster of
+#: status-annotated terms is a person.
+_PROFILE_SHAPE_MIN_TERMS: Final[int] = 3
+
+#: Minimum delimiters for a line to count as a data row rather than prose. A
+#: profile record is ``hpo_id``, ``label``, ``status`` at least.
+_PROFILE_ROW_MIN_DELIMITERS: Final[int] = 2
+
+
+def has_phenotype_profile_shape(data: bytes) -> bool:
+    """Whether these bytes look like a phenotype profile keyed to ONE individual.
+
+    This is the half of the ``hpo_term`` path downgrade that does the real work, and
+    it is deliberately a property of the bytes rather than of the path — the same
+    reasoning ADR 0012 applies to reference fixtures: provenance is a claim in a
+    comment, shape is checkable.
+
+    A phenotype profile is not "a file with HPO terms in it". It is a table of terms
+    each carrying a **clinical observation status** — ``observed`` / ``excluded`` /
+    ``not_assessed`` — which is an assertion about a person. A gene→phenotype panel
+    table, the HPO frequency subontology and a docstring showing the ``HP:`` format
+    all lack that, and none of them has a subject to identify.
+
+    Two independent signals, either sufficient:
+
+    * a header ROW declaring the loader's required columns; or
+    * at least :data:`_PROFILE_SHAPE_MIN_TERMS` HPO terms on delimited data rows
+      that also carry an observation status as a field.
+
+    Both are anchored to line and field structure rather than to substrings. The
+    unanchored version of this check flagged eleven files whose only offence was
+    naming the format — ``src/mva/phenotype/hpo.py``, the HPO fixture builders,
+    every phenotype test — which is the false-positive spiral that gets a scanner
+    switched off. Measured over the whole tree, the anchored version flags exactly
+    one file: ``tests/fixtures/synthetic/synthetic_phenotype.tsv``, which really is
+    a phenotype profile (a declared-synthetic one, downgraded by the allowlist).
+
+    Note what this does NOT rely on: a subject identifier in the file. The real
+    proband profile does not contain one — ``subject_id`` is passed to the loader as
+    an argument — so keying the check on a visible patient ID would have been a
+    check that fails open on the exact file it exists for.
+    """
+    lines = data.splitlines()
+    for line in lines:
+        if _PHENOTYPE_HEADER_ROW.match(line) and b"label" in line and b"status" in line:
+            return True
+
+    seen = 0
+    for line in lines:
+        delimiters = line.count(b"\t") + line.count(b",")
+        if delimiters < _PROFILE_ROW_MIN_DELIMITERS:
+            continue
+        if _HPO_TERM_BYTES.search(line) is None or _PHENOTYPE_STATUS_FIELD.search(line) is None:
+            continue
+        seen += len(_HPO_TERM_BYTES.findall(line))
+        if seen >= _PROFILE_SHAPE_MIN_TERMS:
+            return True
+    return False
+
+
+#: Slices of PUBLIC reference releases committed as adapter test fixtures.
+#: These hold real data — that is the point, since a fixture of invented records
+#: would not test the parser against what the source actually emits — but real
+#: *public reference* data, which has no individual to identify. See ADR 0012.
+#:
+#: Membership here is NOT by itself permission. :func:`vcf_declares_sample_columns`
+#: is ANDed with it everywhere it is used, so a file that grows sample columns
+#: loses the exemption automatically rather than by anyone remembering to check.
+PUBLIC_REFERENCE_FIXTURE_PREFIXES: Final[tuple[str, ...]] = (
+    "tests/fixtures/clinvar/",
+    "tests/fixtures/gnomad/",
+    "tests/fixtures/mane/",
+    "tests/fixtures/hpo/",
+    "tests/fixtures/consequence/",
+)
+
+#: A conforming VCF header line has 8 fixed columns before FORMAT/samples.
+_VCF_FIXED_FIELDS: Final[int] = 8
+
+#: Header lines scanned looking for ``#CHROM``. Bounded so a huge or malformed
+#: file cannot turn an audit check into a full-file read.
+_VCF_HEADER_SCAN_LINES: Final[int] = 20_000
+
+
+def vcf_declares_sample_columns(path: Path) -> bool:
+    """Whether a VCF's ``#CHROM`` line declares per-sample genotype columns.
+
+    This is ADR 0012's condition 3, and it is the whole guarantee. The privacy
+    risk being managed is not "real data is in the repo" — ClinVar and gnomAD are
+    public and already sit on every clinical genomics machine. It is **"a file
+    carrying per-sample genotypes got committed"**, because that is what
+    discloses an individual. A sites-only slice has no individual in it.
+
+    A conforming header has exactly 8 fixed fields; a 9th (``FORMAT``) and beyond
+    are sample columns. **Fails closed**: a file that cannot be read, or that has
+    no ``#CHROM`` line at all, is reported as declaring samples, so an unreadable
+    or malformed file never earns the exemption.
+    """
+    compressed = path.suffix in {".gz", ".bgz"}
+    try:
+        with gzip.open(path, "rb") if compressed else path.open("rb") as handle:
+            for _ in range(_VCF_HEADER_SCAN_LINES):
+                raw = handle.readline()
+                if not raw:
+                    break
+                if raw.startswith(b"#CHROM"):
+                    fields = raw.rstrip(b"\r\n").split(b"\t")
+                    return len(fields) > _VCF_FIXED_FIELDS
+    except (OSError, EOFError, gzip.BadGzipFile):
+        return True
+    return True
+
+
+def _is_sample_free_reference_fixture(repo_root: Path, path: str) -> bool:
+    """ADR 0012: a public reference slice, verified to carry no sample columns."""
+    return _exempt(path, PUBLIC_REFERENCE_FIXTURE_PREFIXES) and not vcf_declares_sample_columns(
+        repo_root / path
+    )
+
 
 #: The only places a ``!`` negation may re-admit a FILE.
 NEGATION_ALLOWED_PREFIXES: Final[tuple[str, ...]] = (
@@ -165,6 +336,7 @@ NEGATION_ALLOWED_PREFIXES: Final[tuple[str, ...]] = (
     "config/",
     "templates/",
     "tests/golden/",
+    *PUBLIC_REFERENCE_FIXTURE_PREFIXES,
 )
 
 #: Directories never walked: build caches and the object store itself.
@@ -234,8 +406,8 @@ _PATH_IDENTIFIER_RUN: Final = re.compile(r"(?<!\d)\d{7,}(?!\d)")
 _SAFE_SUFFIX: Final = re.compile(r"\.[A-Za-z0-9]{1,8}\Z")
 
 
-def redact_path(path: str) -> str:
-    """Redact a path before it is written into a report.
+class PathRedactor:
+    """Redacts paths for one rendered report, labelling by first appearance.
 
     GP-41 says the audit emits "paths and counts, never matched content". That is
     sound right up to the point where the path IS the content. Sequencing
@@ -248,25 +420,74 @@ def redact_path(path: str) -> str:
     A component is rewritten when it carries anything rule-detectable or an
     identifier-length digit run. The whole component goes, not just the matched
     span, because the surviving remainder of ``NHS9999999999_Faketon`` is the half
-    that names a person. What is kept is the directory chain (structure), the
-    extension chain (shape) and a per-run correlation ID, which is enough to tell
-    two findings apart and to point at "the one file in this directory", and not
-    enough to reconstruct anything.
+    that names a person. What is kept is the directory chain (structure) and the
+    extension chain (shape).
+
+    **Why a counter and not a hash.** The label used to be
+    :func:`~mva.privacy.patterns.correlation_id` — an HMAC under a
+    ``secrets.token_bytes(16)`` module salt regenerated at every interpreter start.
+    That made ``privacy/privacy_audit.md`` a random function of a secret, and that
+    file is a registered artifact inside the GP-30 byte-identity claim and is not
+    in ``verify_determinism``'s skip set. Two processes rendering the same
+    ``AuditReport`` produced different bytes. It stayed green only because a clean
+    tree has no redacted paths to label, and ``just demo-determinism`` runs both
+    passes in one interpreter, where the salt is constant — so the check could
+    never observe it.
+
+    A counter fixes determinism without weakening anything, because it is
+    *strictly less* invertible than the HMAC was: ``001`` is a function of position
+    in the report, not of the path at all. There is no key to leak and no
+    keyspace to search. It keeps the one property the tag existed for — two
+    findings about the same file share a label, two different files do not — and
+    that property is what a reader needs to act ("the same file trips three
+    rules").
+
+    The random salt stays in :func:`~mva.privacy.patterns.correlation_id` for
+    in-memory distinct-counting (``scan_bytes`` counting distinct HPO terms), which
+    is the use it was designed for and where nothing is ever rendered.
+
+    One instance per rendered report: labels are meaningful only within the
+    document that assigned them, and saying so in the type is cheaper than saying
+    so in a comment.
     """
-    if path in _LITERAL_PATH_LABELS or not path:
-        return path
-    return "/".join(_redact_component(part) for part in path.split("/"))
+
+    __slots__ = ("_labels",)
+
+    def __init__(self) -> None:
+        self._labels: dict[str, str] = {}
+
+    def redact(self, path: str) -> str:
+        """Rewrite every disclosive component of ``path``."""
+        if path in _LITERAL_PATH_LABELS or not path:
+            return path
+        return "/".join(self._redact_component(part) for part in path.split("/"))
+
+    def _redact_component(self, component: str) -> str:
+        if not component or component in {".", ".."}:
+            return component
+        cleaned = _PATH_IDENTIFIER_RUN.sub("0", redact_text(component))
+        if cleaned == component:
+            return component
+        label = self._labels.get(component)
+        if label is None:
+            # Keyed by the raw component so the SAME file gets the SAME label
+            # throughout one report. The dict is report-local and dies with it;
+            # it is never rendered, only its values are.
+            label = f"{len(self._labels) + 1:03d}"
+            self._labels[component] = label
+        return f"<REDACTED:path:{label}>{''.join(_safe_suffixes(component))}"
 
 
-def _redact_component(component: str) -> str:
-    if not component or component in {".", ".."}:
-        return component
-    cleaned = _PATH_IDENTIFIER_RUN.sub("0", redact_text(component))
-    if cleaned == component:
-        return component
-    suffixes = _safe_suffixes(component)
-    tag = correlation_id(component.encode("utf-8", errors="surrogateescape"))
-    return f"<REDACTED:path:{tag}>{''.join(suffixes)}"
+def redact_path(path: str) -> str:
+    """Redact a single path with a throwaway :class:`PathRedactor`.
+
+    For callers that need one path and no cross-path distinctness: the
+    ``did this path change?`` test in :func:`_path_findings`, and the ``privacy
+    classify`` style of one-shot use. A report renders through ONE
+    :class:`PathRedactor` instead, or every redacted component in it would be
+    labelled ``001``.
+    """
+    return PathRedactor().redact(path)
 
 
 def _safe_suffixes(component: str) -> list[str]:
@@ -313,7 +534,14 @@ class AuditReport:
         return tuple(f for result in self.results for f in result.findings)
 
     def to_markdown(self) -> str:
-        """Render for a human or an agent. Contains no matched content by construction."""
+        """Render for a human or an agent. Contains no matched content by construction.
+
+        Byte-identical across processes for the same report: the only non-obvious
+        ingredient is the redacted-path label, and that is a first-appearance
+        counter over the findings in their existing deterministic order (GP-30).
+        See :class:`PathRedactor`.
+        """
+        redactor = PathRedactor()
         status = "PASS" if self.passed else "FAIL"
         lines: list[str] = [
             "# Privacy audit",
@@ -337,7 +565,7 @@ class AuditReport:
                 continue
             lines += ["", f"## {result.name}", ""]
             for finding in result.findings:
-                location = redact_path(finding.path)
+                location = redactor.redact(finding.path)
                 if finding.line is not None:
                     location = f"{location}:{finding.line}"
                 bits = [f"- `{finding.severity}` `{location}`"]
@@ -360,6 +588,9 @@ class AuditReport:
         return "\n".join(lines) + "\n"
 
     def to_dict(self) -> dict[str, object]:
+        """As :meth:`to_markdown`, and equally process-stable. One redactor for the
+        whole document, so labels are consistent within it."""
+        redactor = PathRedactor()
         return {
             "passed": self.passed,
             "failed_checks": list(self.failed_checks),
@@ -372,7 +603,7 @@ class AuditReport:
                     "findings": [
                         {
                             "check": f.check,
-                            "path": redact_path(f.path),
+                            "path": redactor.redact(f.path),
                             "line": f.line,
                             "rule_id": f.rule_id,
                             "span_len": f.span_len,
@@ -537,6 +768,7 @@ def _resolve_context(
     allowlisted: bool,
     synthetic_declared: bool,
     hpo_is_constant: bool,
+    sites_only_reference: bool,
 ) -> tuple[Severity, str]:
     """Refine a rule's isolated severity using whole-file context.
 
@@ -568,9 +800,25 @@ def _resolve_context(
         severity = "fail" if over_threshold and not hpo_is_constant else "warn"
         note = f"{note} {distinct_hpo} distinct term(s) in this file."
         if over_threshold and hpo_is_constant:
-            note = f"{note} Held at warn: reviewed source/docs, where HPO IDs are constants."
+            note = (
+                f"{note} Held at warn: a reviewed source/reference path AND the bytes "
+                "do not have per-subject phenotype-profile shape."
+            )
 
-    if severity != "fail" or not allowlisted:
+    if severity != "fail":
+        return severity, note
+    # Checked BEFORE the allowlist gate, and deliberately: this condition does not
+    # rest on the path allowlist at all. _is_sample_free_reference_fixture already
+    # requires a public-reference prefix AND verifies against the file's own
+    # #CHROM line that it declares no sample columns. That is a stronger claim
+    # than allowlist membership, so it stands on its own (ADR 0012).
+    if sites_only_reference and rule_id in SITES_ONLY_DOWNGRADABLE_RULES:
+        return "warn", (
+            f"{note} Downgraded: a public reference slice whose #CHROM line declares "
+            "NO sample columns, verified against the bytes (ADR 0012). It holds real "
+            "public records but no individual."
+        )
+    if not allowlisted:
         return severity, note
     if rule_id in PATH_DOWNGRADABLE_RULES:
         return "warn", f"{note} Downgraded: path is on the audited public/synthetic allowlist."
@@ -592,6 +840,7 @@ def scan_bytes(
     path_label: str,
     allowlisted: bool = False,
     hpo_is_constant: bool = False,
+    sites_only_reference: bool = False,
     _gzip_depth: int = 0,
 ) -> list[Finding]:
     """Apply the rule battery to one buffer and return content-free findings.
@@ -607,11 +856,22 @@ def scan_bytes(
       in a non-allowlisted file. Distinctness is counted over
       :func:`~mva.privacy.patterns.correlation_id` values, so the terms themselves
       are never accumulated in a data structure that could later be printed.
+      ``hpo_is_constant`` — a claim about the path — is additionally verified here
+      against the buffer with :func:`has_phenotype_profile_shape`.
     """
     offsets = _line_offsets(data)
     spans_by_rule: dict[str, list[tuple[int, int]]] = {}
     distinct_hpo = 0
     synthetic_declared = allowlisted and declares_synthetic(data)
+    # `hpo_is_constant` arrives as a claim about the PATH. This is its verification
+    # against the BYTES, and both halves must hold: a reviewed-source prefix does
+    # not license a file that is shaped like one patient's phenotype profile. The
+    # two are ANDed here rather than at the call sites because only this function
+    # has the buffer -- the same reason `vcf_data_line` and `hpo_term` are resolved
+    # here at all. Deliberately NOT routed through `synthetic_declared`: per ADR
+    # 0012 the exemptions do not share a code path, so widening one cannot widen
+    # the other by accident.
+    hpo_constant = hpo_is_constant and not has_phenotype_profile_shape(data)
 
     for rule in RULES:
         spans: list[tuple[int, int]] = []
@@ -644,7 +904,8 @@ def scan_bytes(
             distinct_hpo=distinct_hpo,
             allowlisted=allowlisted,
             synthetic_declared=synthetic_declared,
-            hpo_is_constant=hpo_is_constant,
+            hpo_is_constant=hpo_constant,
+            sites_only_reference=sites_only_reference,
         )
         total = len(spans)
         for start, end in spans[:_MAX_FINDINGS_PER_RULE]:
@@ -689,6 +950,7 @@ def scan_bytes(
             path_label=path_label,
             allowlisted=allowlisted,
             hpo_is_constant=hpo_is_constant,
+            sites_only_reference=sites_only_reference,
             gzip_depth=_gzip_depth,
         )
     )
@@ -708,6 +970,7 @@ def _scan_gzip_member(
     path_label: str,
     allowlisted: bool,
     hpo_is_constant: bool,
+    sites_only_reference: bool,
     gzip_depth: int,
 ) -> list[Finding]:
     """Inflate a gzip member and run the whole battery over the plaintext.
@@ -746,13 +1009,20 @@ def _scan_gzip_member(
             path_label=path_label,
             allowlisted=allowlisted,
             hpo_is_constant=hpo_is_constant,
+            sites_only_reference=sites_only_reference,
             _gzip_depth=gzip_depth + 1,
         )
     ]
 
 
 def scan_file(
-    path: Path, *, check: str, path_label: str, allowlisted: bool, hpo_is_constant: bool = False
+    path: Path,
+    *,
+    check: str,
+    path_label: str,
+    allowlisted: bool,
+    hpo_is_constant: bool = False,
+    sites_only_reference: bool = False,
 ) -> list[Finding]:
     """Scan one file on disk, capped, in bytes, never decoding for detection."""
     try:
@@ -779,6 +1049,7 @@ def scan_file(
         path_label=path_label,
         allowlisted=allowlisted,
         hpo_is_constant=hpo_is_constant,
+        sites_only_reference=sites_only_reference,
     )
     if size > MAX_SCAN_BYTES:
         findings.append(
@@ -847,7 +1118,9 @@ def check_git_tracked_sensitive(repo_root: Path, *, strict: bool = False) -> Che
             ),
         )
         for path in sorted(paths)
-        if is_sensitive_extension(Path(path)) and not _exempt(path, TRACKED_EXEMPT_PREFIXES)
+        if is_sensitive_extension(Path(path))
+        and not _exempt(path, TRACKED_EXEMPT_PREFIXES)
+        and not _is_sample_free_reference_fixture(repo_root, path)
     ]
     return _result(
         name,
@@ -885,7 +1158,11 @@ def check_git_staged_sensitive(repo_root: Path, *, strict: bool = False) -> Chec
         # containing a single byte of genomic content.
         findings.extend(_path_findings(path, check=name))
         allowlisted = _exempt(path, CONTENT_ALLOWLIST_PREFIXES)
-        if is_sensitive_extension(Path(path)) and not _exempt(path, TRACKED_EXEMPT_PREFIXES):
+        if (
+            is_sensitive_extension(Path(path))
+            and not _exempt(path, TRACKED_EXEMPT_PREFIXES)
+            and not _is_sample_free_reference_fixture(repo_root, path)
+        ):
             findings.append(
                 Finding(
                     check=name,
@@ -911,6 +1188,7 @@ def check_git_staged_sensitive(repo_root: Path, *, strict: bool = False) -> Chec
                 path_label=path,
                 allowlisted=allowlisted,
                 hpo_is_constant=_exempt(path, HPO_CODE_PREFIXES),
+                sites_only_reference=_is_sample_free_reference_fixture(repo_root, path),
             )
         )
     return _result(name, findings, f"{len(paths)} staged blob(s) inspected.", strict=strict)
@@ -1251,6 +1529,7 @@ def check_content_scan(repo_root: Path, *, strict: bool = False) -> CheckResult:
                 path_label=path,
                 allowlisted=_exempt(path, CONTENT_ALLOWLIST_PREFIXES),
                 hpo_is_constant=_exempt(path, HPO_CODE_PREFIXES),
+                sites_only_reference=_is_sample_free_reference_fixture(repo_root, path),
             )
         )
     fails = sum(1 for f in findings if f.severity == "fail")

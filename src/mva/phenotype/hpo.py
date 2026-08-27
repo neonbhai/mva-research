@@ -16,8 +16,15 @@ This module owns three things:
 **Maturity (GP-20):** the shipped ``knowledge/public/gene_phenotype.tsv`` is a
 *synthetic substitute*. The gene symbols are fictional and the association
 strengths were written for the demo case. The parsing and indexing logic here is
-real; the biology it is pointed at is not, and no output of this module may be
-described as biologically valid until a real HPO annotation release is wired in.
+real; the biology it is pointed at is not.
+
+That claim is now narrower than it used to be, and the narrowing matters. The
+*ontology* side of this package — :mod:`mva.phenotype.ontology`,
+:mod:`mva.phenotype.corpus`, :mod:`mva.phenotype.similarity` — reads the real
+published HPO release and its real annotation corpus. What remains synthetic is
+this file's gene→term table. No output of the scorer may be described as
+biologically valid until a real gene-phenotype knowledge base replaces it, but
+the reason is the gene symbols, not the ontology.
 """
 
 from __future__ import annotations
