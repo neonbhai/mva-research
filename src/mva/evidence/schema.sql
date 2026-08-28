@@ -100,7 +100,13 @@ CREATE TABLE IF NOT EXISTS consequences (
     is_mane_select        BOOLEAN   NOT NULL,
     consequence_terms     VARCHAR[] NOT NULL,
     most_severe_term      VARCHAR   NOT NULL,
-    impact                VARCHAR   NOT NULL,
+    -- NULLABLE ON PURPOSE (ADR 0016). NULL means NOT ASSESSED: the source located
+    -- the gene -- a MANE interval join answers "which gene is this variant in?" --
+    -- but computed no molecular consequence. NULL is emphatically not 'modifier':
+    -- MODIFIER is a positive prediction of negligible effect and
+    -- prioritization.filters.BENIGN_IMPACTS treats it as one, so writing 'modifier'
+    -- here would file a variant nobody assessed as predicted-benign (GP-14).
+    impact                VARCHAR,
     hgvs_c                VARCHAR,
     hgvs_p                VARCHAR,
     exon                  VARCHAR,
@@ -199,6 +205,11 @@ CREATE TABLE IF NOT EXISTS genes (
     gene_id         VARCHAR,
     transcript_ids  VARCHAR[] NOT NULL,
     variant_ids     VARCHAR[] NOT NULL,
+    -- Most severe *assessed* impact across the gene's transcripts, or NULL when no
+    -- transcript carries an assessed impact at all. Unassessed rows are excluded
+    -- from the minimum rather than bucketed as least-severe, so a
+    -- gene-assignment-only annotation can neither dilute a real prediction from
+    -- another adapter nor manufacture a 'modifier' verdict of its own (ADR 0016).
     worst_impact    VARCHAR,
     evidence_ids    VARCHAR[] NOT NULL
 );

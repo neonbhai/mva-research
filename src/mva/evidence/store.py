@@ -34,7 +34,9 @@ process can reach.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,6 +54,7 @@ from mva.models import (
     Citation,
     DrugHypothesis,
     EvidenceItem,
+    ImpactSeverity,
     MechanismHypothesis,
     PhenotypeProfile,
     RunManifest,
@@ -59,6 +62,8 @@ from mva.models import (
     VariantRecord,
     contig_sort_key,
 )
+
+_LOG = logging.getLogger(__name__)
 
 _SCHEMA_PATH: Final[Path] = Path(__file__).with_name("schema.sql")
 
@@ -106,6 +111,70 @@ PRIMARY_KEYS: Final[Mapping[str, tuple[str, ...]]] = {
     "artifact_provenance": ("run_id", "artifact_id"),
     "graph_edges": ("edge_id",),
 }
+
+# ------------------------------------------------------------- impact severity
+# `consequences.impact` is nullable, and NULL means NOT ASSESSED: the annotation
+# located the gene but computed no molecular consequence (ADR 0016). Every
+# severity value here is a positive prediction, so none of them can stand in for
+# absence — MODIFIER least of all, because it is a positive prediction of
+# negligible effect that `prioritization.filters.BENIGN_IMPACTS` treats as one.
+
+#: Severity ordering for the `genes.worst_impact` projection, most severe first.
+#: Written out rather than derived from `ImpactSeverity`'s declaration order:
+#: severity is domain knowledge, not a property of how the members happen to be
+#: listed.
+_IMPACT_RANK: Final[Mapping[ImpactSeverity, int]] = {
+    ImpactSeverity.HIGH: 0,
+    ImpactSeverity.MODERATE: 1,
+    ImpactSeverity.LOW: 2,
+    ImpactSeverity.MODIFIER: 3,
+}
+
+if set(_IMPACT_RANK) != set(ImpactSeverity):  # pragma: no cover - import-time invariant
+    _unranked = sorted(str(member) for member in set(ImpactSeverity) - set(_IMPACT_RANK))
+    raise RuntimeError(
+        f"ImpactSeverity member(s) {_unranked} have no rank in _IMPACT_RANK. "
+        "An unranked member falls out of the CASE below and would be persisted as "
+        "worst_impact = NULL, i.e. reported as NOT ASSESSED when it was in fact "
+        "assessed. Rank it explicitly (ADR 0016)."
+    )
+
+#: `consequences.impact` -> ordinal. Deliberately no ELSE branch: a NULL impact
+#: yields a NULL ordinal, and `min()` skips NULLs, so an unassessed transcript is
+#: *excluded from* the severity minimum rather than bucketed at its bottom. An
+#: `ELSE 3` here is the GP-14 bug — it turns NOT ASSESSED into MODIFIER.
+_IMPACT_TO_RANK_SQL: Final[str] = (
+    "CASE "
+    + " ".join(
+        f"WHEN impact = '{member.value}' THEN {rank}" for member, rank in _IMPACT_RANK.items()
+    )
+    + " END"
+)
+
+#: The aggregate itself: most severe *assessed* impact, or NULL when the group
+#: holds no assessed impact at all. The outer CASE also has no ELSE, so
+#: `min(...) IS NULL` (every transcript unassessed) maps to NULL, not to a value.
+_WORST_IMPACT_SQL: Final[str] = (
+    f"CASE min({_IMPACT_TO_RANK_SQL}) "
+    + " ".join(f"WHEN {rank} THEN '{member.value}'" for member, rank in _IMPACT_RANK.items())
+    + " END"
+)
+
+#: Explicit NULL placement for every `list_sort` in this module. DuckDB's default
+#: comes from the `default_null_order` setting, which is mutable and has differed
+#: between releases; a byte-identical export (GP-30) must not depend on it.
+_NULLS_LAST_SQL: Final[str] = "'ASC', 'NULLS LAST'"
+
+
+# ------------------------------------------------------------------- migration
+
+#: (table, column) pairs that an earlier on-disk schema declared NOT NULL and that
+#: the current schema declares nullable. `CREATE TABLE IF NOT EXISTS` is a no-op
+#: against an existing table, so a workspace written before ADR 0016 would
+#: otherwise keep the old constraint and fail every write of an unassessed
+#: consequence with a ConstraintException.
+_RELAXED_NOT_NULL_COLUMNS: Final[tuple[tuple[str, str], ...]] = (("consequences", "impact"),)
+
 
 # --------------------------------------------------------------------- parquet
 # Pinned so the bytes are a pure function of the data. Changing any of these
@@ -195,6 +264,7 @@ class EvidenceStore:
     def __init__(self, db_path: Path, *, read_only: bool = False) -> None:
         self._db_path = Path(db_path)
         self._read_only = read_only
+        self._applied_migrations: tuple[str, ...] = ()
         if not read_only:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -208,6 +278,12 @@ class EvidenceStore:
         # it removes an entire class of ordering nondeterminism from scans that
         # feed the Parquet export.
         self._connection.execute("SET threads TO 1")
+        # NULL placement in ORDER BY and list_sort is a *setting* in DuckDB, not a
+        # constant, and it has differed between releases. Now that a nullable
+        # column exists in the store (consequences.impact, ADR 0016) an inherited
+        # default is a live GP-30 hazard, so it is pinned here as well as spelled
+        # out at every sort site.
+        self._connection.execute("SET default_null_order TO 'NULLS_LAST'")
 
     # ------------------------------------------------------------- lifecycle
 
@@ -218,6 +294,16 @@ class EvidenceStore:
     @property
     def read_only(self) -> bool:
         return self._read_only
+
+    @property
+    def applied_migrations(self) -> tuple[str, ...]:
+        """Schema reconciliations the most recent :meth:`initialise` performed.
+
+        Empty when the on-disk schema already matched, which is the normal case.
+        Non-empty means the database predated a schema change and was brought
+        forward — reported rather than done quietly, so a caller can log it.
+        """
+        return self._applied_migrations
 
     def __enter__(self) -> EvidenceStore:
         return self
@@ -236,17 +322,144 @@ class EvidenceStore:
             self._connection = None
 
     def initialise(self) -> None:
-        """Apply ``schema.sql``.
+        """Apply ``schema.sql``, migrating an older on-disk schema first.
 
         Idempotent: every statement in the schema is ``CREATE ... IF NOT EXISTS``,
         so opening an existing workspace re-validates rather than recreating.
+
+        That idempotence is also the trap this method has to cover.
+        ``CREATE TABLE IF NOT EXISTS`` does nothing at all when the table already
+        exists, so a database created before ADR 0016 would keep
+        ``consequences.impact NOT NULL`` and reject every unassessed consequence,
+        with no hint that the file and the DDL had diverged. The store therefore
+        reconciles the constraints it knows have moved (see
+        :meth:`_migrate_relaxed_constraints`) before applying the schema, rather
+        than operating silently against a stale one.
         """
         connection = self._require_connection()
+        self._applied_migrations = self._migrate_relaxed_constraints()
         try:
             connection.execute(_SCHEMA_PATH.read_text(encoding="utf-8"))
         except duckdb.Error as exc:
             msg = f"Evidence schema could not be applied: {type(exc).__name__}"
             raise EvidenceError(msg) from exc
+
+    def _migrate_relaxed_constraints(self) -> tuple[str, ...]:
+        """Drop NOT NULL from columns the current schema declares nullable.
+
+        Migrate rather than refuse. Relaxing NOT NULL is metadata-only and
+        information-preserving: it cannot invalidate a stored row and cannot
+        change a stored value, so there is no state in which the migration is the
+        risky option and refusing is the safe one. And there is nothing to repair
+        behind it — under the old schema ``impact`` could not be NULL, so every
+        persisted ``genes.worst_impact = 'modifier'`` came from a real MODIFIER
+        prediction rather than from a stand-in for absence. Refusing would strand
+        every existing workspace, and force a full re-run, to avoid a constraint
+        change that cannot lose information.
+
+        Not silent, though: each applied change is logged (schema object names
+        only, never record content) and returned, so a caller or a test can assert
+        on what was reconciled.
+        """
+        connection = self._require_connection()
+        # `is False` specifically: None means the table does not exist yet (a fresh
+        # database, about to be created by schema.sql) and True means already
+        # reconciled. Neither is a migration.
+        pending = [
+            (table, column)
+            for table, column in _RELAXED_NOT_NULL_COLUMNS
+            if self._column_is_nullable(table, column) is False
+        ]
+        if not pending:
+            return ()
+
+        applied: list[str] = []
+        for table, column in pending:
+            # DuckDB refuses to ALTER a table a secondary index depends on ("Cannot
+            # alter entry ... because there are entries that depend on it"), so the
+            # indexes come off and go back on from the catalogue's own DDL.
+            # Primary-key constraints are not secondary indexes, are not listed by
+            # duckdb_indexes(), and do not block the ALTER.
+            indexes = self._secondary_index_ddl(table)
+            try:
+                # Identifiers come from the module constant and from DuckDB's own
+                # catalogue, never from caller input; DDL takes no bound parameters.
+                for name, _ in indexes:
+                    connection.execute(f"DROP INDEX IF EXISTS {name}")
+                connection.execute(f"ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL")
+                for _, ddl in indexes:
+                    connection.execute(ddl)
+            except duckdb.Error as exc:
+                # Deliberately NOT wrapped in BEGIN/COMMIT: this exact sequence
+                # (DROP INDEX, ALTER COLUMN, CREATE INDEX) aborts the process with
+                # "Pure virtual function called!" inside an explicit transaction on
+                # a persistent database, reproduced on DuckDB 1.5.5. So the failure
+                # path puts the indexes back by hand instead of rolling back. The
+                # column itself needs no undo: ALTER either applied or it did not.
+                for _, ddl in indexes:
+                    with suppress(duckdb.Error):
+                        connection.execute(ddl)
+                msg = (
+                    f"Evidence store at {self._db_path.name!r} was created under an older "
+                    f"schema that declares {table}.{column} NOT NULL, and the constraint "
+                    f"could not be relaxed: {type(exc).__name__}. A read-only store cannot "
+                    "migrate: re-open the workspace read-write once so initialise() can "
+                    "apply the change."
+                )
+                raise EvidenceError(msg) from exc
+            applied.append(f"{table}.{column} DROP NOT NULL")
+
+        for change in applied:
+            _LOG.info(
+                "Migrated evidence schema in %s: %s (ADR 0016 - NULL means NOT ASSESSED).",
+                self._db_path.name,
+                change,
+            )
+        return tuple(applied)
+
+    def _secondary_index_ddl(self, table: str) -> tuple[tuple[str, str], ...]:
+        """``(index_name, CREATE INDEX ...)`` for every secondary index on ``table``.
+
+        Read from ``duckdb_indexes()`` so the migration restores exactly what it
+        found, rather than trusting that schema.sql will be applied afterwards.
+        Sorted by name so the drop/recreate order is fixed (GP-30).
+        """
+        connection = self._require_connection()
+        rows = connection.execute(
+            "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = ? ORDER BY index_name",
+            [table],
+        ).fetchall()
+        indexes: list[tuple[str, str]] = []
+        for row in rows:
+            name, ddl = row[0], row[1]
+            if ddl is None:
+                msg = (
+                    f"Index {str(name)!r} on {table!r} reports no DDL, so it could not be "
+                    "recreated after the constraint migration. Refusing to drop it."
+                )
+                raise EvidenceError(msg)
+            indexes.append((str(name), str(ddl)))
+        return tuple(indexes)
+
+    def _column_is_nullable(self, table: str, column: str) -> bool | None:
+        """Whether ``table.column`` admits NULL, or ``None`` if it does not exist.
+
+        ``information_schema.columns.is_nullable`` is spelled ``'YES'``/``'NO'`` by
+        the SQL standard but has been exposed as a BOOLEAN by some DuckDB
+        releases, so both spellings are accepted rather than assumed.
+        """
+        connection = self._require_connection()
+        row = connection.execute(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'main' AND table_name = ? AND column_name = ?",
+            [table, column],
+        ).fetchone()
+        if row is None:
+            return None
+        raw: object = row[0]
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).strip().upper() in {"YES", "TRUE", "1"}
 
     def _require_connection(self) -> duckdb.DuckDBPyConnection:
         if self._connection is None:
@@ -408,37 +621,39 @@ class EvidenceStore:
 
         Rebuilt rather than incrementally merged: merging list columns across
         successive writes is exactly how an "idempotent" writer stops being one.
+
+        ``worst_impact`` is the most severe *assessed* impact in the group.
+        Unassessed transcripts are excluded from the minimum instead of being
+        folded into a bucket, which mirrors
+        :meth:`VariantRecord.worst_impact_for_gene` and matters twice over: a
+        gene-assignment-only annotation must not dilute a real prediction from
+        another adapter (one HIGH plus one unassessed transcript is HIGH), and a
+        gene with nothing but unassessed transcripts must come out NULL rather
+        than ``'modifier'``. The mechanism is that ``min()`` skips NULLs while a
+        ``CASE ... ELSE`` chain does not: the previous ``ELSE 3`` gave an
+        unassessed row the MODIFIER ordinal and persisted a positive prediction of
+        negligible effect that nobody had made (ADR 0016, GP-14).
         """
         connection = self._require_connection()
         connection.execute("DELETE FROM genes")
+        # Every interpolated fragment is built from _IMPACT_RANK and a literal
+        # sort direction; no caller input reaches this string.
         connection.execute(
-            """
+            f"""
             INSERT INTO genes (
                 gene_symbol, gene_id, transcript_ids, variant_ids, worst_impact, evidence_ids
             )
             SELECT
                 gene_symbol,
                 min(gene_id),
-                list_sort(list_distinct(list(transcript_id))),
-                list_sort(list_distinct(list(variant_id))),
-                CASE min(
-                    CASE impact
-                        WHEN 'high' THEN 0
-                        WHEN 'moderate' THEN 1
-                        WHEN 'low' THEN 2
-                        ELSE 3
-                    END
-                )
-                    WHEN 0 THEN 'high'
-                    WHEN 1 THEN 'moderate'
-                    WHEN 2 THEN 'low'
-                    ELSE 'modifier'
-                END,
-                list_sort(list_distinct(flatten(list(evidence_ids))))
+                list_sort(list_distinct(list(transcript_id)), {_NULLS_LAST_SQL}),
+                list_sort(list_distinct(list(variant_id)), {_NULLS_LAST_SQL}),
+                {_WORST_IMPACT_SQL},
+                list_sort(list_distinct(flatten(list(evidence_ids))), {_NULLS_LAST_SQL})
             FROM consequences
             GROUP BY gene_symbol
             ORDER BY gene_symbol
-            """
+            """  # noqa: S608 - fragments are module constants, not caller input
         )
 
     def write_frequencies(
@@ -896,6 +1111,14 @@ class EvidenceStore:
         sizes are fixed, and the writer embeds no clock reading. Empty tables are
         exported too, so the file set is a function of the schema rather than of
         which stages happened to run.
+
+        NULL ordering, audited when ``consequences.impact`` became nullable (ADR
+        0016): the sort key here is always ``PRIMARY_KEYS[table]``, and a DuckDB
+        primary key column is implicitly NOT NULL, so no ORDER BY in this module
+        can see a NULL. The nullable columns (``impact``, ``worst_impact``, and
+        the pre-existing optional ones) are carried, never sorted on. The
+        connection additionally pins ``default_null_order`` so the bytes do not
+        depend on a session setting even if that ever stops being true.
         """
         selected = TABLES if tables is None else tuple(tables)
         unknown = [name for name in selected if name not in PRIMARY_KEYS]

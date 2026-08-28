@@ -66,9 +66,32 @@ The pipeline already handled the honest answer correctly:
 - `pairing._IMPACT_ORDER_UNKNOWN` already sorts unannotated alongside LOW, on
   exactly these grounds.
 
-Only three sites needed changing, all rendering or persistence:
-`service._impact_text` (renders "not assessed"), the evidence strength for an
-unassessed annotation (`INSUFFICIENT`), and the Parquet writer (nullable column).
+Four sites needed changing. Two are rendering: `service._impact_text` (renders
+"not assessed") and the evidence strength for an unassessed annotation
+(`INSUFFICIENT`). Two are persistence, and this ADR originally got them wrong:
+
+- **`evidence/schema.sql`** declared `consequences.impact NOT NULL`, so the first
+  gene-assignment-only annotation aborted the run with a `ConstraintException`.
+- **`EvidenceStore._rebuild_genes`** projected the per-gene worst impact through a
+  `CASE … ELSE 3` chain, which mapped a NULL impact to `'modifier'` and persisted
+  it as `genes.worst_impact`. That is this ADR's own reasoning violated in the
+  store the reports read from: NOT ASSESSED written to disk as a positive
+  prediction of negligible effect, which `BENIGN_IMPACTS` treats as benign.
+
+The fix in both positions is the **absence of an `ELSE`**. The inner `CASE` yields
+a NULL ordinal for a NULL impact, so `min()` skips it and an unassessed transcript
+is excluded from the minimum rather than bucketed at its bottom; the outer `CASE`
+maps an all-NULL minimum to NULL rather than to a value. The ordering is generated
+from a module constant checked at import against `ImpactSeverity`, so a future enum
+member cannot silently fall out of the SQL.
+
+An earlier draft of this ADR named "the Parquet writer (nullable column)" as the
+third site. **There is no such site.** `EvidenceStore.export_parquet` is the only
+`pq.write_table` in `src/mva/` and it inherits its Arrow schema from DuckDB, which
+already marks the field nullable regardless of the SQL constraint — exports from
+the old and new schemas over identical rows are byte-identical. The claim was
+plausible and wrong, and it pointed away from `_rebuild_genes`, the site that
+actually mattered.
 
 ## Consequences
 

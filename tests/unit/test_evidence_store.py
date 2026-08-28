@@ -8,6 +8,8 @@ These are the guarantees the rest of the pipeline is allowed to rely on:
   payload value intact;
 * contradictions are stored and retrievable (GP-19);
 * a Parquet export is byte-identical on repeat (GP-30), checked with sha256;
+* an unassessed consequence (``impact=None``, ADR 0016) persists and reads back
+  as NULL rather than being folded into MODIFIER;
 * an unsourced or dangling citation refuses to render (GP-10).
 """
 
@@ -18,11 +20,13 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+import duckdb
+import pyarrow.parquet as pq
 import pytest
 
-from mva.errors import UnsourcedAssertionError
+from mva.errors import EvidenceError, UnsourcedAssertionError
 from mva.evidence import AssertionResolver, EvidenceLedger, EvidenceStore, GraphEdge
-from mva.evidence.store import TABLES
+from mva.evidence.store import _SCHEMA_PATH, TABLES
 from mva.models import (
     ApprovalStatus,
     AssertionTier,
@@ -124,6 +128,36 @@ def make_variant(
         source_line_index=7,
         normalisation_ops=("split_multiallelic", "left_align"),
     )
+
+
+def unassessed_consequence(
+    *, gene: str = "SYNTHA", transcript_id: str = "ENST00000000009"
+) -> ConsequenceAnnotation:
+    """A gene-assignment-only annotation: located, not assessed (ADR 0016).
+
+    This is exactly what the MANE interval join produces. It answers "which gene
+    is this variant in?" and computes no molecular consequence, so ``impact`` is
+    left at its ``None`` default rather than being given a severity nobody
+    calculated.
+    """
+    return ConsequenceAnnotation(
+        gene_symbol=gene,
+        gene_id="ENSG00000000001",
+        transcript_id=transcript_id,
+        is_mane_select=True,
+        consequence_terms=("gene_variant",),
+        source_tool="mane_interval_join",
+        source_tool_version="1.0.0",
+    )
+
+
+def variant_with_consequences(
+    consequences: tuple[ConsequenceAnnotation, ...],
+    *,
+    position: int = 300_000,
+) -> VariantRecord:
+    """``make_variant`` with its consequence tuple replaced wholesale."""
+    return make_variant(position=position).model_copy(update={"consequences": consequences})
 
 
 def make_evidence(
@@ -459,6 +493,225 @@ def test_export_parquet_is_byte_identical(store: EvidenceStore, tmp_path: Path) 
     # A selective export writes only what was asked for.
     selective = store.export_parquet(tmp_path / "export-c", tables=["evidence_items"])
     assert set(selective) == {"evidence_items"}
+
+
+@pytest.mark.unit
+def test_nullable_impact_round_trips_without_becoming_modifier(
+    store: EvidenceStore, tmp_path: Path
+) -> None:
+    """ADR 0016: NOT ASSESSED survives persistence as NULL, never as MODIFIER.
+
+    `ConsequenceAnnotation.impact` is `ImpactSeverity | None`, and `None` means the
+    annotation located the gene but computed no molecular consequence. The
+    persistence layer used to contradict that twice over: `consequences.impact`
+    was declared NOT NULL, so the write raised ConstraintException; and
+    `_rebuild_genes` routed an unrecognised impact through `ELSE 3`, which would
+    have persisted `genes.worst_impact = 'modifier'`.
+
+    The second is the dangerous one. MODIFIER is a positive prediction of
+    negligible effect and `prioritization.filters.BENIGN_IMPACTS` treats it as one,
+    so a variant nobody assessed would have been filed as predicted-benign in the
+    store the reports read from — the GP-14 failure ADR 0016 exists to prevent.
+    """
+    variant = variant_with_consequences((unassessed_consequence(),))
+    assert variant.consequences[0].impact is None
+    assert variant.worst_impact_for_gene("SYNTHA") is None
+
+    store.write_variants([variant])
+    assert store.write_consequences([variant]) == 1
+
+    rows = store.query("SELECT gene_symbol, transcript_id, impact FROM consequences")
+    assert rows == [
+        {
+            "gene_symbol": "SYNTHA",
+            "transcript_id": "ENST00000000009",
+            "impact": None,
+        }
+    ]
+
+    genes = store.query("SELECT gene_symbol, worst_impact FROM genes")
+    assert genes == [{"gene_symbol": "SYNTHA", "worst_impact": None}]
+    # Spelled out separately, because `== None` is exactly the assertion that a
+    # regression to 'modifier' would make fail for the right reason.
+    assert genes[0]["worst_impact"] is not ImpactSeverity.MODIFIER
+    assert genes[0]["worst_impact"] != "modifier"
+
+    # The model reconstructed from the stored row is still NOT ASSESSED.
+    stored = store.query("SELECT * FROM consequences")[0]
+    restored = ConsequenceAnnotation(
+        gene_symbol=str(stored["gene_symbol"]),
+        transcript_id=str(stored["transcript_id"]),
+        consequence_terms=("gene_variant",),
+        impact=stored["impact"],  # type: ignore[arg-type]
+    )
+    assert restored.impact is None
+
+    # ... and through the Parquet artifact, which is where the determinism and
+    # publication claims are actually made.
+    exported = store.export_parquet(tmp_path / "export")
+    table = pq.read_table(exported["consequences"])
+    assert table.column("impact").to_pylist() == [None]
+    gene_table = pq.read_table(exported["genes"])
+    assert gene_table.column("worst_impact").to_pylist() == [None]
+
+    # A NULL column must not make the export non-deterministic (GP-30).
+    again = store.export_parquet(tmp_path / "export-again")
+    for name in ("consequences", "genes"):
+        assert sha256_of(exported[name]) == sha256_of(again[name])
+
+
+@pytest.mark.unit
+def test_worst_impact_excludes_unassessed_transcripts(store: EvidenceStore) -> None:
+    """One HIGH plus one unassessed transcript is HIGH, not diluted and not NULL.
+
+    The projection must mirror `VariantRecord.worst_impact_for_gene`: unassessed
+    rows drop out of the minimum instead of being bucketed at its bottom. A real
+    MODIFIER prediction, by contrast, is still persisted as 'modifier' — the point
+    is that NULL and MODIFIER stay distinguishable in both directions.
+    """
+    mixed = variant_with_consequences(
+        (
+            ConsequenceAnnotation(
+                gene_symbol="SYNTHMIX",
+                transcript_id="ENST00000000010",
+                consequence_terms=("stop_gained",),
+                impact=ImpactSeverity.HIGH,
+                source_tool="synthetic_vep",
+                source_tool_version="0.0.1",
+            ),
+            unassessed_consequence(gene="SYNTHMIX", transcript_id="ENST00000000011"),
+        ),
+        position=310_000,
+    )
+    modifier_only = variant_with_consequences(
+        (
+            ConsequenceAnnotation(
+                gene_symbol="SYNTHMOD",
+                transcript_id="ENST00000000012",
+                consequence_terms=("intron_variant",),
+                impact=ImpactSeverity.MODIFIER,
+                source_tool="synthetic_vep",
+                source_tool_version="0.0.1",
+            ),
+        ),
+        position=320_000,
+    )
+    unassessed_only = variant_with_consequences(
+        (unassessed_consequence(gene="SYNTHNONE", transcript_id="ENST00000000013"),),
+        position=330_000,
+    )
+
+    variants = [mixed, modifier_only, unassessed_only]
+    store.write_variants(variants)
+    assert store.write_consequences(variants) == 4
+
+    worst = {
+        str(row["gene_symbol"]): row["worst_impact"]
+        for row in store.query("SELECT gene_symbol, worst_impact FROM genes")
+    }
+    assert worst == {
+        "SYNTHMIX": "high",
+        "SYNTHMOD": "modifier",
+        "SYNTHNONE": None,
+    }
+    # The projection agrees with the model it projects.
+    assert mixed.worst_impact_for_gene("SYNTHMIX") is ImpactSeverity.HIGH
+    assert modifier_only.worst_impact_for_gene("SYNTHMOD") is ImpactSeverity.MODIFIER
+    assert unassessed_only.worst_impact_for_gene("SYNTHNONE") is None
+
+    # The unassessed transcript is still recorded; it is excluded from the
+    # severity minimum, not dropped from the store (GP-13).
+    assert store.counts()["consequences"] == 4
+    transcripts = store.query("SELECT transcript_ids FROM genes WHERE gene_symbol = 'SYNTHMIX'")[0][
+        "transcript_ids"
+    ]
+    assert transcripts == ["ENST00000000010", "ENST00000000011"]
+
+
+@pytest.mark.unit
+def test_initialise_migrates_a_pre_adr0016_database(tmp_path: Path) -> None:
+    """A workspace written before ADR 0016 is migrated, not silently used.
+
+    `CREATE TABLE IF NOT EXISTS` does nothing against an existing table, so a
+    database created when `consequences.impact` was NOT NULL would keep the old
+    constraint and reject every unassessed consequence with no sign that the file
+    and the DDL had diverged. `initialise()` reconciles it first. Relaxing NOT NULL
+    is metadata-only and cannot lose a row or change a value, so migrating is
+    strictly safer than stranding the workspace.
+    """
+    legacy_ddl = _SCHEMA_PATH.read_text(encoding="utf-8").replace(
+        "    impact                VARCHAR,", "    impact                VARCHAR   NOT NULL,"
+    )
+    assert "impact                VARCHAR   NOT NULL," in legacy_ddl, (
+        "the legacy fixture no longer patches the column it means to patch"
+    )
+
+    db_path = tmp_path / "legacy.duckdb"
+    legacy = duckdb.connect(str(db_path))
+    legacy.execute(legacy_ddl)
+    legacy.execute(
+        "INSERT INTO consequences (variant_id, gene_symbol, transcript_id, "
+        "transcript_biotype, is_canonical, is_mane_select, consequence_terms, "
+        "most_severe_term, impact, pathogenicity_scores, source_tool, "
+        "source_tool_version, evidence_ids) VALUES "
+        "('GRCh38:chr15:1:A:T','SYNTHOLD','ENST00000000099','protein_coding',true,true,"
+        "['intron_variant'],'intron_variant','modifier','{}','synthetic_vep','0.0.1',[])"
+    )
+    legacy.close()
+
+    with EvidenceStore(db_path) as store:
+        store.initialise()
+        assert store.applied_migrations == ("consequences.impact DROP NOT NULL",)
+
+        # The pre-existing row is untouched: under the old schema `impact` could
+        # not be NULL, so its 'modifier' was a real prediction and not a stand-in
+        # for absence. There is nothing to repair behind the constraint change.
+        assert store.query("SELECT variant_id, impact FROM consequences") == [
+            {"variant_id": "GRCh38:chr15:1:A:T", "impact": "modifier"}
+        ]
+        # The index the ALTER had to be threaded around is back.
+        indexes = store.query(
+            "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'consequences'"
+        )
+        assert [row["index_name"] for row in indexes] == ["idx_consequences_gene"]
+
+        # And the constraint is genuinely gone: an unassessed consequence writes.
+        variant = variant_with_consequences((unassessed_consequence(gene="SYNTHNEW"),))
+        store.write_variants([variant])
+        assert store.write_consequences([variant]) == 1
+        assert store.query("SELECT worst_impact FROM genes WHERE gene_symbol = 'SYNTHNEW'") == [
+            {"worst_impact": None}
+        ]
+
+        # Idempotent: a second initialise() finds nothing left to migrate.
+        store.initialise()
+        assert store.applied_migrations == ()
+
+
+@pytest.mark.unit
+def test_migration_refuses_rather_than_writing_into_a_stale_schema(tmp_path: Path) -> None:
+    """A store that cannot migrate says so, naming the remedy.
+
+    A read-only connection cannot run DDL. The alternative to a clear refusal is
+    the original bug: the write path meets a NOT NULL column it did not expect and
+    fails deep inside an upsert with a bare ConstraintException.
+    """
+    legacy_ddl = _SCHEMA_PATH.read_text(encoding="utf-8").replace(
+        "    impact                VARCHAR,", "    impact                VARCHAR   NOT NULL,"
+    )
+    db_path = tmp_path / "legacy-ro.duckdb"
+    legacy = duckdb.connect(str(db_path))
+    legacy.execute(legacy_ddl)
+    legacy.close()
+
+    with EvidenceStore(db_path, read_only=True) as store:
+        with pytest.raises(EvidenceError) as excinfo:
+            store.initialise()
+        assert store.applied_migrations == ()
+
+    message = str(excinfo.value)
+    assert "consequences.impact" in message
+    assert "read-write" in message
 
 
 @pytest.mark.unit
