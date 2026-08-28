@@ -94,6 +94,17 @@ workflow-check:
         --configfile config/synthetic-case.yaml > /dev/null
     @echo "  workflow: DAG resolves"
 
+# ---------------------------------------------------------------- generated docs
+
+# Regenerate docs/track2-drugs-to-avoid.md from a live triage run.
+#
+# The page is rendered, never written, so it cannot drift from the pipeline it
+# describes. `tests/unit/test_drugs_to_avoid.py` fails if the committed file and
+# the generator disagree, so `just verify` already catches a stale page -- this
+# recipe is how you make it un-stale.
+drugs-to-avoid:
+    uv run python -m tools.track2 drugs-to-avoid
+
 # ---------------------------------------------------------------- citations
 
 # Re-resolve every PMID we write down against PubMed and rewrite the ledger.
