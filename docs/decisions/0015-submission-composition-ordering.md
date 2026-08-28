@@ -73,8 +73,16 @@ carrying it:
 | 8 | `40206000 / 40210500` pair, 0.4420 | `40206000` single, **0.4220** |
 
 Same ten rows, same coordinates, nothing added or removed. Rows 1–5 and 9–10
-unchanged. **The causal pair remains row 1 at REDACTED-EPCR.** Ten distinct EPCRs,
-minimum gap 0.0100.
+unchanged. Ten distinct EPCRs, minimum gap 0.0100.
+
+**Promotion is surgical: it moves only a subset row below its superset and
+leaves the top of the ranking alone.** That is the invariant, and it is proven on
+the synthetic golden case rather than on any real result —
+`tests/golden/test_golden_case.py::test_synthetic_causal_pair_ranks_first` for
+the top row, and
+`tests/unit/test_track1_composition.py::test_unrelated_rows_keep_their_epcr_order`
+for everything else. Real-case EPCRs and ranks are patient-derived and are not
+reproduced in this repository.
 
 Cumulative delta from the pre-ADR-0014 baseline: three EPCR values moved
 (0.6148→0.6110, 0.4420→0.4320, 0.3900→0.3800) and one row repositioned (the

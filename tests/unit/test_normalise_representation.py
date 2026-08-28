@@ -16,8 +16,8 @@ Four things are pinned here:
    because two implementations that agree today is exactly the state the
    repository was in when the defect was introduced — twice. gnomAD was the second
    time: it kept a private ``minimal_representation`` that trimmed but could not
-   left-align, in the highest-weight signal the ranker has, on a callset that is
-   a substantial fraction indel-bearing (ADR 0018).
+   left-align, in the highest-weight signal the ranker has, on an indel-heavy
+   callset — a large minority of its records carry an indel (ADR 0018).
 2. **Left-alignment against a real indexed FASTA works**, including the boundary
    translations that are easy to get silently wrong: 1-based inclusive versus
    pysam's 0-based half-open, and a ``chr``-prefixed FASTA against a bare-contig
@@ -589,9 +589,9 @@ def test_gnomad_and_ingestion_canonicalisation_can_never_disagree(
     ClinVar adapter did not, and the disagreement surfaced only as a missing
     clinical assertion. That was fixed for ClinVar and **left in place for gnomAD**,
     which kept a private ``minimal_representation`` — so the highest-weight signal
-    the ranker has went on failing to join right-shifted indels, on a callset that
-    is a substantial fraction indel-bearing, while a test asserting agreement between the other two
-    passed. Comparing only two of three callers is exactly how that survived.
+    the ranker has went on failing to join right-shifted indels, on an indel-heavy
+    callset, while a test asserting agreement between the other two passed.
+    Comparing only two of three callers is exactly how that survived.
 
     So all three are compared here, in both reference states, at every generated
     allele pair. The no-reference state catches a divergent trim; the with-reference
