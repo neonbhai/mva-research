@@ -96,35 +96,35 @@ workflow-check:
 
 # ---------------------------------------------------------------- controls
 
-# Positive control for the science. The counterpart of `privacy-audit`.
-#
 # Every other Track 2 test asserts a REJECTION, and a triage stage that rejected
 # everything would pass all of them while scoring identically to a careful one.
 # This proves the stage still reaches "accept" on a case whose answer is not in
 # question, and still rejects the inverted, the unmeasured, the off-chain and the
-# sibling-gene cases for the right reasons. Runs inside `just test` as well.
+# sibling-gene cases for the right reasons. Also runs inside `just test`.
+#
+# Prove the science pipeline can still say yes. The counterpart of `privacy-audit`.
 science-canary:
     uv run pytest -q tests/unit/test_pipeline_canary.py
 
 # ---------------------------------------------------------------- generated docs
 
-# Regenerate docs/track2-drugs-to-avoid.md from a live triage run.
-#
 # The page is rendered, never written, so it cannot drift from the pipeline it
 # describes. `tests/unit/test_drugs_to_avoid.py` fails if the committed file and
 # the generator disagree, so `just verify` already catches a stale page -- this
 # recipe is how you make it un-stale.
+#
+# Regenerate docs/track2-drugs-to-avoid.md from a live triage run.
 drugs-to-avoid:
     uv run python -m tools.track2 drugs-to-avoid
 
 # ---------------------------------------------------------------- citations
 
-# Re-resolve every PMID we write down against PubMed and rewrite the ledger.
-#
 # THE ONLY RECIPE HERE THAT TOUCHES THE NETWORK, and it is not part of `verify`
 # for that reason (PRIV-05). `just verify` checks our prose against the committed
 # ledger with zero network; this recipe is what refreshes that ledger. Run it when
 # a citation is added or changed, and review the diff before committing it.
+#
+# ONLINE. Re-resolve every PMID we write down against PubMed and rewrite the ledger.
 verify-citations:
     uv run python -m tools.citations refresh
     MVA_VERIFY_CITATIONS=1 uv run pytest -q -m network
