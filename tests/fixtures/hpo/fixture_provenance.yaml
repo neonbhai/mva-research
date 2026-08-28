@@ -1,0 +1,39 @@
+# ADR 0012 provenance record for the HPO ontology fixtures. See
+# tests/fixtures/clinvar/fixture_provenance.yaml for what the audit does with it.
+#
+# None of these is a VCF, so none can earn the sites-only content exemption. They
+# do not need it: an HPO identifier is a public ontology term, and these tables
+# are keyed by term, by disease and by gene -- there is no subject in them to
+# identify (see `has_phenotype_profile_shape`, which is what would catch it if
+# there were). This record supplies ADR 0012 conditions 1, 2 and 4 only.
+#
+# `regions` records what was cut. For a release with no genomic intervals that is
+# the selection rule, which is deterministic and is implemented in the generator.
+#
+# Regenerate with:
+#
+#   uv run python tests/fixtures/hpo/build_fixture.py --resources <hpo release dir>
+manifest: knowledge/manifests/resources.yaml
+generator: build_fixture.py
+fixtures:
+  hp_subset.obo:
+    resource: hpo_ontology
+    regions:
+      # The seed list itself lives in build_fixture.py (SEED_TERMS) and not
+      # here: a list of ontology identifiers in a committed file is the shape
+      # the audit's hpo_term rule exists to notice, and this record should not
+      # be the reason it fires.
+      - "seed terms = SEED_TERMS in build_fixture.py (the synthetic case's own
+         terms, plus two deliberately broad ones so downward exclusion
+         propagation has something to propagate over)"
+      - close upward (every ancestor), add one downward layer, close upward again
+  phenotype_subset.hpoa:
+    resource: hpo_disease_annotations
+    regions:
+      - real release rows filtered to terms in the ontology slice, capped by MAX_DISEASES
+      - seed-annotating entities first, then the rest, both in sorted identifier order
+  genes_to_phenotype_subset.txt:
+    resource: hpo_genes_to_phenotype
+    regions:
+      - real release rows filtered to terms in the ontology slice, capped by MAX_GENES
+      - seed-annotating entities first, then the rest, both in sorted identifier order

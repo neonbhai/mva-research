@@ -30,6 +30,13 @@ which is almost never "someone published a VCF on purpose":
 * a real file was dropped into the synthetic-fixture directory, where the
   ``.gitignore`` negations deliberately re-admit files
   (``synthetic_fixtures_marked``);
+* a real file was dropped into a *public reference* fixture directory, where the
+  negations re-admit ``.vcf.gz`` and ``.tbi`` outright. That category is granted
+  only against declared, hash-pinned provenance AND a verification that the exact
+  buffer being scanned is a single sites-only VCF -- "sites-only" is not
+  "not derived from an individual", and a sites-only export of a proband is still
+  that child's complete variant list (``reference_fixtures_declared``,
+  :func:`buffer_is_sites_only_vcf`, ADR 0012);
 * it is in a notebook output cell (``notebook_output_purity``);
 * it went to a log (``log_redaction_probe``, which is a live runtime probe, not a
   static check — the only way to know redaction works is to try to defeat it);
@@ -39,24 +46,28 @@ which is almost never "someone published a VCF on purpose":
 
 from __future__ import annotations
 
-import gzip
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import zlib
 from bisect import bisect_right
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
+import yaml
+
 from mva.config import (
     CLOUD_SYNCED_HOME_DIRS,
     CLOUD_SYNCED_MARKERS,
     path_is_within,
 )
+from mva.determinism import hash_file
 from mva.errors import PrivacyViolationError
 from mva.privacy.classify import is_sensitive_extension
 from mva.privacy.patterns import (
@@ -74,7 +85,6 @@ from mva.privacy.patterns import (
     sniff_binary,
 )
 from mva.privacy.redact import (
-    install_redaction,
     redact_text,
     redaction_installed,
     unfiltered_handlers,
@@ -274,9 +284,17 @@ def has_phenotype_profile_shape(data: bytes) -> bool:
 #: would not test the parser against what the source actually emits — but real
 #: *public reference* data, which has no individual to identify. See ADR 0012.
 #:
-#: Membership here is NOT by itself permission. :func:`vcf_declares_sample_columns`
-#: is ANDed with it everywhere it is used, so a file that grows sample columns
-#: loses the exemption automatically rather than by anyone remembering to check.
+#: Membership here is NOT by itself permission, and is not even half of it. Three
+#: further conditions are ANDed with it at every use site:
+#:
+#: * the file is DECLARED in its directory's :data:`FIXTURE_PROVENANCE_FILENAME`,
+#:   naming the manifest resource it was cut from and the regions that were cut
+#:   (ADR 0012 conditions 2 and 4);
+#: * that resource is registered in :data:`RESOURCE_MANIFEST_RELPATH`, is
+#:   ``status: fetched`` and carries a real sha256 (condition 2);
+#: * the exact BUFFER being scanned is a single sites-only VCF (condition 3),
+#:   which is checked by :func:`buffer_is_sites_only_vcf` against those bytes and
+#:   never against a path reopened independently of them.
 PUBLIC_REFERENCE_FIXTURE_PREFIXES: Final[tuple[str, ...]] = (
     "tests/fixtures/clinvar/",
     "tests/fixtures/gnomad/",
@@ -284,67 +302,632 @@ PUBLIC_REFERENCE_FIXTURE_PREFIXES: Final[tuple[str, ...]] = (
     "tests/fixtures/hpo/",
 )
 
-#: A conforming VCF header line has 8 fixed columns before FORMAT/samples.
-_VCF_FIXED_FIELDS: Final[int] = 8
+#: A conforming VCF header line is EXACTLY these eight columns, in this order,
+#: with nothing after ``INFO``. Compared as a whole tuple rather than counted: a
+#: length test accepts ``#CHROM POS ID REF ALT QUAL FILTER SAMPLE01`` and a
+#: startswith test accepts ``#CHROMOSOME``.
+_VCF_FIXED_COLUMNS: Final[tuple[bytes, ...]] = (
+    b"#CHROM",
+    b"POS",
+    b"ID",
+    b"REF",
+    b"ALT",
+    b"QUAL",
+    b"FILTER",
+    b"INFO",
+)
 
-#: Header lines scanned looking for ``#CHROM``. Bounded so a huge or malformed
-#: file cannot turn an audit check into a full-file read.
-_VCF_HEADER_SCAN_LINES: Final[int] = 20_000
+#: A conforming VCF header line has 8 fixed columns before FORMAT/samples.
+_VCF_FIXED_FIELDS: Final[int] = len(_VCF_FIXED_COLUMNS)
+
+#: Bound on the gzip member chain :func:`inflate_fully` will walk. BGZF is a chain
+#: of ~64 KiB members, so a few hundred covers any committable fixture; the bound
+#: exists so a crafted chain cannot spin. Hitting it is NOT truncation-with-a-
+#: shrug: :func:`inflate_fully` returns ``None``, which denies the exemption.
+_MAX_INFLATE_MEMBERS: Final[int] = 4096
+
+
+def inflate_fully(data: bytes, limit: int = MAX_SCAN_BYTES) -> bytes | None:
+    """Inflate a gzip/BGZF byte string COMPLETELY, or return ``None``.
+
+    Deliberately not :func:`~mva.privacy.patterns.gunzip_capped`. That function is
+    built for scanning, where a truncated prefix is still worth matching rules
+    against, so it returns whatever it managed to inflate and says nothing about
+    whether it reached the end. For an exemption decision that is exactly wrong: a
+    prefix that contains no ``FORMAT`` column proves nothing about the member
+    nobody inflated. So this returns ``None`` — deny — for a stream that is
+    truncated, corrupt, longer than ``limit``, or made of more members than
+    :data:`_MAX_INFLATE_MEMBERS`.
+
+    Concatenated members are followed to the end, because a second gzip member is
+    the cheapest way to hide a genotyped VCF behind a sites-only one.
+    """
+    if data[:2] != b"\x1f\x8b":
+        return None
+    out = bytearray()
+    remaining = data
+    for _ in range(_MAX_INFLATE_MEMBERS):
+        obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            # One byte of headroom past `limit`, so an over-long stream is
+            # detectable rather than silently trimmed to the cap.
+            out += obj.decompress(remaining, max(0, limit - len(out)) + 1)
+        except zlib.error:
+            return None
+        if len(out) > limit or not obj.eof:
+            return None
+        if not obj.unused_data:
+            return bytes(out)
+        remaining = obj.unused_data
+    return None
+
+
+def _plaintext_is_sites_only_vcf(text: bytes) -> bool:
+    """Whether this DECOMPRESSED buffer is one complete, sites-only VCF.
+
+    ADR 0012 condition 3, applied to the whole buffer rather than to its first
+    header line. The predicate this replaces returned at the first ``#CHROM``,
+    which a file could satisfy with an eight-column decoy and then follow with a
+    second header carrying ``FORMAT`` and a patient sample. Every rule here exists
+    to close a specific way of doing that:
+
+    * **exactly one** ``#CHROM`` line in the whole buffer — a second one is a
+      concatenation, whatever the first one said;
+    * that line is exactly :data:`_VCF_FIXED_COLUMNS` — no ``FORMAT``, no sample
+      names, no trailing tab;
+    * no ``##`` meta line appears AFTER the header — that is the shape of two
+      VCFs stapled together;
+    * no other ``#``-prefixed line anywhere — unrecognised is not benign;
+    * every data row has exactly eight tab-separated fields, so a row cannot be
+      wider than the header that describes it;
+    * no data row precedes the header.
+
+    Blank lines are skipped; nothing else is. Returns ``False`` for a buffer with
+    no ``#CHROM`` line at all, which is how every non-VCF fixture (the MANE GTF,
+    the HPO OBO, a ``.tbi``) correctly fails to earn the exemption.
+    """
+    headers = 0
+    for raw in text.split(b"\n"):
+        line = raw.rstrip(b"\r")
+        if not line:
+            continue
+        if line.startswith(b"##"):
+            if headers:
+                return False
+            continue
+        if line.startswith(b"#CHROM"):
+            if headers or tuple(line.split(b"\t")) != _VCF_FIXED_COLUMNS:
+                return False
+            headers = 1
+            continue
+        if line.startswith(b"#"):
+            return False
+        if headers != 1 or line.count(b"\t") != _VCF_FIXED_FIELDS - 1:
+            return False
+    return headers == 1
+
+
+def buffer_is_sites_only_vcf(data: bytes) -> bool:
+    """ADR 0012 condition 3, decided against **the exact bytes being scanned**.
+
+    This is the whole guarantee, and taking it from the right buffer is half of
+    it. The privacy risk being managed is not "real data is in the repo" — ClinVar
+    and gnomAD are public and already sit on every clinical genomics machine. It
+    is **"a file carrying per-sample genotypes got committed"**, because that is
+    what discloses an individual.
+
+    Callers pass the buffer they are about to scan or about to commit — a staged
+    blob, an index blob, a decompressed member — never a path. A path reopened
+    beside a scan is a second file: staging a genotyped fixture and then cleaning
+    the worktree copy made the audit probe one and report on the other.
+
+    **Fails closed** on everything else: a buffer at or over
+    :data:`~mva.privacy.patterns.MAX_SCAN_BYTES` may have been truncated by the
+    read cap and cannot be cleared; a gzip stream that will not fully inflate
+    cannot be cleared; a gzip inside a gzip is ambiguous and is not cleared.
+    """
+    if len(data) >= MAX_SCAN_BYTES:
+        return False
+    if data[:2] == b"\x1f\x8b":
+        plain = inflate_fully(data)
+        if plain is None or plain[:2] == b"\x1f\x8b":
+            return False
+        return _plaintext_is_sites_only_vcf(plain)
+    return _plaintext_is_sites_only_vcf(data)
 
 
 def vcf_declares_sample_columns(path: Path) -> bool:
-    """Whether a VCF's ``#CHROM`` line declares per-sample genotype columns.
+    """Whether the file at ``path`` fails to be a verified sites-only VCF.
 
-    This is ADR 0012's condition 3, and it is the whole guarantee. The privacy
-    risk being managed is not "real data is in the repo" — ClinVar and gnomAD are
-    public and already sit on every clinical genomics machine. It is **"a file
-    carrying per-sample genotypes got committed"**, because that is what
-    discloses an individual. A sites-only slice has no individual in it.
+    A path-shaped convenience over :func:`buffer_is_sites_only_vcf`, kept for
+    callers that genuinely hold nothing but a path. The audit's own checks do NOT
+    use it: they hold the buffer that is about to be committed or scanned, and
+    reopening the path beside that buffer is the bug this module was fixed for.
 
-    A conforming header has exactly 8 fixed fields; a 9th (``FORMAT``) and beyond
-    are sample columns. **Fails closed**: a file that cannot be read, or that has
-    no ``#CHROM`` line at all, is reported as declaring samples, so an unreadable
-    or malformed file never earns the exemption.
+    **Fails closed**: unreadable, missing, malformed or not-a-VCF all report
+    ``True``.
     """
-    compressed = path.suffix in {".gz", ".bgz"}
     try:
-        with gzip.open(path, "rb") if compressed else path.open("rb") as handle:
-            for _ in range(_VCF_HEADER_SCAN_LINES):
-                raw = handle.readline()
-                if not raw:
-                    break
-                if raw.startswith(b"#CHROM"):
-                    fields = raw.rstrip(b"\r\n").split(b"\t")
-                    return len(fields) > _VCF_FIXED_FIELDS
-    except (OSError, EOFError, gzip.BadGzipFile):
+        data = read_capped(path, MAX_SCAN_BYTES)
+    except OSError:
         return True
-    return True
+    return not buffer_is_sites_only_vcf(data)
 
 
-#: Index sidecars. An index holds byte offsets, never records, so it cannot
-#: disclose anything its data file does not — it therefore inherits that file's
-#: status rather than being judged on its own bytes, where the ``#CHROM`` probe
-#: would find nothing and (correctly, but uselessly) fail closed.
-_INDEX_SUFFIXES: Final[tuple[str, ...]] = (".tbi", ".csi", ".idx", ".fai")
+# ---------------------------------------------------------------------------
+# ADR 0012 conditions 1, 2 and 4: verifiable provenance
+# ---------------------------------------------------------------------------
+
+#: The committed, hash-pinned index of public releases this project fetched.
+#: Pinned here as a CONSTANT and never read out of a fixture's own metadata: a
+#: directory allowed to name its own manifest could ship that manifest too, which
+#: is precisely the general-purpose escape hatch condition 2 exists to close.
+RESOURCE_MANIFEST_RELPATH: Final[str] = "knowledge/manifests/resources.yaml"
+
+#: One provenance record per fixture directory, naming — per committed file — the
+#: manifest resource it was cut from and the regions that were cut.
+#:
+#: Why a per-directory YAML sidecar rather than an in-band marker (the shape the
+#: synthetic category uses): there is no in-band place to put it. The MANE GTF has
+#: no comment lines at all, a ``.tbi`` is binary, and ``hp.obo`` is a third
+#: format — an in-band claim would need a different, forgeable mechanism per file
+#: type. A sidecar is also the only form that shows up in review as a diff line:
+#: admitting a new file to the category means writing its name and its claimed
+#: descent where a reviewer reads them.
+#:
+#: What this does and does not buy is worth stating plainly. Naming a resource is
+#: a CLAIM, and a claim can be false — nothing offline can prove a given slice was
+#: cut from ClinVar. What the requirement removes is the silent path: a file can
+#: no longer enter the category by being dropped in a directory. It has to be
+#: named, beside a generator, against a resource the manifest records fetching.
+#: The property that actually protects the proband is still condition 3, which is
+#: a fact about the bytes.
+FIXTURE_PROVENANCE_FILENAME: Final[str] = "fixture_provenance.yaml"
+
+#: A manifest entry qualifies only with a REAL digest. ``sha256: null`` is what
+#: the manifest carries for a resource that was never successfully fetched, and
+#: a placeholder string is what a hand-edit produces.
+_SHA256_HEX: Final = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
-def _is_sample_free_reference_fixture(repo_root: Path, path: str) -> bool:
-    """ADR 0012: a public reference slice, verified to carry no sample columns.
+@dataclass(frozen=True, slots=True)
+class FixtureProvenance:
+    """One committed fixture's declared descent.
 
-    Both halves are required. The prefix says where it lives; the probe says what
-    it is. An index sidecar is resolved to the file it indexes — dropping the
-    suffix — because judging an index on its own bytes would deny the exemption
-    to every legitimate index while granting nothing extra in safety.
+    Exactly one of ``resource`` (a data fixture cut from a manifest resource) and
+    ``indexes`` (a sidecar inheriting from a sibling data fixture) is set.
+
+    An index holds byte offsets, never records, so it cannot disclose anything its
+    data file does not; it therefore inherits that file's verdict rather than
+    being judged on its own bytes, where the sites-only predicate would
+    (correctly, but uselessly) refuse it. That inheritance is DECLARED rather than
+    inferred from the file name -- ``x.vcf.gz.tbi`` is not evidence that
+    ``x.vcf.gz`` is what it indexes, and a sidecar whose named companion is absent
+    from the source under audit inherits nothing.
     """
-    if not _exempt(path, PUBLIC_REFERENCE_FIXTURE_PREFIXES):
-        return False
-    target = Path(path)
-    if target.suffix in _INDEX_SUFFIXES:
-        indexed = repo_root / str(target.with_suffix(""))
-        # Only inherit from a data file that actually exists; a stray index with
-        # no companion earns nothing.
-        return indexed.is_file() and not vcf_declares_sample_columns(indexed)
-    return not vcf_declares_sample_columns(repo_root / path)
+
+    resource: str | None
+    #: Bare file name of the sibling data fixture this sidecar indexes.
+    indexes: str | None
+    #: What was cut from the release, for a human: intervals, or the selection
+    #: rule where the release has no intervals. ADR 0012 condition 4's record.
+    regions: str
+
+
+@dataclass(frozen=True, slots=True)
+class FixtureProvenanceDoc:
+    """A validated ``fixture_provenance.yaml``."""
+
+    generator: str
+    fixtures: dict[str, FixtureProvenance]
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceFixtureVerdict:
+    """Whether ADR 0012 grants a path the public-reference exemption, and why not.
+
+    The reason is a fixed structural string, never an echo of a name, a resource
+    key or a matched byte: it is rendered into audit findings, and GP-41 says a
+    finding carries paths, counts and rule IDs only.
+    """
+
+    exempt: bool
+    reason: str
+
+
+def _load_yaml_mapping(data: bytes | None) -> dict[str, object] | None:
+    """Parse one small YAML document into a mapping, or ``None`` for anything else."""
+    if data is None:
+        return None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        doc: object = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    return {str(key): value for key, value in cast(dict[object, object], doc).items()}
+
+
+#: Memo for the parsed resource manifest, keyed on a digest of the BYTES rather
+#: than on a path: the manifest now arrives through the same loader as everything
+#: else, so two sources (worktree, index) can legitimately hold two versions of it
+#: in one audit run. A 50 KiB YAML parse per fixture file would otherwise dominate
+#: the check.
+_MANIFEST_CACHE: dict[bytes, dict[str, dict[str, object]] | None] = {}
+_MANIFEST_CACHE_MAX: Final[int] = 8
+
+
+def _manifest_resources(data: bytes | None) -> dict[str, dict[str, object]] | None:
+    """The ``resources:`` block of the committed manifest, or ``None`` if unusable."""
+    if data is None:
+        return None
+    key = hashlib.blake2b(data, digest_size=16).digest()
+    if key in _MANIFEST_CACHE:
+        return _MANIFEST_CACHE[key]
+    parsed: dict[str, dict[str, object]] | None = None
+    doc = _load_yaml_mapping(data)
+    if doc is not None:
+        raw = doc.get("resources")
+        if isinstance(raw, dict):
+            parsed = {}
+            for name, entry in cast(dict[object, object], raw).items():
+                if isinstance(entry, dict):
+                    parsed[str(name)] = {
+                        str(k): v for k, v in cast(dict[object, object], entry).items()
+                    }
+    if len(_MANIFEST_CACHE) >= _MANIFEST_CACHE_MAX:
+        _MANIFEST_CACHE.clear()
+    _MANIFEST_CACHE[key] = parsed
+    return parsed
+
+
+def _is_bare_name(value: object) -> bool:
+    """A non-empty file name with no path structure in it."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and "/" not in value
+        and "\\" not in value
+        and value not in {".", ".."}
+    )
+
+
+def _regions_text(value: object) -> str:
+    """Flatten a ``regions:`` declaration to one line, or ``""`` if unusable."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in cast(list[object], value)]
+        return "; ".join(part for part in parts if part)
+    return ""
+
+
+def _parse_fixture_entry(raw_entry: object) -> tuple[FixtureProvenance | None, str]:
+    """Validate one ``fixtures:`` entry. ``(None, reason)`` for anything malformed."""
+    if not isinstance(raw_entry, dict):
+        return None, "a fixture entry is not a mapping"
+    entry = {str(k): v for k, v in cast(dict[object, object], raw_entry).items()}
+    resource = entry.get("resource")
+    indexes = entry.get("indexes")
+    if (resource is None) == (indexes is None):
+        return None, "a fixture entry does not declare exactly one of `resource:` or `indexes:`"
+    if resource is not None:
+        if not isinstance(resource, str) or not resource.strip():
+            return None, "a `resource:` is not a manifest resource name"
+        regions = _regions_text(entry.get("regions"))
+        if not regions:
+            return None, "a data fixture does not record `regions:` (condition 4)"
+        return FixtureProvenance(resource, None, regions), "declared"
+    if not _is_bare_name(indexes):
+        return None, "an `indexes:` does not name a sibling fixture by bare file name"
+    return FixtureProvenance(None, cast(str, indexes), ""), "declared"
+
+
+def _load_fixture_provenance(
+    prefix: str, *, load: Callable[[str], bytes | None]
+) -> tuple[FixtureProvenanceDoc | None, str]:
+    """Parse and VALIDATE one fixture directory's provenance record.
+
+    Read through ``load`` like every other input, and for the same reason: the
+    record is part of the exemption decision, so taking it from the worktree while
+    judging an index blob would recreate the staged-versus-worktree divergence one
+    level up. A directory can legitimately have one record on disk and a different
+    one staged.
+
+    Every deviation is fatal for the whole directory and returns ``(None, reason)``.
+    A record that is partly wrong is a record nobody is maintaining, and the
+    failure direction that matters here is refusing an exemption, not granting one.
+    The reason is a fixed string — see :class:`ReferenceFixtureVerdict`.
+    """
+    doc = _load_yaml_mapping(load(prefix + FIXTURE_PROVENANCE_FILENAME))
+    if doc is None:
+        return None, f"no readable {FIXTURE_PROVENANCE_FILENAME} beside it"
+    if doc.get("manifest") != RESOURCE_MANIFEST_RELPATH:
+        return None, f"the record does not point `manifest:` at {RESOURCE_MANIFEST_RELPATH}"
+    generator = doc.get("generator")
+    if not _is_bare_name(generator):
+        return None, "`generator:` is missing or is not a bare file name"
+    generator = cast(str, generator)
+    if load(prefix + generator) is None:
+        return None, "the declared generator is not present beside the fixtures (condition 4)"
+    raw_fixtures = doc.get("fixtures")
+    if not isinstance(raw_fixtures, dict):
+        return None, "`fixtures:` is missing or is not a mapping"
+
+    parsed: dict[str, FixtureProvenance] = {}
+    for raw_name, raw_entry in cast(dict[object, object], raw_fixtures).items():
+        if not _is_bare_name(raw_name):
+            return None, "a fixture key is not a bare file name"
+        entry, reason = _parse_fixture_entry(raw_entry)
+        if entry is None:
+            return None, reason
+        parsed[str(raw_name)] = entry
+
+    for entry_value in parsed.values():
+        if entry_value.indexes is None:
+            continue
+        target = parsed.get(entry_value.indexes)
+        if target is None or target.resource is None:
+            return None, "an `indexes:` names a file that is not itself a declared data fixture"
+    return FixtureProvenanceDoc(generator, parsed), "declared"
+
+
+@dataclass(frozen=True, slots=True)
+class PinnedResource:
+    """One manifest entry that is actually usable as a fixture's ancestor."""
+
+    name: str
+    #: Path relative to the external resource root, as the manifest records it.
+    path: str
+    sha256: str
+
+
+def pinned_resource(repo_root: Path, resource: str) -> PinnedResource:
+    """The manifest entry ``resource`` names, if it is a real hash pin.
+
+    Raises ``LookupError`` when the manifest is unreadable, the resource is not
+    registered, it is not ``status: fetched``, or its digest is not a real
+    sha256 — the same four conditions the audit refuses an exemption for, so the
+    generator and the audit cannot drift into disagreeing about what "pinned"
+    means.
+    """
+    resources = _manifest_resources(worktree_loader(repo_root)(RESOURCE_MANIFEST_RELPATH))
+    if resources is None:
+        raise LookupError(f"cannot read {RESOURCE_MANIFEST_RELPATH} under {repo_root}")
+    record = resources.get(resource)
+    if record is None:
+        raise LookupError(f"{resource!r} is not registered in {RESOURCE_MANIFEST_RELPATH}")
+    if record.get("status") != "fetched":
+        raise LookupError(f"{resource!r} is not recorded as fetched; acquire it first")
+    digest = record.get("sha256")
+    if not isinstance(digest, str) or _SHA256_HEX.match(digest) is None:
+        raise LookupError(f"{resource!r} carries no real sha256 in the manifest")
+    path = record.get("path")
+    if not isinstance(path, str) or not path:
+        raise LookupError(f"{resource!r} records no path in the manifest")
+    return PinnedResource(resource, path, digest)
+
+
+def pinned_source(
+    repo_root: Path,
+    resource: str,
+    *,
+    source: Path | None = None,
+    resource_root: Path | None = None,
+) -> Path:
+    """Locate and HASH-VERIFY the release a fixture generator is about to cut from.
+
+    ADR 0012 condition 2 is a claim the privacy audit *checks* and this function
+    is where a generator *makes it true*. The audit can only see that a fixture
+    names a resource the manifest records fetching; nothing in the committed bytes
+    proves the slice came from that release. Verifying the input here is what puts
+    something real behind the claim.
+
+    It closes the concrete hole in generators that took ``--source`` and read
+    whatever was there: pointed at the proband's VCF, such a generator produced a
+    file the audit would then clear on the strength of a ``resource: clinvar_vcf``
+    line, and nothing in the repository would disagree. ``--source`` still exists,
+    because a release may legitimately live outside the resource root — but it now
+    has to hash to the pinned digest like everything else.
+
+    ``resource_root`` is a parameter rather than an environment lookup because
+    where the acquisition tool puts its downloads is that tool's business
+    (``tools.acquire.fetch.resolve_resource_root``), and this package must not
+    grow a second opinion about it.
+    """
+    pin = pinned_resource(repo_root, resource)
+    candidate = source if source is not None else None
+    if candidate is None:
+        if resource_root is None:
+            raise LookupError(
+                f"pass --source, or --resource-root / $MVA_RESOURCES so {pin.path!r} can be found"
+            )
+        candidate = resource_root / pin.path
+    if not candidate.is_file():
+        raise LookupError(f"the pinned release for {resource!r} is not at the path given")
+    actual = hash_file(candidate)
+    if actual != pin.sha256:
+        raise LookupError(
+            f"sha256 mismatch for {resource!r}: the manifest pins {pin.sha256}, "
+            f"the file given hashes to {actual}. Refusing to cut a public-reference "
+            "fixture from bytes that are not the pinned release."
+        )
+    return candidate
+
+
+def worktree_loader(repo_root: Path) -> Callable[[str], bytes | None]:
+    """Read repo-relative paths from the WORKTREE, capped and memoised.
+
+    ``None`` for anything that is not a readable regular file — a symlink
+    included, since following one out of the repository is how the containment
+    checks get defeated.
+    """
+    seen: dict[str, bytes | None] = {}
+
+    def load(path: str) -> bytes | None:
+        if path not in seen:
+            candidate = repo_root / path
+            try:
+                data = (
+                    None
+                    if candidate.is_symlink() or not candidate.is_file()
+                    else read_capped(candidate, MAX_SCAN_BYTES)
+                )
+            except OSError:
+                data = None
+            seen[path] = data
+        return seen[path]
+
+    return load
+
+
+def index_loader(repo_root: Path) -> Callable[[str], bytes | None]:
+    """Read repo-relative paths from the git INDEX, capped and memoised.
+
+    The index — not the worktree — is what ``git ls-files`` enumerates and what a
+    commit will contain, so it is the only source an exemption for a tracked or
+    staged path may be decided from. Memoised because resolving one fixture reads
+    up to four blobs (the record, the generator, the manifest, the data file) and
+    each is two subprocesses.
+    """
+    seen: dict[str, bytes | None] = {}
+
+    def load(path: str) -> bytes | None:
+        if path not in seen:
+            data: bytes | None = None
+            code, out = _git(repo_root, ["rev-parse", f":{path}"])
+            if code == 0:
+                sha = out.decode("ascii", errors="replace").strip()
+                blob_code, blob = _git(repo_root, ["cat-file", "blob", sha])
+                if blob_code == 0:
+                    data = blob[:MAX_SCAN_BYTES]
+            seen[path] = data
+        return seen[path]
+
+    return load
+
+
+def _reference_fixture_declaration(
+    path: str, *, load: Callable[[str], bytes | None]
+) -> tuple[ReferenceFixtureVerdict, str]:
+    """ADR 0012 conditions 1, 2 and 4 for one repo-relative path.
+
+    Returns the verdict and the repo-relative path of the DATA file the entry
+    stands for — itself, or the fixture an index sidecar declares it indexes.
+    Condition 3 is **not** decided here: it is a property of bytes, and this
+    function reads none of the fixture's own.
+    """
+    prefix = next((p for p in PUBLIC_REFERENCE_FIXTURE_PREFIXES if path.startswith(p)), None)
+    if prefix is None:
+        return ReferenceFixtureVerdict(False, "not under a public-reference fixture prefix"), path
+    name = path[len(prefix) :]
+    if "/" in name:
+        return (
+            ReferenceFixtureVerdict(
+                False, "reference fixtures are declared per directory; this one is nested"
+            ),
+            path,
+        )
+    doc, reason = _load_fixture_provenance(prefix, load=load)
+    if doc is None:
+        return ReferenceFixtureVerdict(False, reason), path
+    entry = doc.fixtures.get(name)
+    if entry is None:
+        return (
+            ReferenceFixtureVerdict(False, f"not declared in {FIXTURE_PROVENANCE_FILENAME}"),
+            path,
+        )
+    resource_name = entry.resource
+    data_path = path
+    if resource_name is None:
+        indexed = entry.indexes or ""
+        target = doc.fixtures.get(indexed)
+        if target is None or target.resource is None:
+            # Unreachable through _load_fixture_provenance, which rejects such a
+            # document outright; kept so this function does not depend on that.
+            return ReferenceFixtureVerdict(False, "index sidecar names no data fixture"), path
+        resource_name = target.resource
+        data_path = prefix + indexed
+    resources = _manifest_resources(load(RESOURCE_MANIFEST_RELPATH))
+    if resources is None:
+        return (
+            ReferenceFixtureVerdict(False, "the resource manifest is missing or unreadable"),
+            data_path,
+        )
+    record = resources.get(resource_name)
+    if record is None:
+        return (
+            ReferenceFixtureVerdict(
+                False, "the declared resource is not registered in the manifest"
+            ),
+            data_path,
+        )
+    if record.get("status") != "fetched":
+        return (
+            ReferenceFixtureVerdict(False, "the declared resource is not recorded as fetched"),
+            data_path,
+        )
+    digest = record.get("sha256")
+    if not isinstance(digest, str) or _SHA256_HEX.match(digest) is None:
+        return (
+            ReferenceFixtureVerdict(False, "the declared resource carries no real sha256"),
+            data_path,
+        )
+    return (
+        ReferenceFixtureVerdict(
+            True, "descent declared from a fetched, hash-pinned public release"
+        ),
+        data_path,
+    )
+
+
+def reference_fixture_provenance(
+    path: str, *, load: Callable[[str], bytes | None]
+) -> ReferenceFixtureVerdict:
+    """ADR 0012 conditions 1, 2 and 4 for one repo-relative path — NOT condition 3.
+
+    This is the half that can be decided without the fixture's own bytes. The
+    other half is :func:`buffer_is_sites_only_vcf`, applied by the caller to
+    whichever buffer it is actually handling.
+    """
+    return _reference_fixture_declaration(path, load=load)[0]
+
+
+def reference_fixture_exemption(
+    path: str, *, load: Callable[[str], bytes | None]
+) -> ReferenceFixtureVerdict:
+    """All four ADR 0012 conditions, for a caller that does not hold the bytes.
+
+    ``load`` returns the bytes of a repo-relative path **from the source under
+    audit** — the git index for the tracked and staged checks, the worktree for a
+    filesystem walk. It is a parameter rather than an ``open()`` because the defect
+    this replaces probed the worktree while the check reported on the staged blob:
+    two different files, one verdict, and the genotypes were in the one nobody
+    looked at.
+
+    An index sidecar is resolved to the fixture it DECLARES it indexes and judged
+    on that file's bytes from the same source. A sidecar whose companion is absent
+    from that source earns nothing.
+    """
+    verdict, data_path = _reference_fixture_declaration(path, load=load)
+    if not verdict.exempt:
+        return verdict
+    data = load(data_path)
+    if data is None:
+        return ReferenceFixtureVerdict(
+            False, "the data file it stands for is absent or unreadable in the source under audit"
+        )
+    if not buffer_is_sites_only_vcf(data):
+        return ReferenceFixtureVerdict(
+            False, "the bytes are not a single sites-only VCF (condition 3)"
+        )
+    return ReferenceFixtureVerdict(
+        True, "sites-only VCF with declared descent from a hash-pinned public release"
+    )
 
 
 #: The only places a ``!`` negation may re-admit a FILE.
@@ -826,15 +1409,17 @@ def _resolve_context(
     if severity != "fail":
         return severity, note
     # Checked BEFORE the allowlist gate, and deliberately: this condition does not
-    # rest on the path allowlist at all. _is_sample_free_reference_fixture already
-    # requires a public-reference prefix AND verifies against the file's own
-    # #CHROM line that it declares no sample columns. That is a stronger claim
-    # than allowlist membership, so it stands on its own (ADR 0012).
+    # rest on the path allowlist at all. By the time it is true, all four ADR 0012
+    # conditions hold -- an allowlisted prefix, a declared descent from a manifest
+    # resource recorded as fetched with a real sha256, a generator beside it, and
+    # a verification against THESE bytes that they form one sites-only VCF. That
+    # is a strictly stronger claim than allowlist membership, so it stands alone.
     if sites_only_reference and rule_id in SITES_ONLY_DOWNGRADABLE_RULES:
         return "warn", (
-            f"{note} Downgraded: a public reference slice whose #CHROM line declares "
-            "NO sample columns, verified against the bytes (ADR 0012). It holds real "
-            "public records but no individual."
+            f"{note} Downgraded: a declared public reference slice, and this exact "
+            "buffer is a single sites-only VCF -- one #CHROM line of exactly 8 "
+            "columns, no FORMAT, no wider row (ADR 0012). It holds real public "
+            "records but no individual."
         )
     if not allowlisted:
         return severity, note
@@ -858,7 +1443,7 @@ def scan_bytes(
     path_label: str,
     allowlisted: bool = False,
     hpo_is_constant: bool = False,
-    sites_only_reference: bool = False,
+    reference_fixture: bool = False,
     _gzip_depth: int = 0,
 ) -> list[Finding]:
     """Apply the rule battery to one buffer and return content-free findings.
@@ -890,6 +1475,13 @@ def scan_bytes(
     # 0012 the exemptions do not share a code path, so widening one cannot widen
     # the other by accident.
     hpo_constant = hpo_is_constant and not has_phenotype_profile_shape(data)
+    # ADR 0012 condition 3, decided against THIS buffer and no other. The caller
+    # supplies only the provenance half (`reference_fixture`, a claim about the
+    # path); the sites-only half is never taken from a path reopened beside the
+    # scan, because a staged blob and its worktree file are routinely different
+    # files -- which is exactly how a genotyped fixture used to be staged and then
+    # cleaned on disk, leaving the audit probing one file and reporting on another.
+    sites_only_reference = reference_fixture and buffer_is_sites_only_vcf(data)
 
     for rule in RULES:
         spans: list[tuple[int, int]] = []
@@ -968,7 +1560,7 @@ def scan_bytes(
             path_label=path_label,
             allowlisted=allowlisted,
             hpo_is_constant=hpo_is_constant,
-            sites_only_reference=sites_only_reference,
+            reference_fixture=reference_fixture,
             gzip_depth=_gzip_depth,
         )
     )
@@ -988,7 +1580,7 @@ def _scan_gzip_member(
     path_label: str,
     allowlisted: bool,
     hpo_is_constant: bool,
-    sites_only_reference: bool,
+    reference_fixture: bool,
     gzip_depth: int,
 ) -> list[Finding]:
     """Inflate a gzip member and run the whole battery over the plaintext.
@@ -1027,7 +1619,7 @@ def _scan_gzip_member(
             path_label=path_label,
             allowlisted=allowlisted,
             hpo_is_constant=hpo_is_constant,
-            sites_only_reference=sites_only_reference,
+            reference_fixture=reference_fixture,
             _gzip_depth=gzip_depth + 1,
         )
     ]
@@ -1040,7 +1632,7 @@ def scan_file(
     path_label: str,
     allowlisted: bool,
     hpo_is_constant: bool = False,
-    sites_only_reference: bool = False,
+    reference_fixture: bool = False,
 ) -> list[Finding]:
     """Scan one file on disk, capped, in bytes, never decoding for detection."""
     try:
@@ -1067,7 +1659,7 @@ def scan_file(
         path_label=path_label,
         allowlisted=allowlisted,
         hpo_is_constant=hpo_is_constant,
-        sites_only_reference=sites_only_reference,
+        reference_fixture=reference_fixture,
     )
     if size > MAX_SCAN_BYTES:
         findings.append(
@@ -1107,6 +1699,21 @@ def _configured_workspace(workspace: Path | None) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+def _reference_exemption_note(verdict: ReferenceFixtureVerdict, path: str) -> str:
+    """Why a file under a reference-fixture prefix did NOT earn the exemption.
+
+    Attached to the extension findings so a refusal explains itself: without it a
+    typo in ``fixture_provenance.yaml`` and a genotyped fixture produce the same
+    opaque failure, and the first one gets "fixed" by deleting the check.
+    """
+    if not _exempt(path, PUBLIC_REFERENCE_FIXTURE_PREFIXES):
+        return ""
+    return (
+        " It is under a public-reference fixture prefix but is NOT exempt "
+        f"(ADR 0012): {verdict.reason}."
+    )
+
+
 def check_git_tracked_sensitive(repo_root: Path, *, strict: bool = False) -> CheckResult:
     """Tracked files with a sensitive extension.
 
@@ -1114,6 +1721,11 @@ def check_git_tracked_sensitive(repo_root: Path, *, strict: bool = False) -> Che
     already covers. It does not: ignore rules are consulted only for *untracked*
     files. Once a path is in the index, git tracks it forever regardless of any
     pattern, and `git rm --cached` leaves it recoverable in history.
+
+    The ADR 0012 exemption is decided from the INDEX blob, never from the file on
+    disk. ``git ls-files`` reports what the index holds, and the index is what a
+    commit will carry; clearing a path on the strength of a worktree copy that
+    was cleaned after staging is the same defect twice.
     """
     name = "git_tracked_sensitive"
     if not _git_available(repo_root):
@@ -1122,24 +1734,29 @@ def check_git_tracked_sensitive(repo_root: Path, *, strict: bool = False) -> Che
     if code != 0:
         return _unavailable(name, "git ls-files failed", strict=strict)
     paths = _split_nul(out)
-    findings = [
-        Finding(
-            check=name,
-            path=path,
-            line=None,
-            rule_id=None,
-            span_len=None,
-            severity="fail",
-            detail=(
-                "Tracked file has a patient-data extension. .gitignore does not "
-                "apply to tracked paths. Remove it from the index and purge history."
-            ),
+    load = index_loader(repo_root)
+    findings: list[Finding] = []
+    for path in sorted(paths):
+        if not is_sensitive_extension(Path(path)) or _exempt(path, TRACKED_EXEMPT_PREFIXES):
+            continue
+        verdict = reference_fixture_exemption(path, load=load)
+        if verdict.exempt:
+            continue
+        findings.append(
+            Finding(
+                check=name,
+                path=path,
+                line=None,
+                rule_id=None,
+                span_len=None,
+                severity="fail",
+                detail=(
+                    "Tracked file has a patient-data extension. .gitignore does not "
+                    "apply to tracked paths. Remove it from the index and purge history."
+                    + _reference_exemption_note(verdict, path)
+                ),
+            )
         )
-        for path in sorted(paths)
-        if is_sensitive_extension(Path(path))
-        and not _exempt(path, TRACKED_EXEMPT_PREFIXES)
-        and not _is_sample_free_reference_fixture(repo_root, path)
-    ]
     return _result(
         name,
         findings,
@@ -1170,16 +1787,18 @@ def check_git_staged_sensitive(repo_root: Path, *, strict: bool = False) -> Chec
 
     paths = sorted(_split_nul(out))
     findings: list[Finding] = []
+    load = index_loader(repo_root)
     for path in paths:
         # The pre-commit hook runs this subset, so the path rule has to be here
         # too: a filename that IS the identifier is committable without the file
         # containing a single byte of genomic content.
         findings.extend(_path_findings(path, check=name))
         allowlisted = _exempt(path, CONTENT_ALLOWLIST_PREFIXES)
+        verdict = reference_fixture_exemption(path, load=load)
         if (
             is_sensitive_extension(Path(path))
             and not _exempt(path, TRACKED_EXEMPT_PREFIXES)
-            and not _is_sample_free_reference_fixture(repo_root, path)
+            and not verdict.exempt
         ):
             findings.append(
                 Finding(
@@ -1189,24 +1808,28 @@ def check_git_staged_sensitive(repo_root: Path, *, strict: bool = False) -> Chec
                     rule_id=None,
                     span_len=None,
                     severity="fail",
-                    detail="Staged file has a patient-data extension. Unstage it.",
+                    detail=(
+                        "Staged file has a patient-data extension. Unstage it."
+                        + _reference_exemption_note(verdict, path)
+                    ),
                 )
             )
-        sha_code, sha_out = _git(repo_root, ["rev-parse", f":{path}"])
-        if sha_code != 0:
+        blob = load(path)
+        if blob is None:
             continue
-        sha = sha_out.decode("ascii", errors="replace").strip()
-        blob_code, blob = _git(repo_root, ["cat-file", "blob", sha])
-        if blob_code != 0:
-            continue
+        # `reference_fixture` carries ONLY the provenance half of ADR 0012.
+        # scan_bytes decides the sites-only half against `blob` itself, which is
+        # the buffer about to be committed -- the worktree file of the same name
+        # may have been cleaned since it was staged, and used to be what decided
+        # this.
         findings.extend(
             scan_bytes(
-                blob[:MAX_SCAN_BYTES],
+                blob,
                 check=name,
                 path_label=path,
                 allowlisted=allowlisted,
                 hpo_is_constant=_exempt(path, HPO_CODE_PREFIXES),
-                sites_only_reference=_is_sample_free_reference_fixture(repo_root, path),
+                reference_fixture=reference_fixture_provenance(path, load=load).exempt,
             )
         )
     return _result(name, findings, f"{len(paths)} staged blob(s) inspected.", strict=strict)
@@ -1530,6 +2153,7 @@ def check_content_scan(repo_root: Path, *, strict: bool = False) -> CheckResult:
     if not _git_available(repo_root):
         return _unavailable(name, "not a git repository (or git unavailable)", strict=strict)
     paths = _scannable_paths(repo_root)
+    load = worktree_loader(repo_root)
     findings: list[Finding] = []
     scanned = 0
     for path in paths:
@@ -1547,7 +2171,7 @@ def check_content_scan(repo_root: Path, *, strict: bool = False) -> CheckResult:
                 path_label=path,
                 allowlisted=_exempt(path, CONTENT_ALLOWLIST_PREFIXES),
                 hpo_is_constant=_exempt(path, HPO_CODE_PREFIXES),
-                sites_only_reference=_is_sample_free_reference_fixture(repo_root, path),
+                reference_fixture=reference_fixture_provenance(path, load=load).exempt,
             )
         )
     fails = sum(1 for f in findings if f.severity == "fail")
@@ -1627,6 +2251,116 @@ def check_synthetic_fixtures_marked(repo_root: Path, *, strict: bool = False) ->
                 )
             )
     return _result(name, findings, f"{checked} fixture file(s) checked.", strict=strict)
+
+
+def check_reference_fixtures_declared(repo_root: Path, *, strict: bool = False) -> CheckResult:
+    """Every file under a public-reference fixture prefix declares its descent.
+
+    ADR 0012 conditions 1, 2 and 4, enforced the way ``synthetic_fixtures_marked``
+    enforces the synthetic marker: an UNDECLARED file **fails** rather than merely
+    losing an exemption it never asked for.
+
+    The distinction is the whole point of the check. Without it, provenance is
+    only ever consulted when something else already wants to soften a finding, so
+    a file that trips no other rule -- a sites-only export with a harmless
+    extension, a stray index, a second copy of a slice -- enters these directories
+    in silence, and the ``.gitignore`` negations that re-admit them are the widest
+    doors in the repository. With it, joining the category costs a named entry in
+    a committed file, beside a committed generator, against a resource the
+    manifest records having fetched with a real digest.
+
+    What it does NOT establish, stated plainly because the ADR's condition 2 is
+    easy to over-read: naming a resource is a CLAIM. Nothing available offline
+    proves a given slice was cut from ClinVar rather than from a patient. What the
+    requirement removes is the *silent* path in. The property that actually
+    protects an individual is condition 3 -- no sample columns, no genotypes --
+    which is a fact about the bytes and is checked against them
+    (:func:`buffer_is_sites_only_vcf`), not here.
+    """
+    name = "reference_fixtures_declared"
+    load = worktree_loader(repo_root)
+    findings: list[Finding] = []
+    checked = 0
+    for prefix in PUBLIC_REFERENCE_FIXTURE_PREFIXES:
+        directory = repo_root / prefix.rstrip("/")
+        if not directory.is_dir():
+            continue
+        doc, reason = _load_fixture_provenance(prefix, load=load)
+        if doc is None:
+            findings.append(
+                Finding(
+                    check=name,
+                    path=prefix,
+                    line=None,
+                    rule_id=None,
+                    span_len=None,
+                    severity="fail",
+                    detail=(
+                        "This directory re-admits files that .gitignore otherwise "
+                        f"denies, and it has no usable provenance record: {reason}. "
+                        f"Add {FIXTURE_PROVENANCE_FILENAME} naming, per committed "
+                        "file, the manifest resource it was cut from and the regions "
+                        "that were cut (ADR 0012 conditions 2 and 4). Until then no "
+                        "file here can earn the public-reference exemption."
+                    ),
+                )
+            )
+            continue
+        exempt_names = {FIXTURE_PROVENANCE_FILENAME, doc.generator, ".DS_Store"}
+        for candidate in sorted(directory.rglob("*")):
+            if not candidate.is_file() or candidate.name in exempt_names:
+                continue
+            relative = candidate.relative_to(directory)
+            if any(part in SKIP_DIR_NAMES for part in relative.parts):
+                continue
+            checked += 1
+            label = candidate.relative_to(repo_root).as_posix()
+            entry = doc.fixtures.get(candidate.name) if len(relative.parts) == 1 else None
+            if entry is not None and entry.indexes and not (directory / entry.indexes).is_file():
+                findings.append(
+                    Finding(
+                        check=name,
+                        path=label,
+                        line=None,
+                        rule_id=None,
+                        span_len=None,
+                        severity="fail",
+                        detail=(
+                            "Orphan index: it declares the fixture it indexes, and "
+                            "that fixture is not here. An index inherits its data "
+                            "file's verdict, so an index with no data file inherits "
+                            "nothing and must not be committed alone."
+                        ),
+                    )
+                )
+                continue
+            verdict = reference_fixture_provenance(label, load=load)
+            if verdict.exempt:
+                continue
+            findings.append(
+                Finding(
+                    check=name,
+                    path=label,
+                    line=None,
+                    rule_id=None,
+                    span_len=None,
+                    severity="fail",
+                    detail=(
+                        "File in a public-reference fixture directory without "
+                        f"verifiable provenance: {verdict.reason}. Declare it in "
+                        f"{FIXTURE_PROVENANCE_FILENAME} against a resource the "
+                        "manifest records as fetched with a real sha256, or remove "
+                        "it. A directory whose .gitignore negations re-admit genomic "
+                        "formats is exactly where an undeclared file must fail."
+                    ),
+                )
+            )
+    return _result(
+        name,
+        findings,
+        f"{checked} reference fixture file(s) checked for declared provenance.",
+        strict=strict,
+    )
 
 
 def check_notebook_output_purity(repo_root: Path, *, strict: bool = False) -> CheckResult:
@@ -1741,6 +2475,29 @@ class _CaptureHandler(logging.Handler):
             self._sink.append("<format-error>")
 
 
+def _registry_handlers() -> list[logging.Handler]:
+    """Every handler attached ANYWHERE in the logger registry, root's first.
+
+    The probe swaps each one's ``emit`` for a capture, so containment of the
+    canaries is structural rather than a consequence of the control being
+    measured. Looking only at ``root.handlers`` left a handler attached to a
+    library's own logger free to write a canary to the terminal for real, and the
+    probe covered that gap by arming redaction first -- which is precisely the
+    side effect that made this check report a different answer on its second run
+    in the same process.
+    """
+    handlers: list[logging.Handler] = list(logging.getLogger().handlers)
+    seen = {id(handler) for handler in handlers}
+    for entry in list(logging.Logger.manager.loggerDict.values()):
+        if not isinstance(entry, logging.Logger):
+            continue  # a PlaceHolder, which holds no handlers
+        for handler in entry.handlers:
+            if id(handler) not in seen:
+                seen.add(id(handler))
+                handlers.append(handler)
+    return handlers
+
+
 def check_log_redaction_probe(*, strict: bool = False) -> CheckResult:
     """Push real canaries through the CONFIGURED logging stack and look for survivors.
 
@@ -1772,7 +2529,7 @@ def check_log_redaction_probe(*, strict: bool = False) -> CheckResult:
     swapped: list[tuple[logging.Handler, bool, Any]] = []
 
     root.addHandler(probe)
-    for handler in list(root.handlers):
+    for handler in _registry_handlers():
         if handler is probe:
             continue
         had_own = "emit" in handler.__dict__
@@ -1789,13 +2546,27 @@ def check_log_redaction_probe(*, strict: bool = False) -> CheckResult:
 
         cast(Any, handler).emit = _capture_for(handler)
 
-    # ASSERT, THEN install. The probe used to call install_redaction() before
-    # measuring anything, which made it structurally incapable of reporting the
-    # one failure it exists to report: that the application never armed GP-42.
-    # It measured a stack it had just repaired and always found it clean.
+    # OBSERVE, AND CHANGE NOTHING. The probe used to call install_redaction()
+    # here, which cost it both of the properties it needs:
+    #
+    # * it could not report the one failure it exists to report -- that the
+    #   application never armed GP-42 -- because by the time it looked it had
+    #   repaired the stack itself. That half was fixed by reading the state
+    #   first; the install stayed, and left the second half broken:
+    # * it MUTATED what it measures, so its answer depended on execution history
+    #   rather than on inputs. The first audit in a process reported "NOT armed"
+    #   and armed it; every later audit in that process reported "armed". The
+    #   report is a registered artifact (`privacy/privacy_audit.md`), so two
+    #   pipeline runs in one process produced two different files and GP-30's
+    #   byte-identity claim was false -- in exactly the situation where someone
+    #   re-runs a submission to check reproducibility.
+    #
+    # Containment of the canaries does not need the install: every handler in the
+    # registry has had its `emit` swapped for a capture above. Arming GP-42 is
+    # the composition root's job (`mva.cli._install_privacy_guards`), which is
+    # what this check exists to verify it did.
     armed_before = redaction_installed()
     unfiltered = unfiltered_handlers()
-    install_redaction()
 
     logger = logging.getLogger("mva.privacy.audit.canary")
     logger.setLevel(logging.NOTSET)
@@ -1975,6 +2746,7 @@ STAGED_CHECKS: Final[tuple[str, ...]] = (
     "gitignore_effectiveness",
     "gitignore_negation_safety",
     "synthetic_fixtures_marked",
+    "reference_fixtures_declared",
     "notebook_output_purity",
     "log_redaction_probe",
 )
@@ -2011,6 +2783,7 @@ def run_audit(
             check_gitignore_effectiveness(root, strict=strict),
             check_gitignore_negation_safety(root, strict=strict),
             check_synthetic_fixtures_marked(root, strict=strict),
+            check_reference_fixtures_declared(root, strict=strict),
             check_notebook_output_purity(root, strict=strict),
             check_log_redaction_probe(strict=strict),
         ]
@@ -2024,6 +2797,7 @@ def run_audit(
             check_symlink_escape(root, workspace=workspace, strict=strict),
             check_content_scan(root, strict=strict),
             check_synthetic_fixtures_marked(root, strict=strict),
+            check_reference_fixtures_declared(root, strict=strict),
             check_notebook_output_purity(root, strict=strict),
             check_log_redaction_probe(strict=strict),
             check_cloud_sync_location(root, workspace=workspace, strict=strict),

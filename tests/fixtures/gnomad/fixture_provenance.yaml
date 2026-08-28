@@ -1,0 +1,30 @@
+# ADR 0012 provenance record for the gnomAD adapter fixtures. See
+# tests/fixtures/clinvar/fixture_provenance.yaml for what the audit does with it.
+#
+# Regenerate with:
+#
+#   uv run python tests/fixtures/gnomad/make_fixture.py
+manifest: knowledge/manifests/resources.yaml
+generator: make_fixture.py
+fixtures:
+  gnomad.exomes.v4.1.sites.chr21.slice.vcf.bgz:
+    resource: gnomad_exomes_chr21
+    regions:
+      # Fourteen windows on chr21, each chosen for one record shape the adapter
+      # must get right; the generator's module docstring records which and why.
+      - chr21:5031903-5031916
+      - chr21:5031933-5031937
+      - chr21:5031982-5031993
+      - chr21:5033362-5033368
+      - chr21:5033393-5033397
+      - chr21:5033452-5033456
+      - chr21:5035215-5035226
+      - chr21:5035655-5035661
+      - chr21:5036075-5036081
+      - chr21:6086418-6086424
+      - chr21:9027126-9027130
+      - chr21:9027273-9027277
+      - chr21:9810548-9810552
+      - chr21:9810833-9810837
+  gnomad.exomes.v4.1.sites.chr21.slice.vcf.bgz.tbi:
+    indexes: gnomad.exomes.v4.1.sites.chr21.slice.vcf.bgz

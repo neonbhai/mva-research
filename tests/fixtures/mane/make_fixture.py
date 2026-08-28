@@ -101,8 +101,30 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import os
 import re
 from pathlib import Path
+
+from mva.config import find_repo_root
+from mva.privacy.audit import pinned_source
+
+
+def _default_resource_root() -> Path | None:
+    """``$MVA_RESOURCES``, expanded, if it is set.
+
+    Where the acquisition tool puts its downloads is that tool's business
+    (``tools.acquire.fetch.resolve_resource_root``); this only reads the same
+    environment variable rather than growing a second opinion about the default.
+    """
+    raw = os.environ.get("MVA_RESOURCES")
+    return Path(raw).expanduser() if raw else None
+
+
+#: The manifest resources these fixtures are cut from. Each must match the
+#: ``resource:`` recorded for it in ``fixture_provenance.yaml``, which is what
+#: the privacy audit reads.
+GTF_RESOURCE = "mane_gtf"
+SUMMARY_RESOURCE = "mane_summary"
 
 #: (contig as spelled in the GTF, 1-based inclusive start, 1-based inclusive end).
 REGIONS: tuple[tuple[str, int, int], ...] = (
@@ -183,13 +205,37 @@ def _write_summary(summary_path: Path, out_path: Path, gene_ids: set[str]) -> in
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Cut the committed MANE test slice.")
-    parser.add_argument("--gtf", required=True, type=Path, help="MANE.*.ensembl_genomic.gtf.gz")
-    parser.add_argument("--summary", required=True, type=Path, help="MANE.*.summary.txt.gz")
+    parser.add_argument(
+        "--gtf",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the pinned GTF release. Optional: resolved from the manifest "
+            "under --resource-root. Either way its sha256 must match the pin."
+        ),
+    )
+    parser.add_argument(
+        "--summary",
+        type=Path,
+        default=None,
+        help="Path to the pinned summary release; hash-verified like --gtf.",
+    )
+    parser.add_argument(
+        "--resource-root",
+        type=Path,
+        default=_default_resource_root(),
+        help="External resource root holding the acquired releases. Defaults to $MVA_RESOURCES.",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
 
-    gtf_path: Path = args.gtf
-    summary_path: Path = args.summary
+    repo_root = find_repo_root()
+    gtf_path = pinned_source(
+        repo_root, GTF_RESOURCE, source=args.gtf, resource_root=args.resource_root
+    )
+    summary_path = pinned_source(
+        repo_root, SUMMARY_RESOURCE, source=args.summary, resource_root=args.resource_root
+    )
     out_dir: Path = args.out_dir
 
     gene_ids = _selected_gene_ids(gtf_path)

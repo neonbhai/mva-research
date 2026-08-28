@@ -454,3 +454,231 @@ contained changes worth making anyway.
   were being edited concurrently while this ran.
 - **Annotation throughput.** Same reason. Note that it is the stage immediately
   after the one that already exhausts memory.
+
+---
+
+## 8. After: the streaming ingest, measured
+
+**Appended, not substituted.** Everything above §7 is the pre-change measurement
+and stands as written. This section reports what the same harness measures
+against the same phantom after `reader.py` and `qc.py` were rewritten to stream.
+
+Reproduce the batch rows with `tools/scale/harness.py sweep` as before. The
+streaming rows come from a driver that imports `peak_rss_bytes` from that same
+harness — same `resource.getrusage(RUSAGE_SELF).ru_maxrss` method, same
+one-child-per-configuration discipline — and runs the composition described in
+§8.3. Its source is reproduced in §8.8, so every number here is re-runnable.
+
+### 8.1 The headline
+
+`iter_vcf` + chunked `normalise_variants` + `iter_assessed`, text backend, the
+full 4,492,805-line phantom (4,556,006 records out):
+
+| stage | before (§1, §2) | after | change |
+|---|---|---|---|
+| `read` peak RSS | **~19.6 GB** (projected; 6.55 GB measured under paging) | **59.0 MB** measured | **332x less** |
+| through `assess_quality`, peak RSS | **~32.5 GB** (projected) | **261.9 MB** measured | **124x less** |
+| through QC **+ the 2.41 GB variants artifact written** | not reachable | **242.9 MB** measured | — |
+| `read` wall | 142.35 s / 32,005 rec/s | 37.35 s / 121,997 rec/s | 3.8x faster |
+| through QC, wall | not run at full scale ‡ | 93.83 s / 48,557 rec/s | — |
+| swap growth | 3.1 GB -> 33.0 GB | **0 swaps, 0 page faults** (`/usr/bin/time -l`) | — |
+
+**The 4 GB target is met with 15x of headroom: 261.9 MB through QC.** Record
+count, warnings and skips are unchanged at full scale —
+`no_call_genotype (n=13553)`, 0 skipped — matching §1 exactly.
+
+The artifact row is the one that closes §4: `canonical_json` per *record* into an
+open file handle produced a 2,409,978,805-byte artifact while resident memory
+never exceeded 243 MB. The 2.6 GB single Python `str` is not needed; it was only
+ever an artifact of building the whole payload before writing any of it.
+
+> **Wall-clock caveat, stated because it matters.** The 37.35 s read was measured
+> on a quiet machine. The later runs in §8.2 and §8.4 were taken while a
+> concurrent agent was downloading reference data (load average 1.9, Spotlight
+> indexing, sustained disk I/O), and the *identical* read took 73.3 s — 1.96x
+> slower for the same work. Every throughput comparison below is therefore
+> **load-matched**: before and after measured back to back, minutes apart, on the
+> same machine state. The memory figures need no such caveat; they reproduced to
+> within 4% across every run.
+
+### 8.2 Load-matched before/after at 1 M, both paths
+
+Both halves measured within minutes of each other under the same background load.
+The "before" column runs the *original* `reader.py` and `qc.py`, restored into the
+tree as `_reader_before` / `_qc_before` for the measurement and removed after.
+
+| configuration | before | after | change |
+|---|---|---|---|
+| `read`, text | 24.64 s / 41,042 rec/s / **4.373 GB** | 16.04 s / 63,037 rec/s / **0.059 GB** | 1.54x faster, **74x less memory** |
+| `read`, cyvcf2 | 32.52 s / 31,092 rec/s / 4.39 GB | (see §8.4) | — |
+| read+normalise+QC, text | 57.06 s / **7.209 GB** | 38.92 s / **0.132 GB** | 1.47x faster, **55x less memory** |
+
+The memory ratio grows with the file: it is bounded work against linear work.
+
+### 8.3 What the streaming path actually is
+
+Three changes, each of which had to be provably equivalent to what it replaced.
+
+1. **`read_vcf` no longer holds the file twice.** `_parse_records` used to return a
+   complete `tuple[_RawRecord, ...]` that stayed alive for the whole
+   record-building loop. Both parsers are now generators. `read_vcf` itself still
+   materialises and still sorts globally — its contract is unchanged and every
+   existing test passes untouched — but its peak fell from **4.37 GB to 3.92 GB
+   per million records (-10%)**, which is the second copy going away.
+
+2. **`iter_vcf` removes the global sort rather than optimising it.** Contigs are
+   visited in `CANONICAL_CONTIGS` order through the tabix index; within a contig
+   the file is already position-sorted; the only thing buffered is the group of
+   records sharing one coordinate, ordered on `(ref, alt)` exactly as the global
+   sort's key would. Measured chunk sizes on the 1 M file: 247 chunks, min 2,963,
+   max 4,112 records — a **15 MB** upper bound on what is ever alive.
+
+3. **`iter_assessed` streams QC.** Counts are running integers; the two statistics
+   that genuinely need every value (median depth, and the `math.fsum`-exact means
+   behind `statistics.fmean`) go into an `array('q')` and an `array('d')` — 16
+   bytes per record, ~73 MB at full scale — and are handed to the *same*
+   `statistics` functions, so the metrics block is bit-identical rather than
+   approximately equal.
+
+`normalise_variants` was not modified. It is called on chunks that `VcfStream.chunks`
+cuts only where the next record is more than 4,096 bases away or on a contig
+change, which clears `MAX_SHIFT_BP = 1000` — so concatenating independently
+sorted chunk outputs is provably the same sequence as sorting everything once.
+`tests/unit/test_streaming.py::test_chunked_normalisation_equals_whole_callset_normalisation`
+asserts it, and `::test_the_chunk_boundary_gap_clears_the_normalisation_shift_window`
+asserts the constant relationship the argument rests on.
+
+### 8.4 Backend: re-decided on evidence, after fixing the adapter
+
+§1 found cyvcf2 3.19x slower and blamed the adapter, so the adapter was fixed
+before the decision was re-taken: `variant.FORMAT` is consulted once per record
+and absent tags are never requested (the old code called `variant.format("PS")`
+on every record and caught the resulting exception), each array is converted with
+one `tolist()` instead of an element-by-element `int()` loop, and the GT string is
+rebuilt once per *distinct* call rather than once per record.
+
+Body parse, 100 k phantom, old and new alternating in one process, best of four:
+
+```
+old cyvcf2 adapter   1.532s    64,864 rec/s
+new cyvcf2 adapter   1.208s    82,272 rec/s      -21%
+old text parser      0.612s   162,303 rec/s
+new text parser      0.553s   179,732 rec/s
+```
+
+Full file, streaming, back to back, twice each:
+
+| backend | wall | rec/s | peak RSS | records | warnings | skipped |
+|---|---|---|---|---|---|---|
+| text | 73.25 s / 73.48 s | 62,200 / 62,004 | 59.1 / 59.4 MB | 4,556,006 | `no_call_genotype (n=13553)` | 0 |
+| cyvcf2 | 109.04 s / 108.80 s | 41,783 / 41,874 | 81.0 / 77.4 MB | 4,556,006 | `no_call_genotype (n=13553)` | 0 |
+
+**The adapter fix was worth 21% and did not change the answer.** text stays
+1.49x faster (down from 3.19x), so `detect_backend()` now returns `"text"` and
+says why, with these numbers, in its docstring. `read_vcf(backend="cyvcf2")` is
+unchanged and still supported; `IngestionResult.backend` and
+`IngestionSummary.backend` now record which parser ran, because the two do *not*
+agree on malformed input — a line with no FORMAT/sample column is a warned-about
+record to the text parser and an unreadable file to htslib, which is a fact a run
+must be able to state rather than a detail to discover later.
+
+### 8.5 Determinism (GP-30), proved not asserted
+
+The full 4,556,006-record stream — read, normalise, QC — was digested end to end
+(sha256 over `canonical_json` of every record *and* every evidence item, in
+emission order) in two processes under different `PYTHONHASHSEED`:
+
+```
+PYTHONHASHSEED=0            stream 6ef1aae2dd7827bc4777561c7aa343a36b2affd16c2aad6081cd02b5fb410500
+PYTHONHASHSEED=987654321    stream 6ef1aae2dd7827bc4777561c7aa343a36b2affd16c2aad6081cd02b5fb410500
+                           metrics 00cd7accb73a1703b06b9decfcfd26202aab24220a93b4e22669eee05162033b  (both)
+```
+
+Byte-identical. The contig visit order is written out from `CANONICAL_CONTIGS` in
+`_contig_visit_plan`, never read back from the index, a `set` or a `dict`; the
+same proof runs on the fixture in
+`test_repeat_streams_are_byte_identical_under_different_hash_seeds`.
+
+Where the file's own contig blocks are *not* in karyotype order, streaming
+declines and falls back to the buffered sort. That is not about output order —
+the plan would order the records correctly regardless — it is about
+`source_line_index`, which is an ordinal over the file's data lines and can only
+be reproduced by counting them in the order the file stores them. Emitting a
+provenance field that quietly means something different from the one `read_vcf`
+emits would be worse than not streaming.
+
+### 8.6 QC metrics at full scale, for the record
+
+Identical under both hash seeds; the first whole-genome QC summary this pipeline
+has produced:
+
+```
+total_variants 4,556,006   flagged 399,149   unflagged 4,156,857
+mean_depth 31.9   median_depth 31.0   min 3   max 118
+mean_het_allele_fraction 0.499792   (2,654,126 het calls with a fraction)
+filtered_by_caller 364,984   possible_mosaic 13,632   high_allele_balance 13,690
+low_depth 10,325   low_gq 872   low_allele_balance 388
+evidence: supports 4,156,857   contradicts 386,980   neutral 12,169
+```
+
+### 8.7 What is still not fixed
+
+- **`orchestrator.py` still holds three collections at once** and still calls
+  `read_vcf`, `ledger.extend(qc.evidence)` and `write_json_artifact` with a
+  materialised list. Every measurement in §8.1 was taken through the streaming
+  API directly; the orchestrator has to adopt it before the real file will run.
+  The exact diff is in the handover, not applied here — `orchestrator.py` is
+  owned by another agent.
+- **`canonical_json` still builds one string.** §8.1's artifact row was written by
+  calling it per record into an open handle. `PipelineContext.write_json_artifact`
+  needs a streaming sibling; the diff is in the handover.
+- **4.5 M `EvidenceItem`s cannot go into `EvidenceLedger`.** `iter_assessed` emits
+  them one at a time, but the ledger's `extend` still wants them all. At WGS scale
+  the ledger needs to spill or to hold aggregates.
+- **§5's finding is untouched.** No rarity/coding selection was added in front of
+  pairing; `gene_pair_cap_truncated` would still fire on 100% of output.
+
+### 8.8 The streaming driver
+
+`tools/scale/harness.py` measures `read_vcf`, which is the batch path by
+definition. The streaming rows above were produced by this driver, which reuses
+the harness's own RSS functions rather than re-implementing them. It is the
+composition the orchestrator is being asked to adopt, so it doubles as the
+worked example.
+
+```python
+from mva.clock import demo_clock
+from mva.config import QualityThresholds
+from mva.determinism import canonical_json
+from mva.ingestion.normalise import normalise_variants
+from mva.ingestion.qc import iter_assessed
+from mva.ingestion.reader import iter_vcf
+from mva.models.genome import GenomeBuild
+from tools.scale.harness import current_rss_bytes, peak_rss_bytes
+
+stream = iter_vcf(vcf, expected_build=GenomeBuild.GRCH38,
+                  source_artifact="scale-phantom", backend=backend)
+
+normalised = (record
+              for chunk in stream.chunks()
+              for record in normalise_variants(chunk).variants)
+
+assessed = iter_assessed(normalised, thresholds=QualityThresholds(), clock=demo_clock())
+
+with out_path.open("w", encoding="utf-8") as handle:          # the §4 fix
+    handle.write("[")
+    for n, item in enumerate(assessed):
+        if n:
+            handle.write(",")
+        handle.write(canonical_json(item.variant.model_dump(mode="json")))
+    handle.write("]\n")
+
+summary = stream.summary()      # refuses to report unless the stream was drained
+metrics = assessed.metrics()
+peak = peak_rss_bytes()
+```
+
+Run as one child process per configuration
+(`--stages read` / `read,normalise,qc` / `read,normalise,qc,artifact`), because
+`ru_maxrss` is a high-water mark and a shared process reports one run's peak as
+the next one's.

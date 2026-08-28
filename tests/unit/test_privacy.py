@@ -10,6 +10,8 @@ structure-anchored, which is the property the tests below verify.
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import logging
 import os
 import shutil
@@ -40,6 +42,8 @@ from mva.privacy import audit
 from mva.privacy.audit import (
     CONTENT_ALLOWLIST_PREFIXES,
     PATH_DOWNGRADABLE_RULES,
+    AuditReport,
+    check_git_staged_sensitive,
     check_gitignore_effectiveness,
     check_log_redaction_probe,
     check_notebook_output_purity,
@@ -50,6 +54,7 @@ from mva.privacy.audit import (
     redact_path,
     run_audit,
     scan_bytes,
+    unfiltered_handlers,
 )
 from mva.privacy.classify import classify_path, is_sensitive_extension
 from mva.privacy.export import (
@@ -1383,6 +1388,102 @@ def test_audit_report_markdown_is_stable_across_processes() -> None:
     assert "<REDACTED:path:002>" in text
 
 
+# ---------------------------------------------------------------------------
+# 21b. The audit report is byte-stable WITHIN one process too (GP-30).
+#
+#     `log_redaction_probe` called `install_redaction()` while measuring it. The
+#     first audit in a process therefore reported "redaction was NOT armed" and
+#     armed it; every later audit in the same process reported the opposite. The
+#     report is a registered artifact and is not in `verify_determinism`'s skip
+#     set, so two pipeline runs in one interpreter produced two different files.
+#
+#     This is the same class as M2 above -- an artifact whose content depends on
+#     something other than the run's inputs -- but harder to see: M2 was a random
+#     salt, and randomness at least looks non-deterministic. Execution history
+#     looks deterministic and is not.
+#
+#     Both checks are needed and neither subsumes the other. The cross-process
+#     test above cannot see this one (each process starts unarmed, so both runs
+#     agree), and an in-process assertion cannot see M2 (one process, one salt).
+#     This runs in a SUBPROCESS for the same reason the M2 test does: inside
+#     pytest the process has usually been armed by an earlier test, and a test
+#     that passes because of what a different test did earlier is not passing.
+# ---------------------------------------------------------------------------
+
+
+_TWO_AUDITS_IN_ONE_PROCESS = """
+import sys
+from pathlib import Path
+
+from mva.privacy.audit import run_audit
+from mva.privacy.redact import redaction_installed
+
+repo = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
+before = redaction_installed()
+first = run_audit(repo, staged_only=True).to_markdown()
+after_first = redaction_installed()
+second = run_audit(repo, staged_only=True).to_markdown()
+
+sys.stdout.write(
+    "%s|%s|%s|%s\\n" % (before, after_first, first == second, len(first))
+)
+"""
+
+
+def _two_audits_in_one_process() -> tuple[bool, bool, bool]:
+    """(armed at start, armed after one audit, the two reports matched)."""
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", _TWO_AUDITS_IN_ONE_PROCESS, str(find_repo_root())],
+        capture_output=True,
+        check=False,
+        cwd=find_repo_root(),
+    )
+    assert proc.returncode == 0, proc.stderr.decode()
+    before, after, identical, _ = proc.stdout.decode().strip().split("|")
+    return before == "True", after == "True", identical == "True"
+
+
+def test_two_audits_in_one_process_render_identical_reports() -> None:
+    """GP-30 across repeat runs in ONE interpreter, which is how a run is repeated.
+
+    `just demo-determinism` and `verify_determinism` both execute two passes in a
+    single process. An artifact that differs between the first and the second is a
+    false byte-identity claim in exactly the situation where an organiser re-runs
+    a submission to check reproducibility.
+    """
+    armed_at_start, armed_after_one_audit, identical = _two_audits_in_one_process()
+
+    assert not armed_at_start, (
+        "a bare interpreter came up with GP-42 already armed; this test can no "
+        "longer distinguish 'the probe left it alone' from 'it was armed anyway'"
+    )
+    assert not armed_after_one_audit, (
+        "running the privacy audit ARMED log redaction. A probe must report the "
+        "state it found; arming is the composition root's job "
+        "(mva.cli._install_privacy_guards). Changing the thing you measure makes "
+        "the answer a function of execution history, and privacy_audit.md is a "
+        "registered artifact inside the GP-30 byte-identity claim."
+    )
+    assert identical, (
+        "privacy_audit.md differed between the first and second audit in one "
+        "process. Something in the audit is stateful across runs."
+    )
+
+
+def test_the_probe_leaves_the_logging_stack_as_it_found_it() -> None:
+    """Observation with no side effect, asserted directly on the state it reads."""
+    from mva.privacy.redact import redaction_installed
+
+    armed = redaction_installed()
+    handlers = unfiltered_handlers()
+    first = check_log_redaction_probe()
+    assert redaction_installed() is armed
+    assert unfiltered_handlers() == handlers
+    second = check_log_redaction_probe()
+    assert [f.detail for f in first.findings] == [f.detail for f in second.findings]
+    assert first.passed is second.passed
+
+
 def test_the_path_label_is_not_a_function_of_the_path() -> None:
     """A counter carries no information about what it replaced.
 
@@ -1559,8 +1660,20 @@ def test_the_hpo_fail_threshold_was_not_raised() -> None:
 
 # --------------------------------------------------------------------------
 # ADR 0012 — public reference fixtures are a distinct category from synthetic.
-# The exemption rests on a property of the BYTES (no sample columns), not on
-# provenance stated in a comment, so these tests attack the predicate directly.
+#
+# The exemption rests on FOUR conditions, and these tests attack each of them
+# separately, because the version that shipped enforced one and a half:
+#
+#   1. an allowlisted prefix,
+#   2. declared descent from a manifest resource recorded as fetched with a real
+#      sha256,
+#   3. no sample columns and no genotypes — in the EXACT buffer being scanned,
+#   4. a committed generator beside the fixture.
+#
+# The two verified defects being locked out: a file could open with an 8-column
+# decoy `#CHROM` and carry a second, genotyped one further down; and the staged
+# check probed the worktree path while scanning the staged blob, so staging a
+# genotyped fixture and then cleaning the worktree copy downgraded every finding.
 # --------------------------------------------------------------------------
 
 _SITES_ONLY_VCF = (
@@ -1575,60 +1688,637 @@ _GENOTYPED_VCF = (
     b"15\t40200000\t.\tC\tT\t.\tPASS\tAF=0.001\tGT:AD:DP\t0/1:12,14:26\n"
 )
 
+#: An 8-column header, then a SECOND header declaring FORMAT and a sample. The
+#: predicate that returned at the first `#CHROM` cleared this file and downgraded
+#: every genotype finding in it.
+_DECOY_THEN_GENOTYPES = (
+    b"##fileformat=VCFv4.2\n"
+    b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+    b"15\t40200000\t.\tC\tT\t.\tPASS\tAF=0.001\n"
+    b"##fileformat=VCFv4.2\n"
+    b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tPROBAND01\n"
+    b"15\t40200100\t.\tG\tA\t.\tPASS\tAC=1\tGT:AD:DP\t0/1:12,14:26\n"
+)
+
+#: A sites-only export OF A PROBAND. Structurally indistinguishable from a public
+#: slice, which is exactly the point: "sites-only" is not "not derived from an
+#: individual", and a rare-coordinate list identifies a child and their parents.
+_SITES_ONLY_PROBAND = (
+    b"##fileformat=VCFv4.2\n##source=proband_wgs\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+) + b"".join(f"15\t{40_200_000 + i}\t.\tC\tT\t.\tPASS\tAC=1\n".encode() for i in range(40))
+
+_CLINVAR_DIGEST = hashlib.sha256(b"clinvar-release").hexdigest()
+
+_MANIFEST = f"""\
+manifest_version: 1
+paths_relative_to: resource_root
+resources:
+  clinvar_vcf:
+    path: clinvar/clinvar.vcf.gz
+    sha256: {_CLINVAR_DIGEST}
+    size_bytes: 193420805
+    status: fetched
+    synthetic: false
+  clinvar_pending:
+    path: clinvar/pending.vcf.gz
+    sha256: null
+    size_bytes: null
+    status: not_fetched
+    synthetic: false
+"""
+
+_PROVENANCE = """\
+manifest: knowledge/manifests/resources.yaml
+generator: make_fixture.py
+fixtures:
+  clinvar_slice.vcf.gz:
+    resource: clinvar_vcf
+    regions:
+      - 15:40199000-40206000
+  clinvar_slice.vcf.gz.tbi:
+    indexes: clinvar_slice.vcf.gz
+"""
+
+_CLINVAR_DIR = "tests/fixtures/clinvar"
+_SLICE = f"{_CLINVAR_DIR}/clinvar_slice.vcf.gz"
+_SLICE_INDEX = f"{_SLICE}.tbi"
+
+
+def _reference_repo(
+    root: Path,
+    *,
+    files: dict[str, bytes] | None = None,
+    provenance: str | None = _PROVENANCE,
+    manifest: str | None = _MANIFEST,
+    generator: bool = True,
+    stage: bool = True,
+) -> Path:
+    """A throwaway repo shaped like this one's public-reference fixture layout."""
+    _init_repo(root)
+    if manifest is not None:
+        (root / "knowledge" / "manifests").mkdir(parents=True, exist_ok=True)
+        (root / "knowledge" / "manifests" / "resources.yaml").write_text(manifest, encoding="utf-8")
+    directory = root / _CLINVAR_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    if generator:
+        (directory / "make_fixture.py").write_text("# regenerates the slice\n", encoding="utf-8")
+    if provenance is not None:
+        (directory / "fixture_provenance.yaml").write_text(provenance, encoding="utf-8")
+    for name, payload in (files or {}).items():
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    if stage:
+        git(root, "add", "-A", check=True)
+    return root
+
+
+def _fail_findings(report: AuditReport, check: str) -> list[str]:
+    """Fail-severity rule ids reported by one check, for readable assertions."""
+    return [str(f.rule_id) for f in report.findings if f.severity == "fail" and f.check == check]
+
+
+# --- condition 3, against the exact buffer ---------------------------------
+
 
 @pytest.mark.unit
-def test_a_sites_only_vcf_declares_no_sample_columns(tmp_path: Path) -> None:
-    path = tmp_path / "sites.vcf"
-    path.write_bytes(_SITES_ONLY_VCF)
-    assert audit.vcf_declares_sample_columns(path) is False
+def test_a_sites_only_buffer_is_recognised() -> None:
+    assert audit.buffer_is_sites_only_vcf(_SITES_ONLY_VCF) is True
+    assert audit.buffer_is_sites_only_vcf(gzip.compress(_SITES_ONLY_VCF)) is True
 
 
 @pytest.mark.unit
-def test_a_genotyped_vcf_declares_sample_columns(tmp_path: Path) -> None:
-    """The exemption must be lost the moment a genotype column appears."""
-    path = tmp_path / "genotyped.vcf"
-    path.write_bytes(_GENOTYPED_VCF)
-    assert audit.vcf_declares_sample_columns(path) is True
+def test_a_genotyped_buffer_is_refused() -> None:
+    assert audit.buffer_is_sites_only_vcf(_GENOTYPED_VCF) is False
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("name", ["junk.vcf.gz", "absent.vcf"])
-def test_an_unreadable_file_never_earns_the_reference_exemption(tmp_path: Path, name: str) -> None:
-    """Fails closed: unreadable or malformed is treated as declaring samples."""
-    path = tmp_path / name
-    if name.endswith(".gz"):
-        path.write_bytes(b"this is not gzip")
-    assert audit.vcf_declares_sample_columns(path) is True
+def test_a_second_chrom_header_behind_an_eight_column_decoy_is_refused() -> None:
+    """FINDING 2, scenario A. The probe used to return at the FIRST `#CHROM`.
+
+    Everything after that header — a `FORMAT` column, a patient sample name and
+    the genotypes under it — was unreachable, so the file was cleared as
+    sample-free and every VCF and genotype rule in it was downgraded to `warn`.
+    """
+    assert audit.buffer_is_sites_only_vcf(_DECOY_THEN_GENOTYPES) is False
+    # ...including when the whole thing is compressed, which is how a VCF ships.
+    assert audit.buffer_is_sites_only_vcf(gzip.compress(_DECOY_THEN_GENOTYPES)) is False
 
 
 @pytest.mark.unit
-def test_the_reference_exemption_downgrades_only_with_the_flag() -> None:
-    """A genotype-shaped hit is a fail unless the file is a verified sites-only slice."""
-    without = audit.scan_bytes(
+def test_a_decoy_in_the_first_gzip_member_does_not_clear_the_second() -> None:
+    """Concatenated gzip members are one file to every reader that matters.
+
+    A sites-only member followed by a genotyped member decompresses to a stream
+    with two headers, and a decompressor that stopped at the first member would
+    never see the second.
+    """
+    concatenated = gzip.compress(_SITES_ONLY_VCF) + gzip.compress(_GENOTYPED_VCF)
+    assert audit.inflate_fully(concatenated) is not None, "both members must be inflated"
+    assert audit.buffer_is_sites_only_vcf(concatenated) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("payload", "why"),
+    [
+        (
+            b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            b"15\t40200000\t.\tC\tT\t.\tPASS\tAF=0.001\tGT\t0/1\n",
+            "a data row wider than the header it sits under",
+        ),
+        (
+            b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\n",
+            "a FORMAT column with no samples yet",
+        ),
+        (
+            b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tSAMPLE01\n",
+            "eight columns, but not the eight fixed ones",
+        ),
+        (
+            b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\t\n",
+            "a trailing tab, i.e. an empty ninth column",
+        ),
+        (
+            b"15\t40200000\t.\tC\tT\t.\tPASS\tAF=0.001\n",
+            "data rows with no header at all",
+        ),
+        (b"##fileformat=VCFv4.2\n", "a header block and no #CHROM line"),
+        (b"", "nothing"),
+        (b"\x1f\x8b not really gzip", "a gzip magic number over bytes that will not inflate"),
+        (gzip.compress(gzip.compress(_SITES_ONLY_VCF)), "a gzip inside a gzip"),
+    ],
+)
+def test_the_sites_only_predicate_fails_closed(payload: bytes, why: str) -> None:
+    """Unreadable, malformed or ambiguous never earns the exemption."""
+    assert audit.buffer_is_sites_only_vcf(payload) is False, why
+
+
+@pytest.mark.unit
+def test_a_buffer_at_the_read_cap_is_refused() -> None:
+    """A capped read may have cut the genotyped header off; that is not clearance."""
+    from mva.privacy.patterns import MAX_SCAN_BYTES
+
+    padding = b"##pad=" + b"x" * 80 + b"\n"
+    body = _SITES_ONLY_VCF.replace(
+        b"##fileformat=VCFv4.2\n", b"##fileformat=VCFv4.2\n" + padding * 200_000
+    )
+    assert len(body) >= MAX_SCAN_BYTES
+    assert audit.buffer_is_sites_only_vcf(body[:MAX_SCAN_BYTES]) is False
+
+
+@pytest.mark.unit
+def test_vcf_declares_sample_columns_still_fails_closed(tmp_path: Path) -> None:
+    """The path-shaped wrapper keeps its documented behaviour."""
+    sites = tmp_path / "sites.vcf"
+    sites.write_bytes(_SITES_ONLY_VCF)
+    genotyped = tmp_path / "genotyped.vcf"
+    genotyped.write_bytes(_GENOTYPED_VCF)
+    junk = tmp_path / "junk.vcf.gz"
+    junk.write_bytes(b"this is not gzip")
+    assert audit.vcf_declares_sample_columns(sites) is False
+    assert audit.vcf_declares_sample_columns(genotyped) is True
+    assert audit.vcf_declares_sample_columns(junk) is True
+    assert audit.vcf_declares_sample_columns(tmp_path / "absent.vcf") is True
+
+
+# --- conditions 1, 2 and 4: provenance -------------------------------------
+
+
+@pytest.mark.unit
+def test_a_sample_free_file_without_provenance_earns_nothing(tmp_path: Path) -> None:
+    """FINDING 1. A sites-only export of the proband, committed as a fixture.
+
+    Eight columns, no FORMAT, no genotype — structurally identical to a public
+    slice, and it carries the child's complete variant set. Conditions 1 and 3
+    alone cleared it. It must now fail for want of declared descent.
+    """
+    repo = _reference_repo(
+        tmp_path / "repo",
+        files={f"{_CLINVAR_DIR}/proband.vcf.gz": gzip.compress(_SITES_ONLY_PROBAND)},
+    )
+    report = run_audit(repo)
+    for check in ("git_tracked_sensitive", "git_staged_sensitive", "reference_fixtures_declared"):
+        assert check in report.failed_checks, (
+            f"{check} cleared an undeclared sites-only file under a reference-fixture "
+            "prefix. 'Sites-only' is not 'not derived from an individual'."
+        )
+    assert {"vcf_header", "vcf_chrom_line"} & set(_fail_findings(report, "content_scan")), (
+        "the VCF content rules were still downgraded for an undeclared file"
+    )
+
+
+@pytest.mark.unit
+def test_an_orphan_index_earns_nothing(tmp_path: Path) -> None:
+    """An index inherits its data file's verdict, so with no data file it inherits nothing."""
+    repo = _reference_repo(tmp_path / "repo", files={_SLICE_INDEX: b"\x1f\x8b\x08\x04tbi-ish"})
+    report = run_audit(repo)
+    assert "git_tracked_sensitive" in report.failed_checks
+    assert "reference_fixtures_declared" in report.failed_checks
+    assert any(
+        f.path == _SLICE_INDEX and "Orphan index" in f.detail
+        for f in report.findings
+        if f.check == "reference_fixtures_declared"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("provenance", "why"),
+    [
+        (None, "no record at all"),
+        (
+            _PROVENANCE.replace("resource: clinvar_vcf", "resource: clinvar_pending"),
+            "a resource the manifest records as not_fetched",
+        ),
+        (
+            _PROVENANCE.replace("resource: clinvar_vcf", "resource: clinvar_invented"),
+            "a resource that is not in the manifest at all",
+        ),
+        (
+            _PROVENANCE.replace(
+                "manifest: knowledge/manifests/resources.yaml",
+                "manifest: tests/fixtures/clinvar/my_own_manifest.yaml",
+            ),
+            "a manifest the fixture directory could ship itself",
+        ),
+        (
+            _PROVENANCE.replace("    regions:\n      - 15:40199000-40206000\n", ""),
+            "no record of which regions were cut (condition 4)",
+        ),
+        (
+            _PROVENANCE.replace("generator: make_fixture.py", "generator: absent_generator.py"),
+            "a generator that is not there (condition 4)",
+        ),
+        (
+            _PROVENANCE.replace("generator: make_fixture.py", "generator: ../../../etc/passwd"),
+            "a generator named by traversal rather than by bare file name",
+        ),
+        (
+            "manifest: knowledge/manifests/resources.yaml\ngenerator: make_fixture.py\n",
+            "no fixtures block",
+        ),
+        ("{{ not: [valid", "an unparseable record"),
+    ],
+)
+def test_provenance_must_be_complete_and_verifiable(
+    tmp_path: Path, provenance: str | None, why: str
+) -> None:
+    """Every provenance defect denies the exemption to the whole directory.
+
+    A partly-wrong record is a record nobody is maintaining. The failure direction
+    that matters is refusing an exemption, never granting one.
+    """
+    repo = _reference_repo(
+        tmp_path / "repo",
+        files={_SLICE: gzip.compress(_SITES_ONLY_VCF)},
+        provenance=provenance,
+    )
+    verdict = audit.reference_fixture_exemption(_SLICE, load=audit.index_loader(repo))
+    assert verdict.exempt is False, f"a sites-only slice was exempted despite {why}"
+    assert "git_tracked_sensitive" in run_audit(repo).failed_checks
+
+
+@pytest.mark.unit
+def test_a_missing_manifest_denies_the_exemption(tmp_path: Path) -> None:
+    """Condition 2 cannot be satisfied by a manifest that is not there."""
+    repo = _reference_repo(
+        tmp_path / "repo", files={_SLICE: gzip.compress(_SITES_ONLY_VCF)}, manifest=None
+    )
+    verdict = audit.reference_fixture_exemption(_SLICE, load=audit.index_loader(repo))
+    assert verdict.exempt is False
+    assert "manifest" in verdict.reason
+
+
+@pytest.mark.unit
+def test_a_placeholder_digest_is_not_a_real_sha256(tmp_path: Path) -> None:
+    """`status: fetched` with a hand-typed digest is not a hash pin."""
+    repo = _reference_repo(
+        tmp_path / "repo",
+        files={_SLICE: gzip.compress(_SITES_ONLY_VCF)},
+        manifest=_MANIFEST.replace(_CLINVAR_DIGEST, "TODO-fill-this-in"),
+    )
+    assert audit.reference_fixture_exemption(_SLICE, load=audit.index_loader(repo)).exempt is False
+
+
+@pytest.mark.unit
+def test_a_declared_sites_only_slice_is_exempt(tmp_path: Path) -> None:
+    """The category still works for what it exists for, or it is not a category."""
+    repo = _reference_repo(
+        tmp_path / "repo",
+        files={_SLICE: gzip.compress(_SITES_ONLY_VCF), _SLICE_INDEX: b"tbi payload"},
+    )
+    load = audit.index_loader(repo)
+    assert audit.reference_fixture_exemption(_SLICE, load=load).exempt is True
+    assert audit.reference_fixture_exemption(_SLICE_INDEX, load=load).exempt is True, (
+        "a declared index sidecar must inherit its data file's verdict"
+    )
+    report = run_audit(repo)
+    assert "git_tracked_sensitive" not in report.failed_checks
+    assert "content_scan" not in report.failed_checks
+    assert "reference_fixtures_declared" not in report.failed_checks
+
+
+@pytest.mark.unit
+def test_a_declared_but_genotyped_slice_loses_the_exemption(tmp_path: Path) -> None:
+    """Condition 2 does not buy condition 3. Provenance never clears genotypes."""
+    repo = _reference_repo(tmp_path / "repo", files={_SLICE: gzip.compress(_GENOTYPED_VCF)})
+    load = audit.index_loader(repo)
+    assert audit.reference_fixture_provenance(_SLICE, load=load).exempt is True
+    assert audit.reference_fixture_exemption(_SLICE, load=load).exempt is False
+    report = run_audit(repo)
+    assert "git_tracked_sensitive" in report.failed_checks
+    assert {"vcf_chrom_line", "genotype_field"} & set(_fail_findings(report, "content_scan"))
+
+
+@pytest.mark.unit
+def test_a_nested_fixture_is_not_covered_by_the_directory_record(tmp_path: Path) -> None:
+    """`.gitignore` re-admits `clinvar/**/*.vcf.gz`; the record is per directory."""
+    repo = _reference_repo(
+        tmp_path / "repo",
+        files={f"{_CLINVAR_DIR}/sub/clinvar_slice.vcf.gz": gzip.compress(_SITES_ONLY_VCF)},
+    )
+    assert (
+        audit.reference_fixture_exemption(
+            f"{_CLINVAR_DIR}/sub/clinvar_slice.vcf.gz", load=audit.index_loader(repo)
+        ).exempt
+        is False
+    )
+    assert "git_tracked_sensitive" in run_audit(repo).failed_checks
+
+
+# --- the exact buffer, not a path reopened beside it -----------------------
+
+
+@pytest.mark.unit
+def test_the_staged_blob_decides_the_exemption_not_the_worktree_copy(tmp_path: Path) -> None:
+    """FINDING 2, scenario B, end to end.
+
+    `check_git_staged_sensitive` reads the staged blob and used to probe the
+    worktree path. Stage a genotyped fixture, then overwrite the worktree copy
+    with a sites-only one: the probe saw the clean file, the scan saw the
+    genotypes, every finding was downgraded to `warn`, and a non-strict audit
+    reported `passed=True` with the payload sitting in the index.
+    """
+    repo = _reference_repo(tmp_path / "repo", files={_SLICE: gzip.compress(_GENOTYPED_VCF)})
+    # The index still holds the genotypes; the worktree copy is now clean.
+    (repo / _SLICE).write_bytes(gzip.compress(_SITES_ONLY_VCF))
+
+    result = check_git_staged_sensitive(repo)
+    assert result.passed is False, (
+        "the staged genotyped blob was cleared by the cleaned worktree copy of the "
+        "same path -- two different files, one verdict"
+    )
+    rules = {f.rule_id for f in result.findings if f.severity == "fail"}
+    assert {"vcf_chrom_line", "genotype_field"} & rules
+
+    report = run_audit(repo)
+    assert report.passed is False
+    assert "git_staged_sensitive" in report.failed_checks
+
+
+@pytest.mark.unit
+def test_a_worktree_only_provenance_record_does_not_clear_a_staged_blob(
+    tmp_path: Path,
+) -> None:
+    """The record is part of the decision, so it comes from the same source too.
+
+    Otherwise the divergence just moves one level up: an unstaged provenance file
+    on disk would clear a staged fixture that the commit will carry without it.
+    """
+    repo = _reference_repo(
+        tmp_path / "repo",
+        files={_SLICE: gzip.compress(_SITES_ONLY_VCF)},
+        provenance=None,
+    )
+    # Written AFTER staging, so the index has no record and the worktree does.
+    (repo / _CLINVAR_DIR / "fixture_provenance.yaml").write_text(_PROVENANCE, encoding="utf-8")
+
+    assert audit.reference_fixture_exemption(_SLICE, load=audit.index_loader(repo)).exempt is False
+    assert (
+        audit.reference_fixture_exemption(_SLICE, load=audit.worktree_loader(repo)).exempt is True
+    )
+    assert "git_tracked_sensitive" in run_audit(repo).failed_checks
+
+
+@pytest.mark.unit
+def test_the_downgrade_is_derived_from_the_buffer_not_from_the_caller(tmp_path: Path) -> None:
+    """`scan_bytes` takes the provenance claim, and decides condition 3 itself."""
+    genotyped = audit.scan_bytes(
         _GENOTYPED_VCF,
         check="t",
-        path_label="tests/fixtures/clinvar/x.vcf",
-        sites_only_reference=False,
+        path_label=f"{_CLINVAR_DIR}/x.vcf",
+        reference_fixture=True,
     )
-    with_flag = audit.scan_bytes(
-        _GENOTYPED_VCF,
+    assert "fail" in {f.severity for f in genotyped}, (
+        "asserting the provenance half must not downgrade a genotyped buffer"
+    )
+    decoyed = audit.scan_bytes(
+        _DECOY_THEN_GENOTYPES,
         check="t",
-        path_label="tests/fixtures/clinvar/x.vcf",
-        sites_only_reference=True,
+        path_label=f"{_CLINVAR_DIR}/x.vcf",
+        reference_fixture=True,
     )
-    assert "fail" in {f.severity for f in without}
-    assert "fail" not in {f.severity for f in with_flag}
+    assert "fail" in {f.severity for f in decoyed}
+    sites_only = audit.scan_bytes(
+        _SITES_ONLY_VCF,
+        check="t",
+        path_label=f"{_CLINVAR_DIR}/x.vcf",
+        reference_fixture=True,
+    )
+    assert "fail" not in {f.severity for f in sites_only}
+    unclaimed = audit.scan_bytes(
+        _SITES_ONLY_VCF,
+        check="t",
+        path_label=f"{_CLINVAR_DIR}/x.vcf",
+        reference_fixture=False,
+    )
+    assert "fail" in {f.severity for f in unclaimed}, (
+        "without declared provenance a sites-only slice keeps full strength"
+    )
+
+
+@pytest.mark.unit
+def test_a_genotyped_gzip_member_is_not_downgraded_by_a_clean_outer_wrapper() -> None:
+    """The same predicate runs over the DECOMPRESSED stream, not only the outer bytes."""
+    findings = audit.scan_bytes(
+        gzip.compress(_DECOY_THEN_GENOTYPES),
+        check="t",
+        path_label=_SLICE,
+        reference_fixture=True,
+    )
+    inside = [f for f in findings if "INSIDE a gzip member" in f.detail]
+    assert inside, "the gzip member was never scanned"
+    assert "fail" in {f.severity for f in inside}
+
+
+# --- the whole-directory declaration check ---------------------------------
+
+
+@pytest.mark.unit
+def test_an_undeclared_file_in_a_reference_directory_fails(tmp_path: Path) -> None:
+    """Not merely 'unexempted': these directories re-admit files `.gitignore` denies.
+
+    A file that trips no content rule -- a second copy of a slice, a stray sidecar,
+    a sites-only export with a harmless extension -- used to enter in silence.
+    """
+    repo = _reference_repo(
+        tmp_path / "repo",
+        files={
+            _SLICE: gzip.compress(_SITES_ONLY_VCF),
+            f"{_CLINVAR_DIR}/notes.txt": b"an undeclared file\n",
+        },
+    )
+    result = audit.check_reference_fixtures_declared(repo)
+    assert result.passed is False
+    assert [f.path for f in result.findings] == [f"{_CLINVAR_DIR}/notes.txt"]
+
+
+@pytest.mark.unit
+def test_a_reference_directory_without_a_record_fails_as_a_directory(tmp_path: Path) -> None:
+    repo = _reference_repo(
+        tmp_path / "repo", files={_SLICE: gzip.compress(_SITES_ONLY_VCF)}, provenance=None
+    )
+    result = audit.check_reference_fixtures_declared(repo)
+    assert result.passed is False
+    assert [f.path for f in result.findings] == [f"{_CLINVAR_DIR}/"]
+
+
+@pytest.mark.unit
+def test_the_declaration_check_runs_in_the_pre_commit_subset() -> None:
+    """The commit is where a fixture enters the repository, so the gate is there."""
+    assert "reference_fixtures_declared" in audit.STAGED_CHECKS
+
+
+# --- this repository's own committed fixtures ------------------------------
+
+
+@pytest.mark.unit
+def test_the_committed_reference_fixtures_all_declare_their_descent() -> None:
+    """The real fixtures satisfy the stricter rule, or they must not be committed."""
+    repo = find_repo_root()
+    result = audit.check_reference_fixtures_declared(repo)
+    assert result.passed, [f"{f.path}: {f.detail}" for f in result.findings]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "tests/fixtures/clinvar/clinvar_slice.vcf.gz",
+        "tests/fixtures/gnomad/gnomad.exomes.v4.1.sites.chr21.slice.vcf.bgz",
+    ],
+)
+def test_the_committed_vcf_slices_are_verifiably_sites_only(fixture: str) -> None:
+    """Condition 3 against the real bytes: one #CHROM line, eight columns, no wider row."""
+    path = find_repo_root() / fixture
+    if not path.is_file():
+        pytest.skip("fixture not present")
+    assert audit.buffer_is_sites_only_vcf(path.read_bytes()) is True
+
+
+# --- the generator half of condition 2 -------------------------------------
+#
+# The audit can only see that a fixture NAMES a resource the manifest records
+# fetching; nothing in the committed bytes proves the slice came from it. The
+# generator is where that claim is made true, so these tests attack the function
+# the generators resolve their input through.
+
+
+@pytest.mark.unit
+def test_a_generator_resolves_its_input_from_the_manifest(tmp_path: Path) -> None:
+    release = tmp_path / "root" / "clinvar" / "clinvar.vcf.gz"
+    release.parent.mkdir(parents=True)
+    payload = b"pretend this is the 185 MB release\n"
+    release.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    repo = _reference_repo(
+        tmp_path / "repo", manifest=_MANIFEST.replace(_CLINVAR_DIGEST, digest), stage=False
+    )
+    resolved = audit.pinned_source(repo, "clinvar_vcf", resource_root=tmp_path / "root")
+    assert resolved == release
+
+
+@pytest.mark.unit
+def test_a_generator_refuses_bytes_that_are_not_the_pinned_release(tmp_path: Path) -> None:
+    """`--source` no longer accepts arbitrary bytes.
+
+    A generator that read whatever was at the path it was given could be pointed
+    at the proband's VCF and would emit a 'ClinVar slice' that the audit then
+    cleared on the strength of a `resource: clinvar_vcf` line -- with nothing in
+    the repository able to disagree.
+    """
+    impostor = tmp_path / "not_clinvar.vcf.gz"
+    impostor.write_bytes(b"a sites-only export of somebody's genome\n")
+    repo = _reference_repo(tmp_path / "repo", stage=False)
+    with pytest.raises(LookupError, match="sha256 mismatch"):
+        audit.pinned_source(repo, "clinvar_vcf", source=impostor)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("resource", "expected"),
+    [
+        ("clinvar_pending", "not recorded as fetched"),
+        ("clinvar_invented", "not registered"),
+    ],
+)
+def test_a_generator_refuses_a_resource_that_is_not_a_hash_pin(
+    tmp_path: Path, resource: str, expected: str
+) -> None:
+    repo = _reference_repo(tmp_path / "repo", stage=False)
+    with pytest.raises(LookupError, match=expected):
+        audit.pinned_resource(repo, resource)
+
+
+@pytest.mark.unit
+def test_every_committed_fixture_names_a_resource_the_manifest_pins() -> None:
+    """The two halves must agree, or the provenance chain has a hole in the middle.
+
+    A `resource:` the audit is happy with but no generator could ever resolve is
+    provenance in name only.
+    """
+    import yaml
+
+    repo = find_repo_root()
+    checked = 0
+    for prefix in audit.PUBLIC_REFERENCE_FIXTURE_PREFIXES:
+        record = repo / prefix / audit.FIXTURE_PROVENANCE_FILENAME
+        if not record.parent.is_dir():
+            continue
+        assert record.is_file(), f"{prefix} has no provenance record"
+        # Read as data rather than through the audit's own parser: this asserts
+        # that the two halves AGREE, so it must not go through one of them.
+        declared = yaml.safe_load(record.read_text(encoding="utf-8"))
+        for entry in declared["fixtures"].values():
+            resource = entry.get("resource")
+            if resource is None:
+                continue
+            checked += 1
+            assert audit.pinned_resource(repo, resource).path, (
+                "a pinned resource must record where it lives"
+            )
+    assert checked, "no committed reference fixture declared a resource at all"
 
 
 @pytest.mark.unit
 def test_the_synthetic_fixture_cannot_borrow_the_reference_exemption() -> None:
     """The two categories must not share a code path (ADR 0012).
 
-    The synthetic case VCF genuinely carries sample columns, so it is excluded
-    from the reference-fixture exemption by the predicate itself — it qualifies
-    under the synthetic marker instead, which asserts something different.
+    The synthetic case VCF genuinely carries sample columns, so it is excluded by
+    the predicate itself; it qualifies under the synthetic marker instead, which
+    asserts something different. It is also not under a reference prefix, so no
+    provenance record could reach it.
     """
-    synthetic = Path("tests/fixtures/synthetic/synthetic_case.vcf")
+    synthetic = find_repo_root() / "tests/fixtures/synthetic/synthetic_case.vcf"
     if not synthetic.is_file():
         pytest.skip("synthetic fixture not present")
-    assert audit.vcf_declares_sample_columns(synthetic) is True
+    assert audit.buffer_is_sites_only_vcf(synthetic.read_bytes()) is False
+    assert (
+        audit.reference_fixture_provenance(
+            "tests/fixtures/synthetic/synthetic_case.vcf",
+            load=audit.worktree_loader(find_repo_root()),
+        ).exempt
+        is False
+    )
