@@ -17,8 +17,8 @@ Boundary: `$MVA_WORKSPACE`, an external absolute path (ADR 0006).
 | PRIV-02 | Agent/subagent reads patient files | Agent globs `**/*.vcf`; workspace symlinked into repo | H | Critical | Workspace outside repo, path only via env; `workspace_containment` + `symlink_escape` checks; ADR 0008 (illegibility by design) |
 | PRIV-03 | Terminal output enters model context | `head file.vcf`, dataframe print, pytest failure diff | H | Critical | No stage prints records; CLI is counts/paths only; `safe_repr()`; pytest `--tb=line`, never `--showlocals` |
 | PRIV-04 | Logs dump VCF records | `log.debug("variant=%s", rec)` | H | High | `GenomicRedactionFilter` on **every handler** + `setLogRecordFactory`; `log_redaction_probe` check |
-| PRIV-05 | Annotation APIs leak coordinates | VEP REST, ClinVar, gnomAD, MyVariant | M | Critical | Structural test forbids network-client imports on the sensitive path; annotation is local, hash-pinned tables only |
-| PRIV-06 | CRAM reference auto-fetch | htslib `REF_PATH` defaults to `www.ebi.ac.uk/ena/cram/md5/%s` | M | Med | `REF_PATH=/dev/null`, `REF_CACHE` inside workspace, explicit `-T ref.fa` |
+| PRIV-05 | Annotation APIs leak coordinates | VEP REST, ClinVar, gnomAD, MyVariant | M | Critical | Structural test forbids imports of network clients, `socket`/`ssl`/`asyncio` and the audit-hook bypasses (`ctypes`, `cffi`, `subprocess`, `importlib`) on the sensitive path, with a named, reasoned exemption list; annotation reads local, hash-pinned tables. **Two holes the test cannot cover:** `pysam`/`cyvcf2` are C extensions on this path (adapters refuse non-`file://` URIs, which is the compensating check), and SnpEff is an exempted Java child process — see "Network denial: honest limits" and TD-06 |
+| PRIV-06 | CRAM reference auto-fetch | htslib `REF_PATH` defaults to `www.ebi.ac.uk/ena/cram/md5/%s` | M | Med | `REF_PATH=/dev/null` and `REF_CACHE` inside the workspace, set on **this process** by `netguard.reference_cache_env`. The SnpEff child is given a hand-built environment and does not inherit them; harmless for a JVM, but the propagation is not automatic and would not be for a future htslib child. `-T ref.fa` is stated as intent — no argv in `src/mva` constructs it |
 | PRIV-07 | Cloud sync | `~/Desktop`, `~/Documents` are iCloud-synced by default | H | Critical | `resolve_workspace` rejects synced roots; `cloud_sync_location` check |
 | PRIV-08 | OS temp files | `tempfile` defaults to `/var/folders/…` | M | High | `TMPDIR` pinned inside the workspace at CLI entry |
 | PRIV-09 | Crash dumps / tracebacks embed genotypes | Exception carrying record locals | M | Critical | Exceptions built from IDs and counts only; `exc_info` redacted by the log filter; no `rich` locals |
@@ -91,16 +91,56 @@ profile gates on a module flag rather than installing and uninstalling.
 **It is a tripwire and a developer guardrail, not a security boundary.** It is
 blind to:
 - C extensions — `pysam`/htslib and `cyvcf2` call `connect(2)` directly and raise
-  no Python audit event;
-- subprocesses, once spawned;
-- `ctypes`/`cffi` calling libc directly.
+  no Python audit event, and they are the primary genomics I/O path here, not a
+  corner case;
+- subprocesses, once spawned. **Concretely: `annotation/snpeff_local.py` spawns a
+  JVM and writes a VCF of proband coordinates to its stdin.** That child has an
+  unrestricted network for its whole lifetime. `-nodownload/-noStats/-noLog`
+  constrain what SnpEff is *expected* to do; they are flags to a cooperative
+  program, not a boundary around an uncooperative one. `OfflineProfile(strict=True)`
+  would block the spawn itself, but the pipeline runs non-strict because strict
+  also blocks the `git` calls the provenance manifest needs, so in practice
+  nothing stops it;
+- `ctypes`/`cffi` calling libc directly;
+- only the events in `netguard.BLOCKED_EVENTS` are seen at all. `socket.send` on an
+  already-connected socket, `sendmsg`, and `os.write` to a socket file descriptor
+  emit nothing this hook can block.
 
-The real boundary is OS-level. For a real-data run, use one of:
+### What the structural test does and does not prove
+
+`tests/unit/test_architecture.py::test_no_network_clients_in_sensitive_stages`
+forbids importing a network client, `socket`/`socketserver`/`ssl`/`asyncio`, or
+`ctypes`/`cffi`/`subprocess`/`importlib` anywhere in `ingestion`, `annotation`,
+`phenotype` or `prioritization`, except for entries in an exemption map that each
+carry their reason. It catches the realistic accident — a `requests.get(...)`
+added to an annotation step, or a raw socket.
+
+It proves nothing about child processes, nothing about C extensions, and nothing
+about a run: it is an AST lint over import statements evaluated at test time. A
+dynamic import, an `exec` of a computed string, or a socket passed in as an
+argument all pass it. A test whose name implies a guarantee it cannot deliver is
+worse than no test, because it stops people looking — hence this paragraph and
+the test's own docstring.
+
+### The real boundary is OS-level
+
+For a real-data run, use one of:
 ```bash
-sandbox-exec -p '(version 1)(allow default)(deny network*)' <cmd>
+# Wrap the WHOLE invocation, so the SnpEff JVM inherits the sandbox.
+# A child cannot escape its parent's Seatbelt profile, which is precisely why
+# this has to sit outside the Python process rather than inside it.
+sandbox-exec -p '(version 1)(allow default)(deny network-outbound)' \
+  uv run mva run all --config <case>.yaml
 networksetup -setairportpower en0 off
 ```
-Whichever is used is recorded in the run manifest's `network_profile`.
+`sandbox-exec` is deprecated by Apple but functional on the macOS target; a `pf`
+deny rule scoped to the run user is the non-deprecated equivalent, and a network
+namespace is the Linux one.
+
+The run manifest's `network_profile` records **what the operator declared**, not
+what was enforced. Nothing in this process can observe an OS control, so
+`OFFLINE_ENFORCED` is an assertion; the CLI prints it as one. Closing that gap is
+TD-06.
 
 ---
 

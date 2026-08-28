@@ -1,9 +1,17 @@
 """Canonicalisation and hashing helpers underpinning GP-30.
 
 Determinism here means: given the same inputs, the same configuration and the same
-tool versions, every artifact this pipeline writes is byte-identical. That is
-checked directly by the repeat-run test, and it is what makes the provenance
-manifest a meaningful claim rather than decoration.
+tool versions, **nothing this pipeline writes differs in scientific content** — no
+RNG, no time-derived identifier or hash, and every ordering total and explicit,
+verified across ``PYTHONHASHSEED`` and ``TZ`` variation.
+
+Byte-identity of the whole artifact tree is a narrower claim, and this module does
+not establish it on its own. The repeat-run test checks it under a *fixed* clock,
+which is what ``config.synthetic`` selects; a real run takes ``SystemClock``, and
+of the artifacts it produces 17 are byte-identical anyway while 11 differ in
+recorded time only. Quote GP-30 with that scope until a run-scoped fixed clock
+exists (TD-21); the artifact-by-artifact map is in ``docs/handoff-integrity.md``
+§4.
 
 The hazards this module exists to neutralise are all mundane: dict iteration
 order, float repr drift, set ordering, and non-UTC timestamps.

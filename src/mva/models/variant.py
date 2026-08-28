@@ -8,7 +8,7 @@ from typing import Final, Self
 
 from pydantic import Field, computed_field, model_validator
 
-from mva.models.base import FrozenModel
+from mva.models.base import FrozenModel, error_token
 from mva.models.genome import GenomeBuild, GenomicCoordinate
 
 # ---------------------------------------------------------------------------
@@ -475,10 +475,37 @@ class VariantRecord(FrozenModel):
 
     @model_validator(mode="after")
     def _phase_consistency(self) -> Self:
-        if self.genotype.phased and "|" not in self.genotype.genotype_string:
+        """GP-15, enforced without disclosing the call it is refusing to trust.
+
+        A ``model_validator(mode="after")`` runs with the whole record in scope, so
+        it is the easiest place in the codebase to reach for a value — and
+        ``hide_input_in_errors`` does not help, because it only suppresses
+        pydantic's own ``input_value=`` suffix and never touches a string a
+        validator built by hand. This one used to name the variant ID and the raw
+        GT, which is a proband coordinate and the call at it travelling into every
+        terminal, log file, crash report and agent context the traceback reaches.
+
+        What a developer actually needs to fix this is which two fields disagree,
+        which of the two plausible causes it is, and a handle that ties repeated
+        failures to one record. None of that requires the value.
+        """
+        genotype = self.genotype
+        if genotype.phased and "|" not in genotype.genotype_string:
+            observed = (
+                "an unphased '/' separator"
+                if "/" in genotype.genotype_string
+                else "no allele separator at all"
+            )
             msg = (
-                f"{self.variant_id}: genotype marked phased but GT "
-                f"{self.genotype.genotype_string!r} contains no '|' separator."
+                "Genotype.phased is True but Genotype.genotype_string carries "
+                f"{observed}, so this call is not phased and GP-15 forbids treating it "
+                f"as though it were. Variant handle <variant:{error_token(self.variant_id)}>; "
+                "the coordinate and the genotype are tokenised rather than echoed "
+                "(PRIV-09), and the handle is stable within a run so every message "
+                "about this record shares it. Two causes produce this: a reader that "
+                "set `phased` from a PS tag without checking the separator, or a caller "
+                "that emitted PS on an unphased call. Fix whichever produced the record "
+                "— phase is never assumed, and never upgraded to make a pair work."
             )
             raise ValueError(msg)
         return self

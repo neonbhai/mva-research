@@ -56,6 +56,29 @@ MANIFEST_HEADER: Final = """\
 #
 # Every resource here is real public reference data: `synthetic: false` throughout.
 # The synthetic demo tables live in knowledge/manifests/knowledge.yaml, not this file.
+#
+# `retrieved` is the ARTIFACT'S OWN mtime date, not the date this tool ran, so
+# re-surveying unchanged bytes leaves this file byte-identical (GP-30). For an
+# artifact unpacked from an archive that is the timestamp the archive recorded,
+# which is earlier than the download -- honest about the bytes, not about the fetch.
+#
+# `integrity` says what was actually CHECKED about each artifact, and when (ADR 0020):
+#
+#   verified_at    ISO date the full sha256 and the checks below were performed.
+#   spot_plan      the sampling plan `spot_sha256` was computed under. A digest
+#                  under a different plan is a different number and is REFUSED,
+#                  not compared.
+#   spot_sha256    sha256 over a fixed, published sample of the file (head, tail,
+#                  eight interior windows, size-bound). This is what a run verifies
+#                  by default: at most 24 MiB per file instead of re-reading 202.8 GB.
+#                  It is a checksum over a SAMPLE, not a proof of whole-file identity.
+#   format_check   what opened the file as the format its name claims. A sha256
+#                  pins whatever arrived; only this notices that what arrived was
+#                  an HTML error page. `not_checked` is never a passing state.
+#   index_check    whether a companion .tbi/.csi/.fai was proven to describe THIS
+#                  data file, by seeking through it -- NOT by comparing mtimes.
+#                  htslib warns that every gnomAD .tbi here is older than its .bgz;
+#                  that is download ordering, not evidence, and `index_detail` says so.
 """
 
 

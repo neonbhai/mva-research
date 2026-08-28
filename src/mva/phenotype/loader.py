@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Final
 
 from mva.errors import IngestionError
+from mva.models.base import error_token
 from mva.models.phenotype import (
     ObservationStatus,
     Onset,
@@ -198,9 +199,11 @@ def load_phenotype_profile(
         hpo_id = normalise_hpo_id(row["hpo_id"], context=location)
         if hpo_id in seen:
             msg = (
-                f"{location}: duplicate HPO term {hpo_id} (first seen on line {seen[hpo_id]}). "
-                "Two rows for one term cannot be reconciled by a parser; resolve the "
-                "conflict in the source file."
+                f"{location}: duplicate HPO term <hpo:{error_token(hpo_id)}>, first seen "
+                f"on line {seen[hpo_id]}. The term is tokenised rather than echoed "
+                "(PRIV-09); the two line numbers locate it in the source. Two rows for "
+                "one term cannot be reconciled by a parser; resolve the conflict in the "
+                "source file."
             )
             raise IngestionError(msg)
         seen[hpo_id] = lineno
@@ -232,7 +235,11 @@ def _build_observation(
     """Turn one validated row into a typed observation."""
     label = row["label"].strip()
     if not label:
-        msg = f"{location}: HPO term {hpo_id} has an empty label."
+        msg = (
+            f"{location}: HPO term <hpo:{error_token(hpo_id)}> has an empty `label` "
+            "column. The term is tokenised rather than echoed (PRIV-09); the line "
+            "number locates the row."
+        )
         raise IngestionError(msg)
 
     notes = row.get("notes", "").strip()

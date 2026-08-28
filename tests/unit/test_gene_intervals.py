@@ -1579,3 +1579,195 @@ def test_the_index_holds_no_module_level_state() -> None:
     assert first is not second
     assert first.genes is not second.genes
     assert [g.gene_id for g in first.genes] == [g.gene_id for g in second.genes]
+
+
+# ------------------------------------------- adversarial review, findings 4 and 6
+#
+# Finding 4: a placeholder ``impact`` could be reported with ``synthetic=False``.
+# ``ConsequenceAnnotation.impact`` is now ``ImpactSeverity | None`` and this
+# adapter emits ``None``, so the obvious form of the defect is closed. What was
+# still open is the *mechanism*: ``model_accepts_unassessed_impact`` asked only
+# whether validating ``impact=None`` raises. A model that accepted None and
+# substituted a value would pass that probe, and every annotation this adapter
+# emits would then carry a severity it never computed — while ``synthetic``
+# stayed False, because the probe had said the model was fine.
+#
+# Finding 6: the build-confusion guard. A GRCh37 coordinate joined against a
+# GRCh38 gene model previously returned zero records rather than raising, and zero
+# records is what an intergenic variant looks like.
+
+
+class _CoercingConsequenceAnnotation(ConsequenceAnnotation):
+    """A model that accepts ``impact=None`` and quietly substitutes a severity.
+
+    Not hypothetical in shape: a ``field_validator`` supplying a default, a
+    ``model_validator`` filling gaps, or simply re-narrowing the field with a
+    non-None default all produce exactly this. The probe under test has to catch
+    the class of change, not one spelling of it.
+    """
+
+    @classmethod
+    def model_validate(cls, obj: object, **kwargs: object) -> ConsequenceAnnotation:  # type: ignore[override]
+        payload = dict(obj) if isinstance(obj, dict) else obj
+        if isinstance(payload, dict) and payload.get("impact") is None:
+            payload["impact"] = ImpactSeverity.MODIFIER
+        return super().model_validate(payload, **kwargs)  # type: ignore[arg-type]
+
+    def __init__(self, **data: object) -> None:
+        if data.get("impact") is None:
+            data["impact"] = ImpactSeverity.MODIFIER
+        super().__init__(**data)  # type: ignore[arg-type]
+
+
+@requires_nullable_impact
+def test_a_model_that_substitutes_an_impact_is_caught_by_the_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe must check what the model *did*, not merely that it did not raise.
+
+    With a coercing model bound, the old probe returned True, the adapter
+    constructed happily, and every annotation carried MODIFIER — a member of
+    ``prioritization.filters.BENIGN_IMPACTS`` — while ``synthetic`` was False. The
+    probe now round-trips and sees the substitution.
+    """
+    import mva.annotation.gene_intervals as module
+
+    monkeypatch.setattr(module, "ConsequenceAnnotation", _CoercingConsequenceAnnotation)
+    assert module.model_accepts_unassessed_impact() is False
+
+
+@requires_nullable_impact
+def test_the_adapter_refuses_to_construct_against_a_substituting_model(
+    index: ManeGeneIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the refusal reaches construction, so no annotation is ever emitted."""
+    import mva.annotation.gene_intervals as module
+
+    monkeypatch.setattr(module, "ConsequenceAnnotation", _CoercingConsequenceAnnotation)
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        ManeGeneAdapter(index)
+    assert str(excinfo.value) == IMPACT_NOT_ASSESSED_REMEDIATION
+
+
+@requires_nullable_impact
+def test_the_emitted_annotation_is_checked_and_not_only_the_probe(
+    index: ManeGeneIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The invariant holds on the object handed back, not on a probe object.
+
+    A probe run once at construction can be defeated by anything that changes
+    behaviour afterwards. The check that matters is on what ``annotate`` actually
+    returns, so the substitution is caught even when it appears after the adapter
+    was built.
+    """
+    import mva.annotation.gene_intervals as module
+
+    built = ManeGeneAdapter(index)
+    monkeypatch.setattr(module, "ConsequenceAnnotation", _CoercingConsequenceAnnotation)
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        built.annotate([variant_id("chr15", BUB1B.start)])
+    message = str(excinfo.value)
+    assert "modifier" in message.lower()
+    assert "did not compute" in message
+
+
+def test_no_impact_severity_is_ever_named_as_a_value_in_this_module() -> None:
+    """A structural lint: the adapter may not reach for a severity to emit.
+
+    ``impact=None`` is one edit away from ``impact=ImpactSeverity.MODIFIER``, and
+    that edit would look locally reasonable — the field is typed to accept it. The
+    lint makes the omission enforced rather than merely current. ``ImpactSeverity``
+    may still be *named* (the remediation text and the type annotation need it);
+    what may not appear is a member access, which is the only way to obtain a
+    severity value.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[2] / "src" / "mva" / "annotation" / "gene_intervals.py"
+    )
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    offences = [
+        f"  src/mva/annotation/gene_intervals.py:{node.lineno} — {ast.unparse(node)}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "ImpactSeverity"
+    ]
+    assert not offences, (
+        "This adapter assigns genes by interval join and computes no molecular "
+        "consequence, so it may never name an ImpactSeverity member as a value. "
+        "Emitting one would attach a severity nobody predicted to every variant it "
+        "annotates, while the adapter still declares synthetic=False (GP-14, GP-20). "
+        "Remove the member access; the honest value is None, which "
+        "VariantRecord.worst_impact_for_gene and prioritization.scoring already "
+        "handle as NOT ASSESSED. Offending lines:\n" + "\n".join(offences)
+    )
+
+
+# ------------------------------------------------------ finding 6: build confusion
+
+
+def test_a_wrong_build_batch_raises_rather_than_returning_zero_records(
+    index: ManeGeneIndex,
+) -> None:
+    """The guard is real at the Protocol surface, not only on the index.
+
+    ``annotate`` is what ``annotation.service`` calls. A GRCh37 batch that came
+    back as ``{}`` would be read as "every one of these variants is intergenic",
+    which removes all of them from ``gene_symbols``, from gene grouping and from
+    pairing — the exact silent zero-record failure this project already had once.
+    """
+    if not MODEL_CAN_REPRESENT_UNASSESSED_IMPACT:
+        pytest.skip("ConsequenceAnnotation.impact cannot yet represent 'not assessed'.")
+    built = ManeGeneAdapter(index)
+    grch37 = [f"GRCh37:chr15:{BUB1B.start}:C:T", f"GRCh37:chr11:{CEP57.start}:C:T"]
+
+    with pytest.raises(GenomeBuildMismatchError) as excinfo:
+        built.annotate(grch37)
+    message = str(excinfo.value)
+    assert "GRCh37" in message
+    assert "GRCh38" in message
+    # PRIV-09: the build names, never the coordinate.
+    assert str(BUB1B.start) not in message
+
+    # The same batch relabelled GRCh38 is answered, so the refusal is about the
+    # build token and not about the coordinates being unreachable.
+    assert built.annotate([variant_id("chr15", BUB1B.start)])
+
+
+def test_one_wrong_build_id_poisons_the_batch_rather_than_being_dropped(
+    index: ManeGeneIndex,
+) -> None:
+    """A single stray build must not be silently skipped among valid ones.
+
+    Dropping it would return a plausible partial answer, and the dropped variant
+    would be scored as intergenic. Refusing the batch is the only outcome a caller
+    cannot misread.
+    """
+    if not MODEL_CAN_REPRESENT_UNASSESSED_IMPACT:
+        pytest.skip("ConsequenceAnnotation.impact cannot yet represent 'not assessed'.")
+    built = ManeGeneAdapter(index)
+    with pytest.raises(GenomeBuildMismatchError):
+        built.annotate([variant_id("chr15", BUB1B.start), f"GRCh37:chr11:{CEP57.start}:C:T"])
+
+
+def test_a_release_whose_build_disagrees_with_the_join_is_refused(tmp_path: Path) -> None:
+    """And the mirror case: the *index* may not be built for another assembly.
+
+    Checked at construction rather than at the first lookup, because a GRCh37 gene
+    model joined to GRCh38 coordinates does not fail — it answers, with the wrong
+    genes, megabases away.
+    """
+    gtf_path, summary_path = minimal_release(tmp_path, prefix="MANE.GRCh37.v1.5.")
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        ManeGeneIndex(
+            gtf_path,
+            summary_path,
+            expected_gtf_sha256=hash_file(gtf_path),
+            expected_summary_sha256=hash_file(summary_path),
+            build=GenomeBuild.GRCH38,
+        )
+    message = str(excinfo.value)
+    assert "GRCh37" in message
+    assert "GRCh38" in message

@@ -8,6 +8,7 @@ same bytes for the same value. These tests hold that floor.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -52,7 +53,7 @@ def test_streamed_rows_consume_the_iterable_exactly_once(tmp_path: Path) -> None
     """A generator must not be walked twice; at WGS scale a rewind is not possible."""
     consumed: list[int] = []
 
-    def rows() -> object:
+    def rows() -> Iterator[dict[str, int]]:
         for i in range(3):
             consumed.append(i)
             yield {"i": i}

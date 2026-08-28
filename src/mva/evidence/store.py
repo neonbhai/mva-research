@@ -193,6 +193,15 @@ PARQUET_DATA_PAGE_SIZE: Final[int] = 1 << 20
 #: used here (timestamps as int64 micros, lists as 3-level LIST).
 PARQUET_VERSION: Final[str] = "2.6"
 
+#: Evidence items per ``INSERT ... ON CONFLICT`` when writing a stream.
+#:
+#: One batch costs one row dict and one bound-parameter list per item, so this is
+#: the resident cost of :meth:`EvidenceStore.write_evidence_stream`: ~50 MB at
+#: 50,000 items. Larger batches stop helping — the cost is dominated by DuckDB's
+#: own execution, not by round trips — and smaller ones multiply statement
+#: overhead across the ~200-400 batches a whole-genome ledger needs.
+EVIDENCE_WRITE_BATCH: Final[int] = 50_000
+
 
 @dataclass(frozen=True)
 class GraphEdge:
@@ -758,7 +767,45 @@ class EvidenceStore:
 
         Contradictions are written exactly like support (GP-19): there is no
         filter on ``direction`` anywhere on this path.
+
+        Materialises one row dict per item before writing. That is fine for a case
+        and not fine for a genome — a whole-genome ledger holds tens of millions of
+        items (``docs/scale-report.md``) — so :meth:`write_evidence_stream` exists
+        for callers whose count scales with the callset.
         """
+        return self._write_evidence_batch(items)
+
+    def write_evidence_stream(
+        self,
+        items: Iterable[EvidenceItem],
+        *,
+        batch_size: int = EVIDENCE_WRITE_BATCH,
+    ) -> int:
+        """Persist an evidence *stream*, one bounded batch at a time.
+
+        Same rows, same table, same result as :meth:`write_evidence` over the same
+        items — the batching is invisible in the stored data, because every write is
+        an upsert on a content-derived primary key and the Parquet export orders by
+        that key rather than by insertion (see :meth:`export_parquet`). What changes
+        is that neither the caller nor this method ever holds the whole ledger.
+
+        Returns the number of rows written across all batches.
+        """
+        if batch_size < 1:
+            msg = f"batch_size={batch_size} must be at least 1."
+            raise EvidenceError(msg)
+        written = 0
+        batch: list[EvidenceItem] = []
+        for item in items:
+            batch.append(item)
+            if len(batch) >= batch_size:
+                written += self._write_evidence_batch(batch)
+                batch = []
+        if batch:
+            written += self._write_evidence_batch(batch)
+        return written
+
+    def _write_evidence_batch(self, items: Sequence[EvidenceItem]) -> int:
         rows: list[Mapping[str, object]] = []
         citations: list[Mapping[str, object]] = []
         for item in items:

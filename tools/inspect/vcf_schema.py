@@ -89,7 +89,7 @@ def main() -> int:
     print(f"  tokens: {[_sample_token(s) for s in hdr.samples]}")
 
     for kind in ("info", "formats", "filters"):
-        ids = sorted(str(k) for k in getattr(hdr, kind).keys())
+        ids = sorted(str(k) for k in getattr(hdr, kind))
         print(f"\n=== {kind.upper()} ids ({len(ids)}) ===")
         print("  " + ", ".join(ids))
 
@@ -106,7 +106,7 @@ def main() -> int:
                 multi += 1
             if any(len(a) != len(rec.ref or "") for a in alts):
                 indel += 1
-            filt[",".join(str(k) for k in rec.filter.keys()) or "."] += 1
+            filt[",".join(str(k) for k in rec.filter) or "."] += 1
             if n >= args.scan:
                 break
         print(f"  scanned: {n:,}")

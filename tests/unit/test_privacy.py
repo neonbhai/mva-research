@@ -1284,7 +1284,7 @@ def test_the_offline_profile_is_armed_while_the_annotate_stage_executes(
     from mva.privacy import netguard
 
     observed: list[bool] = []
-    real = orchestrator.annotate_variants
+    real = orchestrator.iter_annotated
 
     def probe(*args: object, **kwargs: object) -> object:
         observed.append(netguard.is_armed())
@@ -1293,11 +1293,11 @@ def test_the_offline_profile_is_armed_while_the_annotate_stage_executes(
     assert synthetic_config.network_profile is not NetworkProfile.ONLINE
     assert not netguard.is_armed(), "the guard must not already be armed"
 
-    orchestrator.annotate_variants = probe  # type: ignore[assignment]
+    orchestrator.iter_annotated = probe  # type: ignore[assignment]
     try:
         orchestrator.execute_pipeline(synthetic_config, synthetic_workspace, stop_after="annotate")
     finally:
-        orchestrator.annotate_variants = real  # type: ignore[assignment]
+        orchestrator.iter_annotated = real  # type: ignore[assignment]
 
     assert observed == [True], (
         "the offline profile was not armed while `annotate` ran. Every stage "

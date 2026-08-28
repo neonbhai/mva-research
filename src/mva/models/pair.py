@@ -14,7 +14,7 @@ from typing import Self
 
 from pydantic import Field, computed_field, model_validator
 
-from mva.models.base import FrozenModel
+from mva.models.base import FrozenModel, error_token
 from mva.models.variant import VariantRecord
 
 
@@ -237,11 +237,26 @@ class CandidatePair(FrozenModel):
 
     @model_validator(mode="after")
     def _pair_variants_distinct(self) -> Self:
+        """A pairing defect must not pay for itself with a disclosure (PRIV-09).
+
+        ``pair_id`` stays in the message and the variant ID does not, which is the
+        whole distinction: :func:`make_pair_id` is a blake2b digest that is already
+        written into every artifact this run produces, so naming it costs nothing
+        and is the only way to tie the failure to the candidate. A ``variant_id``
+        is a coordinate and an allele pair — under this project's threat model a
+        handful of those identifies an individual and their parents — and an
+        ordinary ``ValueError`` carries it into the terminal, the log file, a crash
+        report and an agent's context.
+        """
         if self.variant_b is not None and self.variant_a.variant_id == self.variant_b.variant_id:
             msg = (
-                f"Pair {self.pair_id!r} lists the same variant twice "
-                f"({self.variant_a.variant_id}). A variant cannot pair with itself; a "
-                "homozygous call must use InheritanceModel.HOMOZYGOUS_RECESSIVE."
+                f"Pair {self.pair_id!r} lists the same variant as both of its members "
+                f"(variant handle <variant:{error_token(self.variant_a.variant_id)}>; the "
+                "coordinate is tokenised rather than echoed, PRIV-09). A variant cannot "
+                "pair with itself: two copies of one allele is a homozygous call, and it "
+                "must be built as InheritanceModel.HOMOZYGOUS_RECESSIVE with variant_b "
+                "left None. This normally means the pair generator emitted a self-pair "
+                "for a gene holding a single qualifying variant."
             )
             raise ValueError(msg)
         return self

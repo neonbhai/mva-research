@@ -26,8 +26,10 @@ to evidence IDs (`AssertionResolver.require`).
   speculation); `EvidenceType` says what kind of experiment it was. A validator
   forbids labelling a prediction as an observation.
 - **IDs are content-derived**, excluding the timestamp: the same conclusion drawn
-  twice is one piece of evidence, not two. This is also what makes repeat runs
-  byte-identical.
+  twice is one piece of evidence, not two. So the *ID* is stable across runs, which
+  is what makes the ledger idempotent. It does not make repeat runs byte-identical:
+  `EvidenceItem.timestamp` still varies under a real clock and still lands in
+  `evidence_items.parquet`. Nothing else does — see `docs/handoff-integrity.md` §4.
 - **Database assertions require a versioned citation.** "AF = 0.0001" is
   meaningless without knowing which gnomAD release and which population.
 

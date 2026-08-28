@@ -52,6 +52,7 @@ from mva.annotation.gnomad_sites import GnomadSitesFrequencyAdapter
 from mva.determinism import hash_file, stable_hash
 from mva.errors import AdapterUnavailableError
 from mva.ingestion.normalise import (
+    WARN_REFERENCE_LOOKUP_FAILED,
     FastaReference,
     normalise_variants,
     open_reference_fasta,
@@ -420,6 +421,36 @@ def test_an_unreadable_reference_degrades_partially_rather_than_silently() -> No
     assert result.left_alignment.status is LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
     assert result.left_alignment.is_degraded is True
     assert result.variants[0].coordinate.position == REPEAT_TRACT_END
+
+
+def test_a_reference_that_fails_only_on_the_shift_is_not_reported_as_applied() -> None:
+    """The residual gap the whole-reference failure test does not reach.
+
+    `_reference_matches` reads the record's own REF span first, so a FASTA that is
+    broken *everywhere* is caught there and the record is never aligned. This one
+    answers that read correctly and then fails on the base to its left — the base
+    the shift needs. Before the fix, `reference_consulted` stayed True, `unaligned`
+    stayed 0 and the batch reported APPLIED over a record that was trimmed only:
+    the same lie as the two annotation adapters, one stage earlier.
+    """
+
+    class RefSpanOnlyReference:
+        """Serves the record's own REF base and nothing to the left of it."""
+
+        def fetch(self, contig: str, start: int, end: int) -> str:
+            if (start, end) == (REPEAT_TRACT_END, REPEAT_TRACT_END):
+                return CHR21_SEQ[REPEAT_TRACT_END - 1]
+            raise OSError("index unavailable")
+
+    result = normalise_variants(
+        [make_record(*RIGHTMOST_INSERTION)], reference=RefSpanOnlyReference()
+    )
+    assert result.left_alignment.status is LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
+    assert result.left_alignment.is_degraded is True
+    assert result.left_alignment.unaligned_indel_count == 1
+    # Trimmed only: the record stays where it was rather than half way along the tract.
+    assert result.variants[0].coordinate.position == REPEAT_TRACT_END
+    assert any(warning.startswith(WARN_REFERENCE_LOOKUP_FAILED) for warning in result.warnings)
 
 
 def test_no_degraded_message_echoes_a_coordinate_or_an_allele() -> None:

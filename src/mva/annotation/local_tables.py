@@ -22,6 +22,33 @@ Design notes that matter more than they look:
   defaulted. AF = 0 for an unqueried site is a fabricated negative (GP-14).
 * Empty cells parse to ``None``, never to ``0`` or ``""``.
 * Ordering within a variant is an explicit total order, not file order.
+* **Both sides of the join go through :func:`mva.alleles.canonicalise_allele`**
+  (ADR 0018). See :func:`_join_key`.
+
+Representation, and what these adapters may not claim
+-----------------------------------------------------
+
+``chr1:100 AT>AG`` and ``chr1:101 T>G`` are one substitution written two ways.
+These adapters used to store the table's ``variant_id`` column verbatim and look
+it up by direct string membership, so the two spellings did not join — and a
+failed join does not raise. It returns *absence*, which this pipeline reads as
+"no frequency data" (GP-14) and, for a missing consequence, as grounds for
+dropping the allele in selection. A failed join is indistinguishable from "novel
+and ultra-rare", which is the profile of a causal variant. ADR 0018 established
+one canonicalisation rule at layer 1 and required every join key to go through
+it; the real gnomAD and ClinVar adapters were converted then and these were not,
+which mattered because these are the **default executable adapter path**.
+
+A TSV has no reference genome, so what is available here is **trimming, not
+left-alignment**. Trimming needs no reference and is always correct; rolling an
+indel leftwards through a repeat tract requires reading the bases to its left.
+The honest consequence is that an indel spelled at a different legal position
+within a repeat still will not join, and neither adapter is entitled to imply
+otherwise — so each publishes a
+:class:`~mva.alleles.LeftAlignmentReport` on its ``left_alignment`` property
+stating exactly that (``UNAVAILABLE_NO_REFERENCE`` whenever the table holds an
+indel). Trim-only is strictly better than raw string comparison; it is not
+complete, and the difference is declared rather than hoped over.
 """
 
 from __future__ import annotations
@@ -32,10 +59,17 @@ from typing import Any, Final
 
 import yaml
 
+from mva.alleles import (
+    LeftAlignmentReport,
+    canonicalise_allele,
+    is_sequence_allele,
+    summarise_left_alignment,
+)
 from mva.annotation.base import AdapterSet
 from mva.determinism import hash_file
 from mva.errors import AdapterUnavailableError
 from mva.models.base import FrozenModel
+from mva.models.genome import ContigStyle, GenomeBuild, normalise_contig
 from mva.models.variant import (
     ClinicalAssertion,
     ConsequenceAnnotation,
@@ -521,6 +555,93 @@ def _unique_ids(variant_ids: Sequence[str]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+# ------------------------------------------------------------------- the join key
+
+
+def _join_key(variant_id: str) -> str:
+    """The one representation both sides of the join are reduced to (ADR 0018).
+
+    Applied to the table's ``variant_id`` column when the index is built **and** to
+    the caller's ID when it is looked up. Both sides therefore agree by
+    construction rather than by whoever happened to spell it first — which is the
+    whole content of ADR 0018, and the reason this function delegates instead of
+    trimming anything itself. There is deliberately no allele arithmetic in this
+    module; a second implementation of the rule is the defect, not the cure, and
+    ``tests/unit/test_normalise_representation.py`` fails the build over any that
+    appears here.
+
+    Three normalisations, in order, each one a comparison that would otherwise fail
+    on a spelling difference:
+
+    * **Build** through :meth:`~mva.models.genome.GenomeBuild.parse`, so ``hg38``
+      and ``GRCh38`` name one assembly — while ``GRCh37`` still never joins
+      ``GRCh38`` (GP-11: the same locus differs by megabases).
+    * **Contig** through :func:`~mva.models.genome.normalise_contig`, so ``15`` and
+      ``chr15`` are one chromosome. (Only the *challenge scorer* compares contig
+      strings raw; that is a property of the submission CSV, not of this join.)
+    * **Alleles** through :func:`mva.alleles.canonicalise_allele`.
+
+    **No reference is passed, and none is available.** These adapters read a TSV;
+    there is no FASTA to roll an indel leftwards against. The result is trimmed and
+    honestly not left-aligned — ``operations`` will not claim otherwise, and
+    :func:`_left_alignment_report` turns that into a statement the caller receives.
+
+    An ID that is not ``build:contig:pos:ref:alt``, names an unrecognised assembly,
+    or carries a non-canonical contig is returned **verbatim**. Refusing to guess is
+    the point: a key reinterpreted on a guess joins the wrong record, which is
+    worse than joining none.
+    """
+    parts = variant_id.split(":")
+    if len(parts) != 5:
+        return variant_id
+    build_token, contig_token, position_token, ref, alt = parts
+    try:
+        build = GenomeBuild.parse(build_token)
+        contig = normalise_contig(contig_token, ContigStyle.UCSC)
+        position = int(position_token)
+    except ValueError:
+        return variant_id
+    canonical = canonicalise_allele(
+        contig=contig,
+        position=position,
+        ref=ref.strip().upper(),
+        alt=alt.strip().upper(),
+    )
+    return f"{build.value}:{contig}:{canonical.position}:{canonical.ref}:{canonical.alt}"
+
+
+def _key_is_indel(key: str) -> bool:
+    """True for a length-changing key. Symbolic alleles are not indels."""
+    parts = key.split(":")
+    if len(parts) != 5:
+        return False
+    ref, alt = parts[3], parts[4]
+    if not is_sequence_allele(ref) or not is_sequence_allele(alt):
+        return False
+    return len(ref) != len(alt)
+
+
+def _left_alignment_report(index: Mapping[str, object]) -> LeftAlignmentReport:
+    """What this adapter's keys may and may not be trusted to join (GP-14).
+
+    Derived from the index rather than asserted, and derived through
+    :func:`~mva.alleles.summarise_left_alignment` so no adapter can label its own
+    batch by hand. ``reference_available=False`` is not a placeholder: a TSV
+    adapter has no reference and never will, so every indel in the table is
+    trimmed-only and the status is ``UNAVAILABLE_NO_REFERENCE``. A table of SNVs
+    reports ``NOT_REQUIRED`` instead — "could not left-align" and "had nothing to
+    left-align" are opposite claims about how far to trust the rarity of every
+    indel in the run, and they must not share a value.
+    """
+    indels = sum(1 for key in index if _key_is_indel(key))
+    return summarise_left_alignment(
+        indel_count=indels,
+        shifted_count=0,
+        unaligned_indel_count=indels,
+        reference_available=False,
+    )
+
+
 # --------------------------------------------------------------------------- adapters
 
 
@@ -537,6 +658,7 @@ class LocalConsequenceAdapter:
         self._index: dict[str, tuple[ConsequenceAnnotation, ...]] = _index_consequences(
             table_path, tool=CONSEQUENCE_ADAPTER_NAME, tool_version=version
         )
+        self._left_alignment = _left_alignment_report(self._index)
 
     @property
     def name(self) -> str:
@@ -555,6 +677,15 @@ class LocalConsequenceAdapter:
     def table_path(self) -> Path:
         return self._table_path
 
+    @property
+    def left_alignment(self) -> LeftAlignmentReport:
+        """Whether this table's indel keys can be trusted to join (GP-14).
+
+        Always ``reference_available=False``: a TSV adapter has no FASTA, so its
+        keys are trimmed and not left-aligned. See :func:`_left_alignment_report`.
+        """
+        return self._left_alignment
+
     def annotate(
         self, variant_ids: Sequence[str]
     ) -> Mapping[str, tuple[ConsequenceAnnotation, ...]]:
@@ -563,12 +694,18 @@ class LocalConsequenceAdapter:
         Unknown variants are **omitted**, not returned with an empty tuple: this
         adapter cannot distinguish "intergenic" from "not in my table", and it is
         not entitled to imply the former.
+
+        The lookup is by :func:`_join_key`, but the result is keyed by the
+        **caller's own ID string**. ``mva.annotation.service`` resolves the mapping
+        with ``record.variant_id``; re-keying to the canonical form would move the
+        silent miss one layer up instead of removing it.
         """
-        return {
-            variant_id: self._index[variant_id]
-            for variant_id in _unique_ids(variant_ids)
-            if variant_id in self._index
-        }
+        found: dict[str, tuple[ConsequenceAnnotation, ...]] = {}
+        for variant_id in _unique_ids(variant_ids):
+            entry = self._index.get(_join_key(variant_id))
+            if entry is not None:
+                found[variant_id] = entry
+        return found
 
 
 class LocalFrequencyAdapter:
@@ -578,6 +715,7 @@ class LocalFrequencyAdapter:
         self._table_path = table_path
         self._version = version
         self._index: dict[str, tuple[PopulationFrequency, ...]] = _index_frequencies(table_path)
+        self._left_alignment = _left_alignment_report(self._index)
 
     @property
     def name(self) -> str:
@@ -596,6 +734,17 @@ class LocalFrequencyAdapter:
     def table_path(self) -> Path:
         return self._table_path
 
+    @property
+    def left_alignment(self) -> LeftAlignmentReport:
+        """Whether this table's indel keys can be trusted to join (GP-14).
+
+        The expensive direction: a frequency that fails to join is scored as no
+        frequency data at all, and absence of frequency is not evidence of rarity —
+        but it is the input to the rarity signal, which is the strongest promoting
+        term the ranker has. See :func:`_left_alignment_report`.
+        """
+        return self._left_alignment
+
     def frequencies(
         self, variant_ids: Sequence[str]
     ) -> Mapping[str, tuple[PopulationFrequency, ...]]:
@@ -604,12 +753,16 @@ class LocalFrequencyAdapter:
         A variant absent from the table is absent from this mapping. It has no
         frequency data — which is emphatically not an allele frequency of zero, and
         not evidence of rarity (GP-14). The caller must handle the missing key.
+
+        Looked up by :func:`_join_key`, returned under the caller's own ID: see
+        :meth:`LocalConsequenceAdapter.annotate`.
         """
-        return {
-            variant_id: self._index[variant_id]
-            for variant_id in _unique_ids(variant_ids)
-            if variant_id in self._index
-        }
+        found: dict[str, tuple[PopulationFrequency, ...]] = {}
+        for variant_id in _unique_ids(variant_ids):
+            entry = self._index.get(_join_key(variant_id))
+            if entry is not None:
+                found[variant_id] = entry
+        return found
 
 
 class NullClinicalAdapter:
@@ -652,7 +805,10 @@ def _index_consequences(
         annotation = _build_consequence(
             row, path=table_path, lineno=lineno, tool=tool, tool_version=tool_version
         )
-        grouped.setdefault(variant_id, []).append(annotation)
+        # ADR 0018: the table's spelling is canonicalised, not trusted. Two rows
+        # spelling one variant two ways merge into that variant's annotations
+        # rather than becoming two entries only one of which a query can find.
+        grouped.setdefault(_join_key(variant_id), []).append(annotation)
     return {
         variant_id: tuple(sorted(annotations, key=_consequence_sort_key))
         for variant_id, annotations in grouped.items()
@@ -663,7 +819,7 @@ def _index_frequencies(table_path: Path) -> dict[str, tuple[PopulationFrequency,
     grouped: dict[str, list[PopulationFrequency]] = {}
     for lineno, row in _read_rows(table_path, _FREQUENCY_COLUMNS):
         variant_id = _required_cell(row, "variant_id", path=table_path, lineno=lineno)
-        grouped.setdefault(variant_id, []).append(
+        grouped.setdefault(_join_key(variant_id), []).append(  # ADR 0018
             _build_frequency(row, path=table_path, lineno=lineno)
         )
     return {

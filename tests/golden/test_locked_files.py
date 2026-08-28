@@ -30,9 +30,12 @@ REPO = find_repo_root(Path(__file__))
 #: path -> sha256. Regenerate with:
 #:     shasum -a 256 config/default.yaml tests/golden/*.tsv
 LOCKED: dict[str, str] = {
-    # Updated by ADR 0010 (frequency.min_allele_number). Golden expectations
-    # below are unchanged: the synthetic case ranks identically before and after.
-    "config/default.yaml": "bba9451138e1b3eb38d3622a0ab1911b3b599d10e3afbd314e28e343d8ff8058",
+    # Updated by ADR 0019 (the `selection` block: the candidate-selection stage's
+    # cut-points move out of a dataclass default and into configuration, GP-32) and
+    # before that by ADR 0010 (frequency.min_allele_number). Golden expectations
+    # below are unchanged: measured before and after, the synthetic case ranks
+    # identically — see docs/handoff-scale.md §3 for the ranks-1-to-5 comparison.
+    "config/default.yaml": "c2fde51ba64b483bd7e34b554e432004a5693efcf1bcbce3def176c4f18b1e1d",
     "tests/golden/expected_ranking.tsv": "ec082f5843ed0f86b37aaa370d48b7857497639cc0a253b5eaf87be153cd802b",  # noqa: E501 - a sha256 does not wrap
     "tests/golden/expected_drug_outcomes.tsv": "3a8184e2379c69b9c3b04c95a4ba0bba1866b7d68b5afe6e11787acd024d6d8a",  # noqa: E501 - a sha256 does not wrap
 }

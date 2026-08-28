@@ -31,9 +31,10 @@ a fixed per-record sequence.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import islice
 
 from mva.annotation.base import (
     SYNTHETIC_STANDIN_LIMITATION,
@@ -41,6 +42,7 @@ from mva.annotation.base import (
     AdapterSet,
 )
 from mva.clock import Clock
+from mva.errors import AnnotationError
 from mva.models.base import AssertionTier
 from mva.models.evidence import (
     Citation,
@@ -123,13 +125,40 @@ class AnnotationResult:
     warnings: tuple[str, ...] = ()
 
 
+#: Records held in memory at once by :func:`iter_annotated`, and therefore the
+#: number of IDs one adapter call receives.
+#:
+#: Adapters are batch lookups by contract (``Sequence[str]`` in,
+#: ``Mapping[str, ...]`` out), so the choice is a trade between round trips and
+#: resident memory, not between batching and not batching. 5,000 records is ~20 MB
+#: of ``VariantRecord`` (measured at 3,672 bytes each, ``docs/scale-report.md`` §2)
+#: plus whatever the adapter returns for them, and it costs 911 adapter calls over
+#: a 4.5 M-record whole-genome callset. Smaller batches buy little memory and pay
+#: real per-call overhead against a subprocess- or index-backed adapter.
+DEFAULT_ANNOTATION_BATCH_SIZE: int = 5_000
+
+
+@dataclass(frozen=True, slots=True)
+class AnnotatedVariant:
+    """One annotated record, with exactly the evidence its annotation licensed.
+
+    The pairing of record and evidence is what lets the caller stream: a consumer
+    can write the record to an artifact and push the evidence into a ledger in the
+    same step, and then drop both. In the batch API the same values arrive as two
+    parallel tuples on :class:`AnnotationResult`, in the same order.
+    """
+
+    variant: VariantRecord
+    evidence: tuple[EvidenceItem, ...]
+
+
 def annotate_variants(
     variants: Sequence[VariantRecord],
     *,
     adapters: AdapterSet,
     clock: Clock,
 ) -> AnnotationResult:
-    """Annotate records against the bound adapter set.
+    """Annotate records against the bound adapter set, materialising the result.
 
     Every input record appears in the output, in input order, annotated or not:
     filtering is a separate concern from annotation (GP-13). Adapters are called
@@ -139,92 +168,341 @@ def annotate_variants(
     and ``clinical_assertions``; it replaces rather than merges those fields, so a
     result always reflects exactly one adapter set. Re-annotating already-annotated
     records is reported in ``warnings``.
+
+    **This is the fixture-scale API.** It holds the input sequence, the annotated
+    copy of it and every evidence item simultaneously — three full copies of a
+    callset, ~16 GB of ``VariantRecord`` alone at whole-genome scale
+    (``docs/scale-report.md`` §2). :func:`iter_annotated` is the same computation
+    with the same output, one record at a time; a caller whose record count scales
+    with the callset must use it. This function is now a thin drain of that stream
+    with ``batch_size=None`` (one batch, one adapter call, exactly as before), so
+    the two paths cannot drift.
     """
-    records = tuple(variants)
-    variant_ids = _unique_ids(record.variant_id for record in records)
-
-    consequence_index = adapters.consequence.annotate(variant_ids)
-    frequency_index = adapters.frequency.frequencies(variant_ids)
-    clinical_index: Mapping[str, tuple[ClinicalAssertion, ...]] = (
-        adapters.clinical.assertions(variant_ids) if adapters.clinical is not None else {}
-    )
-
-    descriptors = adapters.descriptors()
-    consequence_desc, frequency_desc = descriptors[0], descriptors[1]
-    clinical_desc = descriptors[2] if len(descriptors) > 2 else None
-    timestamp = clock.now()
-
+    stream = iter_annotated(variants, adapters=adapters, clock=clock, batch_size=None)
     annotated: list[VariantRecord] = []
     evidence: list[EvidenceItem] = []
-    for record in records:
+    for annotation in stream:
+        annotated.append(annotation.variant)
+        evidence.extend(annotation.evidence)
+    return AnnotationResult(
+        variants=tuple(annotated),
+        evidence=tuple(evidence),
+        coverage=stream.coverage(),
+        warnings=stream.warnings(),
+    )
+
+
+def iter_annotated(
+    variants: Iterable[VariantRecord],
+    *,
+    adapters: AdapterSet,
+    clock: Clock,
+    batch_size: int | None = DEFAULT_ANNOTATION_BATCH_SIZE,
+) -> AnnotationStream:
+    """Annotate a stream of records without holding the callset.
+
+    Emits one :class:`AnnotatedVariant` per input record, in input order, with the
+    same annotations and the same evidence in the same order as
+    :func:`annotate_variants` produces for the same input. What changes is only
+    what is alive at once: one batch of records and the adapter results for that
+    batch, rather than the whole callset three times over.
+
+    Adapters are still called in bulk — ``batch_size`` IDs at a time, deduplicated
+    within the batch exactly as the whole-callset call deduplicates globally. A
+    per-variant call would be far worse than the memory it saves: a real adapter is
+    a tabix seek, an index probe or a subprocess, and 4.5 M of those is not a
+    smaller version of 911 of them.
+
+    ``batch_size=None`` means "one batch": every record is read into memory and one
+    adapter call is made, which is precisely the pre-streaming behaviour and is what
+    :func:`annotate_variants` uses.
+
+    Coverage denominators are *distinct* variant IDs, as before. Duplicates are
+    collapsed within a batch, and a duplicate spanning a batch boundary is collapsed
+    too (the last ID of the previous batch is carried). For a coordinate-sorted
+    stream — which is what ingestion emits, and the only order in which two records
+    can share an ID — that is exactly the global deduplication the batch path does.
+    An unsorted stream with far-apart duplicates would count a repeat twice, which
+    can only *understate* coverage; it can never invent it.
+    """
+    return AnnotationStream(variants, adapters=adapters, clock=clock, batch_size=batch_size)
+
+
+class AnnotationStream:
+    """Annotated records one at a time; coverage and warnings at the end.
+
+    Construct via :func:`iter_annotated`. Single-pass: re-iterating would call every
+    adapter a second time and double every counter, so it raises instead.
+    """
+
+    __slots__ = (
+        "_adapters",
+        "_batch_size",
+        "_carry",
+        "_clinical_desc",
+        "_consequence_desc",
+        "_descriptors",
+        "_distinct",
+        "_exhausted",
+        "_frequency_desc",
+        "_hits",
+        "_pre_annotated",
+        "_records",
+        "_source",
+        "_started",
+        "_timestamp",
+    )
+
+    def __init__(
+        self,
+        variants: Iterable[VariantRecord],
+        *,
+        adapters: AdapterSet,
+        clock: Clock,
+        batch_size: int | None,
+    ) -> None:
+        if batch_size is not None and batch_size < 1:
+            msg = (
+                f"batch_size={batch_size} must be at least 1, or None for a single "
+                "whole-input batch. A batch size of zero would call the adapters "
+                "forever without ever emitting a record."
+            )
+            raise AnnotationError(msg)
+        self._source = variants
+        self._adapters = adapters
+        self._batch_size = batch_size
+        descriptors = adapters.descriptors()
+        self._descriptors = descriptors
+        self._consequence_desc = descriptors[0]
+        self._frequency_desc = descriptors[1]
+        self._clinical_desc = descriptors[2] if len(descriptors) > 2 else None
+        # Sampled once, before any record is seen, so every evidence item in a run
+        # carries the same timestamp however long the stream takes (GP-30).
+        self._timestamp = clock.now()
+        self._records = 0
+        self._pre_annotated = 0
+        self._distinct = 0
+        #: Distinct IDs the consequence / frequency / clinical adapter answered for.
+        self._hits = [0, 0, 0]
+        self._carry: str | None = None
+        self._started = False
+        self._exhausted = False
+
+    # ------------------------------------------------------------------ driving
+
+    def __iter__(self) -> Iterator[AnnotatedVariant]:
+        if self._started:
+            msg = (
+                "This annotation stream has already been iterated. Re-iterating would "
+                "call every adapter a second time and double every coverage counter. "
+                "Call iter_annotated() again against a re-read source."
+            )
+            raise AnnotationError(msg)
+        self._started = True
+        return self._drive()
+
+    def _drive(self) -> Iterator[AnnotatedVariant]:
+        adapters = self._adapters
+        clinical_adapter = adapters.clinical
+        for batch in self._batches():
+            variant_ids = _unique_ids(record.variant_id for record in batch)
+            consequence_index = adapters.consequence.annotate(variant_ids)
+            frequency_index = adapters.frequency.frequencies(variant_ids)
+            clinical_index: Mapping[str, tuple[ClinicalAssertion, ...]] = (
+                clinical_adapter.assertions(variant_ids) if clinical_adapter is not None else {}
+            )
+            self._observe_batch(
+                variant_ids,
+                consequence_index=consequence_index,
+                frequency_index=frequency_index,
+                clinical_index=clinical_index,
+            )
+            for record in batch:
+                self._records += 1
+                if (
+                    record.consequences
+                    or record.population_frequencies
+                    or record.clinical_assertions
+                ):
+                    self._pre_annotated += 1
+                yield self._annotate(
+                    record,
+                    consequence_index=consequence_index,
+                    frequency_index=frequency_index,
+                    clinical_index=clinical_index,
+                )
+        self._exhausted = True
+
+    def _batches(self) -> Iterator[list[VariantRecord]]:
+        """Successive record batches. ``batch_size=None`` yields exactly one.
+
+        The single-batch case yields even when the input is empty, because the
+        pre-streaming implementation called every adapter with an empty ID tuple and
+        an adapter is entitled to notice that it was asked. The chunked case skips
+        the empty tail instead, so a drained stream makes no pointless final call.
+        """
+        if self._batch_size is None:
+            yield list(self._source)
+            return
+        iterator = iter(self._source)
+        while batch := list(islice(iterator, self._batch_size)):
+            yield batch
+
+    def _observe_batch(
+        self,
+        variant_ids: Sequence[str],
+        *,
+        consequence_index: Mapping[str, Sequence[object]],
+        frequency_index: Mapping[str, Sequence[object]],
+        clinical_index: Mapping[str, Sequence[object]],
+    ) -> None:
+        """Fold this batch into the running coverage counters."""
+        carry = self._carry
+        for variant_id in variant_ids:
+            if variant_id == carry:
+                # Counted as the tail of the previous batch; counting it again would
+                # inflate the denominator and understate coverage.
+                continue
+            self._distinct += 1
+            if consequence_index.get(variant_id):
+                self._hits[0] += 1
+            if frequency_index.get(variant_id):
+                self._hits[1] += 1
+            if clinical_index.get(variant_id):
+                self._hits[2] += 1
+        if variant_ids:
+            self._carry = variant_ids[-1]
+
+    def _annotate(
+        self,
+        record: VariantRecord,
+        *,
+        consequence_index: Mapping[str, tuple[ConsequenceAnnotation, ...]],
+        frequency_index: Mapping[str, tuple[PopulationFrequency, ...]],
+        clinical_index: Mapping[str, tuple[ClinicalAssertion, ...]],
+    ) -> AnnotatedVariant:
         variant_id = record.variant_id
         consequences = tuple(consequence_index.get(variant_id, ()))
         frequencies = tuple(frequency_index.get(variant_id, ()))
         assertions = tuple(clinical_index.get(variant_id, ()))
+        timestamp = self._timestamp
 
-        annotated.append(
-            record.with_annotations(
-                consequences=consequences,
-                # Explicitly empty when unknown. `with_annotations` treats None as
-                # "leave alone", and leaving stale frequencies alone would be worse
-                # than either alternative.
-                population_frequencies=frequencies,
-                clinical_assertions=assertions,
-            )
+        annotated = record.with_annotations(
+            consequences=consequences,
+            # Explicitly empty when unknown. `with_annotations` treats None as
+            # "leave alone", and leaving stale frequencies alone would be worse
+            # than either alternative.
+            population_frequencies=frequencies,
+            clinical_assertions=assertions,
         )
 
-        for annotation in consequences:
-            evidence.append(
-                _consequence_evidence(
-                    variant_id, annotation, adapter=consequence_desc, timestamp=timestamp
-                )
+        evidence: list[EvidenceItem] = [
+            _consequence_evidence(
+                variant_id, annotation, adapter=self._consequence_desc, timestamp=timestamp
             )
+            for annotation in consequences
+        ]
         if frequencies:
             evidence.extend(
                 _frequency_evidence(
-                    variant_id, frequency, adapter=frequency_desc, timestamp=timestamp
+                    variant_id, frequency, adapter=self._frequency_desc, timestamp=timestamp
                 )
                 for frequency in frequencies
             )
         else:
             evidence.append(
-                _missing_frequency_evidence(variant_id, adapter=frequency_desc, timestamp=timestamp)
+                _missing_frequency_evidence(
+                    variant_id, adapter=self._frequency_desc, timestamp=timestamp
+                )
             )
-        if clinical_desc is not None:
+        if self._clinical_desc is not None:
             evidence.extend(
                 _clinical_evidence(
-                    variant_id, assertion, adapter=clinical_desc, timestamp=timestamp
+                    variant_id, assertion, adapter=self._clinical_desc, timestamp=timestamp
                 )
                 for assertion in assertions
             )
+        return AnnotatedVariant(variant=annotated, evidence=tuple(evidence))
 
-    return AnnotationResult(
-        variants=tuple(annotated),
-        evidence=tuple(evidence),
-        coverage=_coverage(
-            variant_ids,
-            descriptors=descriptors,
-            # Must track AdapterSet.descriptors(), which omits the clinical slot when
-            # no clinical adapter is bound. Passing three indexes against two
-            # descriptors made zip(strict=True) raise, so an unbound clinical slot
-            # crashed the stage. strict=True is right and caught it; the call site
-            # was wrong.
-            indexes=(
-                (consequence_index, frequency_index, clinical_index)
-                if adapters.clinical is not None
-                else (consequence_index, frequency_index)
-            ),
-        ),
-        warnings=_warnings(
-            records,
-            variant_ids=variant_ids,
-            adapters=adapters,
-            descriptors=descriptors,
-            consequence_index=consequence_index,
-            frequency_index=frequency_index,
-            clinical_index=clinical_index,
-        ),
-    )
+    # ------------------------------------------------------------- reporting
+
+    @property
+    def drained(self) -> bool:
+        """Whether the stream ran to completion. Counters are partial until it did."""
+        return self._exhausted
+
+    def coverage(self) -> dict[str, float]:
+        """Fraction of distinct input variants each adapter returned data for.
+
+        Reported even when it is 0.0, because "we asked and got nothing" is a
+        finding. Meaningful only once the stream has been consumed; a caller that
+        stops early gets the coverage of the prefix it read, and
+        :meth:`warnings` says so in words.
+        """
+        total = self._distinct
+        return {
+            descriptor.name: (self._hits[index] / total) if total else 0.0
+            for index, descriptor in enumerate(self._descriptors)
+        }
+
+    def warnings(self) -> tuple[str, ...]:
+        """Run-level caveats, in a fixed order. These belong in the report, not a log."""
+        total = self._distinct
+        warnings: list[str] = []
+
+        if self._started and not self._exhausted:
+            warnings.append(
+                f"Annotation stream was not drained: {self._records} record(s) were "
+                "read before the consumer stopped. Every count below describes that "
+                "prefix only, and coverage computed from it is not the run's coverage."
+            )
+
+        mocked = [descriptor.label for descriptor in self._descriptors if descriptor.synthetic]
+        if mocked:
+            warnings.append(
+                "GP-20: annotation ran against SYNTHETIC stand-in adapter(s) "
+                f"{', '.join(mocked)}. The resulting consequences and frequencies are "
+                "fabricated demo data and are NOT biologically valid."
+            )
+
+        missing_consequences = total - self._hits[0]
+        if missing_consequences:
+            warnings.append(
+                f"{missing_consequences}/{total} variants received no consequence annotation "
+                f"from '{self._consequence_desc.name}'. They are retained unannotated rather "
+                "than dropped (GP-13); an unannotated variant is not a benign variant."
+            )
+
+        missing_frequencies = total - self._hits[1]
+        if missing_frequencies:
+            warnings.append(
+                f"{missing_frequencies}/{total} variants have no population-frequency data "
+                f"from '{self._frequency_desc.name}'. Their frequencies are recorded as empty "
+                "with a neutral no-data evidence item; they must not be scored as allele "
+                "frequency 0 (GP-14)."
+            )
+
+        clinical = self._adapters.clinical
+        if clinical is None:
+            warnings.append(
+                "No clinical-assertion adapter was configured, so no curated significance was "
+                "sought. Absence of a clinical assertion is not evidence of benignity."
+            )
+        elif self._hits[2] == 0:
+            warnings.append(
+                f"Clinical adapter '{clinical.name}' returned no assertions for any of "
+                f"the {total} variants. Absence of a curated assertion is not evidence of "
+                "benignity (GP-14)."
+            )
+
+        if self._pre_annotated:
+            warnings.append(
+                f"{self._pre_annotated}/{self._records} input records already carried "
+                "annotations. This stage replaces rather than merges them, so the result "
+                "reflects exactly one adapter set."
+            )
+
+        return tuple(warnings)
 
 
 # --------------------------------------------------------------------------- evidence
@@ -536,86 +814,3 @@ def _impact_text(impact: ImpactSeverity | None) -> str:
     (GP-14).
     """
     return "not assessed" if impact is None else impact.value
-
-
-def _coverage(
-    variant_ids: Sequence[str],
-    *,
-    descriptors: Sequence[AdapterDescriptor],
-    indexes: Sequence[Mapping[str, Sequence[object]]],
-) -> dict[str, float]:
-    """Fraction of distinct variants each adapter returned data for.
-
-    Reported even when it is 0.0, because "we asked and got nothing" is a finding.
-    """
-    total = len(variant_ids)
-    coverage: dict[str, float] = {}
-    for descriptor, index in zip(descriptors, indexes, strict=True):
-        hits = sum(1 for variant_id in variant_ids if index.get(variant_id))
-        coverage[descriptor.name] = (hits / total) if total else 0.0
-    return coverage
-
-
-def _warnings(
-    records: Sequence[VariantRecord],
-    *,
-    variant_ids: Sequence[str],
-    adapters: AdapterSet,
-    descriptors: Sequence[AdapterDescriptor],
-    consequence_index: Mapping[str, Sequence[object]],
-    frequency_index: Mapping[str, Sequence[object]],
-    clinical_index: Mapping[str, Sequence[object]],
-) -> tuple[str, ...]:
-    """Run-level caveats, in a fixed order. These belong in the report, not a log."""
-    total = len(variant_ids)
-    warnings: list[str] = []
-
-    mocked = [descriptor.label for descriptor in descriptors if descriptor.synthetic]
-    if mocked:
-        warnings.append(
-            "GP-20: annotation ran against SYNTHETIC stand-in adapter(s) "
-            f"{', '.join(mocked)}. The resulting consequences and frequencies are "
-            "fabricated demo data and are NOT biologically valid."
-        )
-
-    missing_consequences = total - sum(1 for v in variant_ids if consequence_index.get(v))
-    if missing_consequences:
-        warnings.append(
-            f"{missing_consequences}/{total} variants received no consequence annotation from "
-            f"'{descriptors[0].name}'. They are retained unannotated rather than dropped "
-            "(GP-13); an unannotated variant is not a benign variant."
-        )
-
-    missing_frequencies = total - sum(1 for v in variant_ids if frequency_index.get(v))
-    if missing_frequencies:
-        warnings.append(
-            f"{missing_frequencies}/{total} variants have no population-frequency data from "
-            f"'{descriptors[1].name}'. Their frequencies are recorded as empty with a neutral "
-            "no-data evidence item; they must not be scored as allele frequency 0 (GP-14)."
-        )
-
-    if adapters.clinical is None:
-        warnings.append(
-            "No clinical-assertion adapter was configured, so no curated significance was "
-            "sought. Absence of a clinical assertion is not evidence of benignity."
-        )
-    elif not any(clinical_index.get(variant_id) for variant_id in variant_ids):
-        warnings.append(
-            f"Clinical adapter '{adapters.clinical.name}' returned no assertions for any of "
-            f"the {total} variants. Absence of a curated assertion is not evidence of "
-            "benignity (GP-14)."
-        )
-
-    pre_annotated = sum(
-        1
-        for record in records
-        if record.consequences or record.population_frequencies or record.clinical_assertions
-    )
-    if pre_annotated:
-        warnings.append(
-            f"{pre_annotated}/{len(records)} input records already carried annotations. This "
-            "stage replaces rather than merges them, so the result reflects exactly one "
-            "adapter set."
-        )
-
-    return tuple(warnings)

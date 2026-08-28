@@ -108,6 +108,20 @@
         "absent_frequency_score": { "$ref": "#/$defs/unitInterval" }
       }
     },
+    "selection": {
+      "type": "object",
+      "description": "Cut-points for the candidate-selection stage (ADR 0019) \u2014 the ONE stage entitled to delete a valid record, which is why they are stated apart from the ranking cut-points in `frequency`. `max_population_frequency` must stay LOOSER than `frequency.max_plausible_recessive`; src/mva/config.py cannot express that relation either, and the stage reports it as a run warning rather than honouring it silently (GP-13).",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "max_population_frequency": { "type": "number", "exclusiveMinimum": 0.0, "maximum": 1.0 },
+        "retain_unknown_frequency": { "type": "boolean" },
+        "retain_unassessed_impact": { "type": "boolean" },
+        "retain_pathogenic_clinical": { "type": "boolean" },
+        "drop_without_gene_assignment": { "type": "boolean" },
+        "min_splice_ai_delta": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
     "quality": {
       "type": "object",
       "description": "Analytical-validity cut-points. Breaching one flags a call; it does not delete it.",

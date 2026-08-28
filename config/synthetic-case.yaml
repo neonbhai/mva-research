@@ -18,3 +18,22 @@ inputs:
 network_profile: offline_best_effort
 max_submission_rows: 10
 max_pairs_per_gene: 20
+
+# Candidate selection is DISABLED for the demo, deliberately (ADR 0019, ADR 0027).
+#
+# The stage exists to make a 4.5 M-record whole-genome callset pairable. This
+# fixture is twelve records: there is no scale problem here for it to solve, and
+# enabling it would DELETE the two common variants at chr15:40205000 and
+# chr15:40206000 (AF 0.120 and 0.082, both above the 0.02 cut-point). Those two
+# are not noise in this fixture — they ARE the GP-13 demonstration, and
+# tests/golden/test_golden_case.py asserts they survive into the output ranked
+# below the answer rather than being destroyed. Deleting them would also drop the
+# submission from ten rows to nine, and rows below the answer cannot lower either
+# challenge metric.
+#
+# `enabled: false` does not switch the stage off: it still runs, still counts, and
+# still writes selection/selection_report.json saying what it WOULD have removed,
+# plus a run warning that it is disabled. A real case leaves this at the
+# config/default.yaml value of `true`.
+selection:
+  enabled: false

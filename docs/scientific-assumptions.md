@@ -181,6 +181,65 @@ the choice.
 
 ## Mechanism
 
+### ASSUMPTION-PHENOTYPE-06 — A family-history term is scored as the proband's own, deliberately
+The referral document for this case lists **HP:0200067 Recurrent spontaneous
+abortion** among the proband's clinical features. The proband did not have
+miscarriages; the proband's parents did. Recording a parental finding in a
+subject's phenotype profile is, strictly, a category error, and the loader has no
+column that distinguishes "observed in the subject" from "observed in a
+first-degree relative".
+
+We keep the term as `observed` anyway, and say so here rather than hiding it,
+because in a chromosome-instability disorder parental reproductive loss is
+**evidence about the proband's genotype**: recurrent aneuploid conceptions are
+the expected correlate of a segregation defect segregating in that family. The
+referral document also directs participants to treat it as phenotypic input
+rather than background.
+
+The cost is real and bounded. HP:0200067 contributes information content to the
+similarity score for genes annotated with it, so a gene causing isolated
+recurrent pregnancy loss and nothing else would score higher than it should. The
+mitigation is that it is one of eight terms, and the other seven are all proband
+findings.
+
+The honest fix is a `subject` column on the phenotype profile distinguishing
+proband from relative, and a scorer that treats relative-observed terms as
+evidence about the family's segregating genotype rather than the proband's
+presentation. That is not implemented, and this assumption is the record of the
+gap. See ASSUMPTION-PHENOTYPE-01 for why the status vocabulary is
+four-valued, which is the same class of problem solved properly.
+
+### ASSUMPTION-PHENOTYPE-07 — Association strength is gene-level validity, not a per-term claim
+`association_strength` on a gene-phenotype association answers "how confident is
+an expert panel that variation in this gene causes disease **at all**" — ClinGen
+Gene-Disease Validity and DDG2P confidence, carried verbatim. It does **not**
+answer "how strongly is this gene tied to *this particular feature*", and no
+source in this pipeline answers that question.
+
+Two consequences follow and are stated rather than hidden.
+
+First, the value is constant across every term of a gene, so it cannot
+discriminate *within* a gene. Because the score's specificity component is a
+ratio of association weights, a per-gene constant cancels: the strength changes
+what a reader sees in the evidence store, not the ranking. Within-gene
+discrimination comes from the ontology's information content, and could come from
+`hpo_frequency` — an obligate feature matching is stronger evidence than a very
+rare one — but frequency is **not** an input to the score today. That is a
+deliberate omission, not an oversight; wiring it in is a scoring change requiring
+its own decision record and before/after.
+
+Second, ClinGen and DDG2P curate the (gene, **disease**) pair while this column
+reduces to the gene, taking the strongest classification across all of a gene's
+diseases. A gene curated `definitive` for one disease and `limited` for another
+reads `definitive` on the phenotypes annotated via the weaker one. The
+disease-level join was measured, not assumed: it covers 27% of candidate rows
+(HPO annotates against OMIM/ORPHA, ClinGen against MONDO, no crosswalk on disk).
+See ADR 0021 and TD-20.
+
+The related claim this replaces is the one the pipeline used to make by accident:
+that HPO's phenotype **frequency** (`HP:0040283`, `12/45`, `50%`) was a curation
+confidence. It was not, and the two now occupy separate columns.
+
 ### ASSUMPTION-MECHANISM-01 — Chain links are individually graded
 A mechanism is a chain of typed links, each carrying its own tier, strength and
 `is_directly_demonstrated` flag. `MechanismHypothesis.inferred_links` exposes the
@@ -217,6 +276,28 @@ drug check compares an agent against `required_correction` alone. A single
 mistyped cell therefore inverts the whole Track 2 gate silently. The three are
 required to agree at construction time (`MechanismHypothesis`), so an inconsistent
 chain cannot be built, let alone reported.
+
+### ASSUMPTION-MECHANISM-06 — The target node is where the deviation is a movable quantity
+The therapeutic target is chosen at the node whose deviation is a **quantity a drug
+could plausibly change in the required direction**, not at the node that best *names*
+the disease. The two are usually different, and picking the second is how a mechanism
+write-up ends up measuring every candidate against a target whose entire accessible
+pharmacology is contraindicated.
+
+BUB1B-MVA is the worked example (ADR 0025). The disease is named after the spindle
+assembly checkpoint, and every compound that binds the checkpoint is an *inhibitor*,
+because the oncology programme wants the checkpoint weakened. BubR1 itself is a
+pseudokinase, so there is no activity to agonise. Two rungs upstream, the deviation is
+"there is not enough BubR1 protein" — graded, with a published threshold, demonstrated
+to be correctable in patient cells, and upstream of **both** routes by which BubR1 loss
+produces missegregation. That is the target.
+
+Three tests a candidate node must pass: the deviation is quantitative rather than
+categorical; the node is upstream of every branch the phenotype travels through; and
+at least one real agent moves it in the corrective direction. A node failing the third
+test is not disqualified as *biology*, but designating it the target converts the
+direction gate from a filter into a guarantee of rejection, and the report then reads
+as if nothing could ever help.
 
 ---
 
@@ -285,6 +366,49 @@ unassessed answer is disqualifying with `ONCOGENIC_RISK`, not merely recorded.
 Outside such a context it stays a recorded, non-fatal concern. A report that calls
 a gap blocking while the pipeline ranks the candidate anyway is telling the reader
 two different things at once.
+
+### ASSUMPTION-DRUG-08 — The tumour and the soma are two therapeutic contexts, not one
+A child with a chromosomal-instability cancer-predisposition syndrome carries two
+populations of cells with **opposite therapeutic requirements**, and an agent's
+direction can be desirable in one and catastrophic in the other. This is not a
+hypothetical: the compounds identified as *aneuploidy-selectively lethal* — autophagy
+inhibition, HSP90 inhibition, AMPK-driven energy stress (Tang et al., *Cell* 2011,
+PMID 21315436) — kill cells by exploiting exactly the property the patient's every
+tissue already has. They are attractive against the rhabdomyosarcoma on precisely the
+evidence that disqualifies them for the soma.
+
+The pipeline scores a drug against **one** context: the soma. It is not a tumour-board
+tool and must not be read as one. A rejection here therefore means "rejected for
+systemic use in the affected child" and never "this compound is useless in this
+disease". Where an agent is plausible for the tumour arm, the catalogue's
+`validation_experiment` cell says so and names the study that would be required — a
+therapeutic-index comparison against the patient's own non-tumour cells, which share
+the aneuploidy that makes the tumour sensitive. That comparison is the whole question,
+and it is not one a mechanism chain can answer.
+
+Encoding the tumour arm as a second mechanism with its own target and its own signs is
+the honest structural fix. It is not implemented, and this assumption is the record of
+the gap.
+
+### ASSUMPTION-DRUG-09 — A genotype-conditional hypothesis must declare its condition
+Some repurposing hypotheses are valid only for a subset of alleles, and the subset is
+usually not knowable from the disease label. Presenting such a hypothesis without its
+condition is how a proposal that applies to a minority of patients gets read as
+applying to the one in front of the reader.
+
+BUB1B-MVA alleles fall into two published classes: those that lower BubR1 *abundance*,
+and those that impose a *qualitative* checkpoint or attachment defect at normal
+abundance (Suijkerbuijk et al., *Cancer Res* 2010, PMID 20516114). Every
+abundance-raising hypothesis in this repository is conditional on the first class and
+would be expected to fail against the second. Readthrough agents are conditional on a
+nonsense allele *that still produces a transcript*, which the same paper reports
+truncating BUB1B alleles largely do not.
+
+The rule: state the condition in the hypothesis, name the assay that resolves it, and
+put that assay **before** the efficacy experiment in the proposed order. This is also
+what makes a mechanism-grounded hypothesis writable without patient data at all — the
+condition is declared as a condition rather than silently assumed away, and the
+resolving assay is run by whoever holds the genotype.
 
 ---
 

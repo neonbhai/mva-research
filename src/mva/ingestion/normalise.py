@@ -48,6 +48,7 @@ from mva.alleles import (
     LeftAlignmentReport,
     LeftAlignmentStatus,
     ReferenceLookup,
+    ReferenceStatus,
     canonicalise_allele,
     is_sequence_allele,
     summarise_left_alignment,
@@ -80,11 +81,13 @@ __all__ = [
     "LeftAlignmentStatus",
     "NormalisationResult",
     "ReferenceLookup",
+    "ReferenceStatus",
     "canonicalise_allele",
     "normalise_variants",
     "open_reference_fasta",
     "split_multiallelic",
     "trim_and_left_align",
+    "trim_and_left_align_with_status",
 ]
 
 # ---------------------------------------------------------------------------
@@ -152,8 +155,9 @@ class _Outcome:
 
     record: VariantRecord
     reference_consulted: bool
-    """False when no reference was supplied, or when the one supplied could not be
-    read or disagreed with this record's REF. Such a record was trimmed only."""
+    """False when no reference was supplied, when the one supplied could not be
+    read or disagreed with this record's REF, or when the REF span read cleanly but
+    a base the *shift* needed did not. Such a record was trimmed only."""
 
 
 # ---------------------------------------------------------------------------
@@ -268,9 +272,14 @@ def _normalise_one(
             # Shifting an indel against a reference that already disagrees would
             # produce a confidently wrong coordinate, so alignment is withheld.
             aligner = None
+    normalised, status = trim_and_left_align_with_status(current, aligner)
+    if status is ReferenceStatus.UNUSABLE:
+        # The REF span read cleanly but a base the shift needed did not. Without
+        # this the batch reports APPLIED for a record that was trimmed only.
+        warnings[WARN_REFERENCE_LOOKUP_FAILED] += 1
     return _Outcome(
-        record=trim_and_left_align(current, aligner),
-        reference_consulted=aligner is not None,
+        record=normalised,
+        reference_consulted=aligner is not None and status is not ReferenceStatus.UNUSABLE,
     )
 
 
@@ -352,6 +361,19 @@ def trim_and_left_align(record: VariantRecord, reference: ReferenceLookup | None
     The operation is idempotent: normalising an already-normalised record returns an
     equal record with the same ``normalisation_ops``.
     """
+    return trim_and_left_align_with_status(record, reference)[0]
+
+
+def trim_and_left_align_with_status(
+    record: VariantRecord, reference: ReferenceLookup | None
+) -> tuple[VariantRecord, ReferenceStatus]:
+    """:func:`trim_and_left_align`, plus how far the reference could be trusted.
+
+    Separate from the record-only form because ``VariantRecord`` has nowhere to
+    put the status: ``normalisation_ops`` records what happened, and a record that
+    did not move is ambiguous between "already left-most" and "the reference could
+    not be read". The batch report needs the second, so it has to be returned.
+    """
     coordinate = record.coordinate
     canonical = canonicalise_allele(
         contig=coordinate.contig,
@@ -360,9 +382,20 @@ def trim_and_left_align(record: VariantRecord, reference: ReferenceLookup | None
         alt=coordinate.alt,
         reference=reference,
     )
+    return _apply_canonical(record, canonical), canonical.reference_status
+
+
+def _apply_canonical(record: VariantRecord, canonical: CanonicalAllele) -> VariantRecord:
+    """Write a :class:`~mva.alleles.CanonicalAllele` back onto its record.
+
+    The single implementation shared by both public spellings above: ADR 0018
+    forbids a second copy of the write-back, for the same reason it forbids a
+    second copy of the rule itself.
+    """
     if not canonical.changed:
         return record
 
+    coordinate = record.coordinate
     operations = record.normalisation_ops
     for operation in canonical.operations:
         operations = _with_ops(operations, operation)

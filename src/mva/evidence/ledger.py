@@ -14,17 +14,45 @@ nothing, or cites an ID the ledger has never seen, the sentence does not get
 written. The gate is a hard failure rather than a warning because a warning in a
 clinical-adjacent report is a warning nobody reads.
 
-Neither class touches the database. The ledger is the write buffer, the store is
-the durable copy, and keeping them apart means a stage can be unit-tested without
-a filesystem.
+Neither class touches the evidence *store*. The ledger is the write buffer, the
+store is the durable copy, and keeping them apart means a stage can be
+unit-tested without a filesystem.
+
+**Scale.** The buffer is a dict, which is right for a case and wrong for a
+genome: at 4.5 M records, ingestion and annotation together emit on the order of
+10-20 M items, tens of gigabytes of hydrated Pydantic models. A ledger given a
+``spill_dir`` therefore migrates to a SQLite file once it passes
+:data:`DEFAULT_SPILL_THRESHOLD` items and keeps writing there
+(:mod:`mva.evidence.spill`). Without a ``spill_dir`` it stays in memory forever,
+which is exactly the pre-existing behaviour and is what every test and every
+fixture-scale caller gets by default. Spilling changes nothing observable: the
+same items, the same total order, the same bytes on a repeat run (GP-30). What it
+does change is that :meth:`EvidenceLedger.items` — which materialises a tuple —
+stops being a safe call, so :meth:`EvidenceLedger.iter_items` exists beside it and
+is what a whole-genome caller must use.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
+from pathlib import Path
+from types import TracebackType
+from typing import Final
 
 from mva.errors import EvidenceError, UnsourcedAssertionError
+from mva.evidence.spill import DEFAULT_FLUSH_BATCH, SqliteEvidenceSpill
 from mva.models import EvidenceDirection, EvidenceItem
+
+#: Items held in memory before a ledger with a ``spill_dir`` moves to disk.
+#:
+#: Chosen so that every fixture-scale run, the synthetic demo and the whole test
+#: suite stay entirely in memory — the synthetic case produces low hundreds of
+#: items — while a whole-genome run crosses it within the first percent of
+#: ingestion. A hydrated ``EvidenceItem`` measures ~3.5 KB resident, so this
+#: buffer is the ledger's memory ceiling before the spill takes over: ~175 MB.
+#: (It was 200,000, which measured 1.08 GB peak and is more headroom than any
+#: caller needs.)
+DEFAULT_SPILL_THRESHOLD: Final[int] = 50_000
 
 #: How much of a claim is echoed in an error message. Claims are scientific
 #: sentences, not record content, but they are still truncated: an exception
@@ -62,13 +90,47 @@ class EvidenceLedger:
     down-weights it in scoring, where the decision is visible.
     """
 
-    def __init__(self, *, run_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        spill_dir: Path | None = None,
+        spill_threshold: int = DEFAULT_SPILL_THRESHOLD,
+        flush_batch: int = DEFAULT_FLUSH_BATCH,
+    ) -> None:
+        """Open a ledger for one run.
+
+        ``spill_dir`` is the only new decision. ``None`` — the default — keeps
+        every item in memory for the life of the ledger, which is what a
+        fixture-scale run wants and what every existing caller already gets. A
+        path turns on overflow: once ``spill_threshold`` items have accumulated
+        the ledger migrates to a SQLite file in that directory and keeps writing
+        there, bounding resident memory at roughly the threshold.
+
+        The directory MUST be inside the external workspace. Evidence subjects are
+        variant IDs, so the spill file carries proband coordinates and is SENSITIVE
+        (GP-40); ``Workspace.tmp_dir`` is the intended home, and
+        :meth:`close` unlinks the file.
+        """
+        if spill_threshold < 1:
+            msg = f"spill_threshold={spill_threshold} must be at least 1."
+            raise EvidenceError(msg)
         self._run_id = run_id
         self._items: dict[str, EvidenceItem] = {}
+        self._spill_dir = spill_dir
+        self._spill_threshold = spill_threshold
+        self._flush_batch = flush_batch
+        self._spill: SqliteEvidenceSpill | None = None
+        self._closed_count: int | None = None
 
     @property
     def run_id(self) -> str:
         return self._run_id
+
+    @property
+    def spilled(self) -> bool:
+        """Whether this ledger has moved to disk. Reported, never inferred."""
+        return self._spill is not None
 
     def add(self, item: EvidenceItem) -> EvidenceItem:
         """Record one item and return the ledger's copy of it.
@@ -80,6 +142,8 @@ class EvidenceLedger:
         Re-adding an identical item is a no-op and returns the stored copy.
         Re-using an ID for different content is an integrity violation and raises,
         because content-derived IDs mean a collision is a bug, not a coincidence.
+        Once spilled, that collision is detected at the next flush rather than on
+        the call itself — see :meth:`mva.evidence.spill.SqliteEvidenceSpill.add`.
         """
         if item.run_id is None:
             item = item.model_copy(update={"run_id": self._run_id})
@@ -90,9 +154,16 @@ class EvidenceLedger:
             )
             raise EvidenceError(msg)
 
+        spill = self._spill
+        if spill is not None:
+            return spill.add(item)
+
         existing = self._items.get(item.evidence_id)
         if existing is None:
             self._items[item.evidence_id] = item
+            spill_dir = self._spill_dir
+            if spill_dir is not None and len(self._items) >= self._spill_threshold:
+                self._begin_spill(spill_dir)
             return item
         if existing != item:
             msg = (
@@ -108,32 +179,136 @@ class EvidenceLedger:
         for item in items:
             self.add(item)
 
+    def _begin_spill(self, spill_dir: Path) -> None:
+        """Move the in-memory buffer to disk and keep writing there."""
+        spill = SqliteEvidenceSpill(
+            spill_dir / f"evidence-ledger-{self._run_id}.sqlite",
+            flush_batch=self._flush_batch,
+        )
+        for item in self._items.values():
+            spill.add(item)
+        self._items = {}
+        self._spill = spill
+
     def items(self) -> tuple[EvidenceItem, ...]:
-        """Every item, in a deterministic content-derived order."""
-        return tuple(sorted(self._items.values(), key=_sort_key))
+        """Every item, in a deterministic content-derived order.
+
+        Materialises. Safe at case scale and nowhere else: a spilled ledger holds
+        more items than the process has memory for, which is why it spilled. Use
+        :meth:`iter_items` wherever the count scales with the callset.
+        """
+        return tuple(self.iter_items())
+
+    def iter_items(self) -> Iterator[EvidenceItem]:
+        """Every item, in the same order as :meth:`items`, one at a time.
+
+        The spilled path reads through a composite index whose columns are exactly
+        the sort key, so this is an ordered scan rather than a sort of everything.
+        """
+        self._require_open()
+        spill = self._spill
+        if spill is not None:
+            yield from spill.iter_items()
+        else:
+            yield from sorted(self._items.values(), key=_sort_key)
 
     def for_subject(self, subject_id: str) -> tuple[EvidenceItem, ...]:
         """Everything known about one subject, supporting and contradicting alike."""
-        return tuple(item for item in self.items() if item.subject_id == subject_id)
+        self._require_open()
+        spill = self._spill
+        if spill is not None:
+            return tuple(spill.iter_for_subject(subject_id))
+        # Sort the matching subset, not the whole ledger: the answer is identical
+        # because _sort_key is total, and the cost stops scaling with the callset.
+        return tuple(
+            sorted(
+                (item for item in self._items.values() if item.subject_id == subject_id),
+                key=_sort_key,
+            )
+        )
 
     def contradictions(self) -> tuple[EvidenceItem, ...]:
         """Every item whose direction is ``contradicts`` (GP-19)."""
+        self._require_open()
+        spill = self._spill
+        if spill is not None:
+            return tuple(spill.iter_contradictions())
         return tuple(
-            item for item in self.items() if item.direction is EvidenceDirection.CONTRADICTS
+            sorted(
+                (
+                    item
+                    for item in self._items.values()
+                    if item.direction is EvidenceDirection.CONTRADICTS
+                ),
+                key=_sort_key,
+            )
         )
 
     def get(self, evidence_id: str) -> EvidenceItem | None:
-        """Look up one item, or ``None``. Never raises; see AssertionResolver."""
+        """Look up one item, or ``None``. Raises only if the ledger was closed."""
+        self._require_open()
+        spill = self._spill
+        if spill is not None:
+            return spill.get(evidence_id)
         return self._items.get(evidence_id)
 
+    def close(self) -> None:
+        """Release the spill file, if one was opened. Idempotent.
+
+        A ledger that never spilled has nothing to release, so this is a no-op for
+        every case-scale caller.
+
+        For one that did, the file is unlinked: it held proband-derived evidence
+        and the run is over. ``len()`` keeps working afterwards, from a count taken
+        on the way out — the composition root reports ``evidence_count`` in its
+        result, and making that depend on whether someone had already closed the
+        ledger would be a trap rather than a contract. Reading the *contents* after
+        close raises, because returning an empty ledger would look like a run that
+        produced no evidence.
+        """
+        spill = self._spill
+        if spill is not None:
+            self._closed_count = len(spill)
+            self._spill = None
+            spill.close()
+
+    def _require_open(self) -> None:
+        if self._closed_count is not None:
+            msg = (
+                f"Evidence ledger for run {self._run_id!r} was closed; its spill file "
+                "has been removed. Read the evidence before closing, or persist it to "
+                "the evidence store first. (len() still reports the final count.)"
+            )
+            raise EvidenceError(msg)
+
+    def __enter__(self) -> EvidenceLedger:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
     def __contains__(self, evidence_id: object) -> bool:
-        return isinstance(evidence_id, str) and evidence_id in self._items
+        if not isinstance(evidence_id, str):
+            return False
+        self._require_open()
+        spill = self._spill
+        if spill is not None:
+            return evidence_id in spill
+        return evidence_id in self._items
 
     def __len__(self) -> int:
-        return len(self._items)
+        if self._closed_count is not None:
+            return self._closed_count
+        spill = self._spill
+        return len(spill) if spill is not None else len(self._items)
 
     def __iter__(self) -> Iterator[EvidenceItem]:
-        return iter(self.items())
+        return self.iter_items()
 
 
 class AssertionResolver:
@@ -222,4 +397,4 @@ def _excerpt(claim: str) -> str:
     return stripped[: _CLAIM_EXCERPT - 1] + "…"
 
 
-__all__ = ["AssertionResolver", "EvidenceLedger"]
+__all__ = ["DEFAULT_SPILL_THRESHOLD", "AssertionResolver", "EvidenceLedger"]

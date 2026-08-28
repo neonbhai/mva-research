@@ -39,8 +39,11 @@ from tools.build_knowledge.gene_disease import (
     try_parse_ddg2p,
 )
 from tools.build_knowledge.gene_phenotype import (
+    CURATED_VALIDITY_RANK,
+    EXCLUDED_FREQUENCY_TERM,
     GENE_PHENOTYPE_COLUMNS,
     HpoGenePhenotypeResult,
+    curated_strength_by_gene,
     parse_gene_to_phenotype,
     read_hpo_release,
 )
@@ -52,7 +55,7 @@ from tools.build_knowledge.gnomad_constraint import (
 from tools.build_knowledge.tsv_io import RETRIEVED_DATE, format_cell, format_float, write_tsv
 
 #: Real definitions, quoted directly from the downloaded hp.obo (HPO's frequency
-#: subontology, term IDs HP:0040280-HP:0040284). Documentation only: association_strength
+#: subontology, term IDs HP:0040280-HP:0040284). Documentation only: hpo_frequency
 #: always carries the source's own token verbatim, never this expansion.
 _HPO_FREQUENCY_GLOSSARY: Final[tuple[tuple[str, str, str], ...]] = (
     ("HP:0040280", "Obligate", "Always present, i.e. in 100% of the cases."),
@@ -357,24 +360,56 @@ def _build_gene_phenotype(result: HpoGenePhenotypeResult, *, output_path: Path) 
         "frequency data over one recorded as '-', tie-broken deterministically on "
         "disease_id -- never averaged or otherwise invented.",
         "",
-        "association_strength is HPO's OWN phenotype-FREQUENCY vocabulary (how often "
-        "the phenotype occurs among cases of the linked disease), carried through "
-        "VERBATIM -- NOT the definitive/strong/moderate/supporting curation-confidence "
-        "scale the SYNTHETIC demo table (knowledge/public/gene_phenotype.tsv) invented "
-        "for its fictional genes. These are different scientific concepts and must not "
-        "be conflated. Real HPO frequency terms (quoted from hp.obo):",
+        "TWO QUALIFIERS, TWO COLUMNS (ADR 0021). This table previously wrote HPO's "
+        "frequency vocabulary into a column named association_strength, which "
+        "src/mva/phenotype/hpo.py validates as curated clinical validity; the file was "
+        "unloadable as a result. Frequency and validity are different scientific "
+        "claims and now have separate columns:",
+        "",
+        "hpo_frequency is HPO's OWN phenotype-FREQUENCY vocabulary (how often the "
+        "phenotype occurs among cases of the linked disease), carried through VERBATIM. "
+        "Real HPO frequency terms (quoted from hp.obo):",
         *glossary_lines,
         "A row may instead carry a raw fraction ('n/m' cases) or a percentage recorded "
         "directly in the source. An EMPTY cell means the source recorded '-' (frequency "
-        'not stated) -- unmeasured, not "never occurs" (GP-14). HP:0040285 (Excluded, '
-        "0% -- i.e. NOT part of the disease) does not appear in this file: HPO's own "
-        "genes_to_phenotype.txt build already excludes negated annotations, so no "
-        "exclusion filtering was implemented here.",
+        'not stated) -- unmeasured, not "never occurs" (GP-14). '
+        f"{EXCLUDED_FREQUENCY_TERM} (Excluded, 0% -- i.e. NOT part of the disease) is a "
+        "NEGATED annotation, not an association: such rows are dropped here rather than "
+        "rendered with an empty frequency, which would be indistinguishable from 'not "
+        f"stated'. {result.excluded_frequency_rows} source rows were dropped for this "
+        "reason (HPO's own genes_to_phenotype.txt build already excludes negated "
+        "annotations, so this count is expected to be 0 -- it is measured, not assumed).",
         "",
-        "Downstream code that expects the closed definitive/strong/moderate/supporting "
-        "vocabulary (src/mva/phenotype/hpo.py's STRENGTH_WEIGHTS) will need adapting "
-        "before it can read this file directly; that adaptation is out of scope for this "
-        "generator (src/mva/phenotype/ is owned elsewhere).",
+        "association_strength is curated gene-disease CLINICAL VALIDITY -- how confident "
+        "an expert panel is that variation in this gene causes disease at all -- and does "
+        "NOT come from HPO, which records no such judgement. It is the STRONGEST "
+        "classification found for the gene across knowledge/real/gene_disease.tsv's two "
+        "sources (ClinGen Gene-Disease Validity and EBI Gene2Phenotype/DDG2P), carried in "
+        "those sources' own vocabulary, case-folded so ClinGen's 'Definitive' and DDG2P's "
+        f"'definitive' are one token: {', '.join(CURATED_VALIDITY_RANK)} (strongest "
+        "first). This mirrors how knowledge/disease/mva_panel.tsv sources its "
+        "evidence_tier column.",
+        "association_strength_source names WHICH panel supplied that classification. It "
+        "is a separate column from `source` (always HPO) on purpose: the gene->term "
+        "annotation and the validity call come from different bodies, and one provenance "
+        "field covering both would attribute an expert-panel judgement to HPO (GP-31).",
+        "GRANULARITY, STATED: ClinGen and DDG2P curate the (gene, DISEASE) pair; this "
+        "column reduces to the GENE. A gene curated definitive for one disease and "
+        "limited for another reads 'definitive' on every row, including the phenotypes "
+        "annotated via the weaker disease. Joining each HPO annotation to the curation "
+        "for its own disease was measured and reaches only 75379 of 275046 candidate "
+        "source rows (27%): HPO annotates against OMIM and ORPHA, ClinGen against MONDO, "
+        "and no crosswalk between them exists in the downloaded resources. See ADR 0021.",
+        f"An EMPTY association_strength means NO curation source classifies the gene -- "
+        f"absent, never a default (GP-14). {result.rows_without_curated_strength} of "
+        f"{len(result.rows)} rows ({len(result.genes_without_curated_strength)} genes) "
+        "are in that state in this build: "
+        f"{_fmt_sample(result.genes_without_curated_strength)}.",
+        "",
+        "src/mva/phenotype/hpo.py reads this file directly: STRENGTH_WEIGHTS carries the "
+        "vocabulary above, parse_hpo_frequency carries hpo_frequency, and an absent "
+        "strength is weighted at the explicitly named UNCURATED_ASSOCIATION_WEIGHT rather "
+        "than at 0.0 (which erases a real annotation) or 1.0 (which invents curation).",
     ]
 
     rows = [
@@ -383,6 +418,8 @@ def _build_gene_phenotype(result: HpoGenePhenotypeResult, *, output_path: Path) 
             "hpo_id": row.hpo_id,
             "label": row.label,
             "association_strength": format_cell(row.association_strength),
+            "association_strength_source": format_cell(row.association_strength_source),
+            "hpo_frequency": format_cell(row.hpo_frequency),
             "source": "HPO",
             "version": result.version,
         }
@@ -410,10 +447,18 @@ def build_all(resources_root: Path, output_dir: Path) -> BuildReport:
     # ClinGen"). When DDG2P is unavailable, ddg2p.unique_genes is simply empty and
     # this reduces to ClinGen alone.
     disease_genes = frozenset(clingen.unique_genes) | frozenset(ddg2p.unique_genes)
+    # association_strength comes from the clinical-validity sources, NOT from HPO,
+    # which records no such judgement (ADR 0021). Both panels feed one map so the
+    # column carries the strongest statement either of them made about the gene,
+    # together with which panel made it.
+    curated_strengths = curated_strength_by_gene(
+        (row.gene_symbol, row.confidence, row.source) for row in clingen.rows + ddg2p.rows
+    )
     hpo = parse_gene_to_phenotype(
         paths.hpo_genes_to_phenotype,
         restrict_to_genes=disease_genes,
         version=hpo_version,
+        curated_strengths=curated_strengths,
     )
 
     gene_panel_path = output_dir / "gene_panel.tsv"

@@ -3,8 +3,12 @@
 Every artifact this pipeline writes is accompanied by a record of exactly how it
 came to exist. This is what makes "deterministic" a checkable claim rather than an
 aspiration: two runs whose manifests agree on input hashes, config hash, tool
-versions and git commit must produce byte-identical outputs, and the golden tests
-assert precisely that.
+versions and git commit produce outputs that are identical in scientific content —
+no value, ordering, identifier or content hash differs. The golden tests assert
+byte-identity of the whole tree under the *fixed* clock the synthetic case
+selects. Under ``SystemClock`` 17 artifacts are still byte-identical and 11 differ
+in recorded time only; none differs in content, and no timestamp is an input to
+any identifier or hash. See ``docs/handoff-integrity.md`` §4 and TD-21.
 
 Provenance also carries the ``sensitivity`` classification, which is the machine
 -readable basis for the public-export gate.
@@ -28,6 +32,7 @@ class ArtifactKind(StrEnum):
     NORMALISED_VARIANTS = "normalised_variants"
     ANNOTATED_VARIANTS = "annotated_variants"
     QC_REPORT = "qc_report"
+    SELECTION_REPORT = "selection_report"
     CANDIDATE_PAIRS = "candidate_pairs"
     EVIDENCE_DB = "evidence_db"
     SUBMISSION = "submission"

@@ -27,8 +27,11 @@ Full list with IDs: `docs/golden-principles.md`. The ones you will hit first:
    means undeterminable and is *not* agreement.
 6. **GP-10 / GP-17** No claim without an `EvidenceItem`; every item states its
    limitations.
-7. **GP-30** Repeat runs are byte-identical. No wall clock, no RNG, no
-   set/dict-order dependence. Timestamps come from `mva.clock`.
+7. **GP-30** Repeat runs are byte-identical *under a fixed clock*. No RNG, no
+   set/dict-order dependence, no time-derived id or hash. Timestamps come from
+   `mva.clock`, which is `SystemClock` for a real case — so a real run's
+   scientific content is identical and eleven artifacts differ in recorded time
+   only. Scope: `docs/handoff-integrity.md` §4, TD-21.
 8. **GP-40** Patient data never enters the repo. The workspace is external.
 9. **GP-41** Privacy tooling reports paths and counts, never matched content.
 
@@ -43,9 +46,12 @@ Full list with IDs: `docs/golden-principles.md`. The ones you will hit first:
 | Threat model and controls | `docs/privacy-model.md` |
 | What is real vs mocked | `docs/maturity-ledger.md` |
 | Challenge submission contract | `docs/references/track1-submission-contract.md` |
+| Track 2 scientific case (BUB1B) | `docs/track2-hypothesis.md` |
+| Literature-derived knowledge tables | `knowledge/literature/bub1b/` |
 | Current state, blockers, commands | `docs/current-status.md` |
 | What to do next | `docs/next-actions.md` |
 | Deferred work with costs | `docs/tech-debt.md` |
+| Integrity fixes that cross owners | `docs/handoff-integrity.md` |
 | Reviewer briefs (re-runnable) | `prompts/` |
 | Domain contracts | `src/mva/models/` |
 

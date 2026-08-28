@@ -239,6 +239,95 @@ class FrequencyThresholds(StrictModel):
     )
 
 
+class SelectionThresholds(StrictModel):
+    """Cut-points for the candidate-selection stage (ADR 0019).
+
+    Separate from :class:`FrequencyThresholds`, which holds *ranking* cut-points.
+    This stage is the only one entitled to delete a valid record, so its
+    thresholds are stated apart from the ones that merely down-rank (GP-13). Every
+    default below is a documented heuristic, not a calibrated parameter, and
+    changing one needs a decision record (GP-32).
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Off retains every variant with reason 'retained_selection_disabled'. The "
+            "stage still counts and still reports, so 'what did selection cost me' is "
+            "answerable without rewiring."
+        ),
+    )
+    max_population_frequency: float = Field(
+        default=0.02,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Selection cut-point on the maximum AF across adequately powered "
+            "populations. Deliberately LOOSER than frequency.max_plausible_recessive "
+            "(0.01), so nothing this stage deletes was still rankable above zero on "
+            "rarity. Inverting that relationship is reported as a run warning, not "
+            "silently honoured. Zero is refused: it would delete every variant any "
+            "cohort has ever seen once."
+        ),
+    )
+    retain_unknown_frequency: bool = Field(
+        default=True,
+        description=(
+            "GP-14. A variant with no usable frequency observation is UNKNOWN, not rare "
+            "and not common, and is kept. False is the setting that loses a novel "
+            "pathogenic variant, preferentially for ancestries the reference cohorts "
+            "under-sample. See ADR 0019."
+        ),
+    )
+    retain_unassessed_impact: bool = Field(
+        default=True,
+        description=(
+            "ADR 0016. `impact is None` means NOT ASSESSED, not MODIFIER. A MANE "
+            "interval join produces exactly this shape for every variant it places."
+        ),
+    )
+    retain_pathogenic_clinical: bool = Field(
+        default=True,
+        description="A curated pathogenic assertion overrides both other gates.",
+    )
+    drop_without_gene_assignment: bool = Field(
+        default=True,
+        description=(
+            "Drop variants with no consequence annotation at all. Gene-scoped pairing "
+            "already ignores them; dropping them here makes the count visible. ~55% of "
+            "a whole-genome callset by volume."
+        ),
+    )
+    min_splice_ai_delta: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "A SpliceAI delta at or above this retains the variant whatever its terms "
+            "say. SpliceAI's own high-recall cut-point, chosen over the stricter 0.5 "
+            "because this gate is about not losing candidates."
+        ),
+    )
+
+    def as_payload(self) -> dict[str, bool | float]:
+        """The threshold set, in a fixed key order, for a report or an evidence payload.
+
+        Spelled out rather than delegated to ``model_dump`` so the artifact's key
+        order is a property of this method rather than of field declaration order,
+        and so its value type is narrower than ``Any`` for the report that embeds
+        it (GP-30).
+        """
+        return {
+            "enabled": self.enabled,
+            "max_population_frequency": self.max_population_frequency,
+            "retain_unknown_frequency": self.retain_unknown_frequency,
+            "retain_unassessed_impact": self.retain_unassessed_impact,
+            "retain_pathogenic_clinical": self.retain_pathogenic_clinical,
+            "drop_without_gene_assignment": self.drop_without_gene_assignment,
+            "min_splice_ai_delta": self.min_splice_ai_delta,
+        }
+
+
 class QualityThresholds(StrictModel):
     """Analytical-validity cut-points. Breaching one flags; it does not delete."""
 
@@ -273,7 +362,17 @@ class InputPaths(StrictModel):
     vcf: str
     phenotype: str
     pedigree: str | None = None
-    reference_fasta: str | None = None
+    reference_fasta: str | None = Field(
+        default=None,
+        description=(
+            "OPTIONAL per-case override of the reference genome, workspace-relative. Leave "
+            "it unset for the normal path: the shared public GRCh38 release comes from "
+            "`resources.reference_fasta` under $MVA_RESOURCES. Set it only when this case "
+            "genuinely needs a different FASTA from every other case (a different build, a "
+            "subsetted reference). `mva.resources.reference_fasta_path` resolves the two in "
+            "that precedence order."
+        ),
+    )
 
     @field_validator("vcf", "phenotype", "pedigree", "reference_fasta")
     @classmethod
@@ -289,6 +388,145 @@ class InputPaths(StrictModel):
             raise ValueError(msg)
         if ".." in Path(value).parts:
             msg = f"Input path {value!r} escapes the workspace via '..'."
+            raise ValueError(msg)
+        return value
+
+
+class ResourceSettings(StrictModel):
+    """Where each out-of-repo public reference release sits **under the resource root**.
+
+    The root itself is never written here, for the same reason the workspace never
+    is (ADR 0006): it is per-machine, so a committed absolute path is wrong on
+    everyone else's disk and, worse, right on one. It comes from ``$MVA_RESOURCES``
+    or an explicit ``--resource-root``, and is validated by
+    :func:`mva.resources.resolve_resource_root`, which has **no default** — a
+    guessed root that is wrong fails later, somewhere less obvious.
+
+    Every value below is a relative path with a default matching the layout the
+    acquisition tool writes (``tools/acquire/catalog.py``), so a standard install
+    needs no configuration at all, and a non-standard one is overridden per key
+    rather than by an environment variable nobody can find. The names correspond
+    one-to-one with entries in ``knowledge/manifests/resources.yaml``, which is
+    what pins their contents.
+    """
+
+    manifest: str = Field(
+        default="knowledge/manifests/resources.yaml",
+        description=(
+            "REPO-relative, not resource-root-relative: the manifest is committed and "
+            "reviewable, precisely because it is the record of what the uncommittable "
+            "185 GB beside it is supposed to be."
+        ),
+    )
+
+    reference_fasta: str = "reference/GRCh38_no_alt.fa"
+    """GRCh38 no-alt analysis set, decompressed and faidx-indexed. Required for indel
+    left-alignment: without it a right-shifted proband indel never reaches the minimal
+    representation gnomAD and ClinVar store, so it misses its join — which is
+    indistinguishable from 'novel and ultra-rare' (ADR 0018)."""
+
+    reference_fasta_index: str = "reference/GRCh38_no_alt.fa.fai"
+
+    clinvar_vcf: str = "clinvar/clinvar.vcf.gz"
+    clinvar_vcf_index: str = "clinvar/clinvar.vcf.gz.tbi"
+
+    gnomad_exomes_dir: str = "gnomad/v4.1_exomes"
+    gnomad_exomes_filename: str = Field(
+        default="gnomad.exomes.v4.1.sites.{contig}.vcf.bgz",
+        description=(
+            "Per-contig shard filename template. '{contig}' is substituted with the "
+            "chr-prefixed contig name ('chr21'). A template rather than 24 settings "
+            "because the shards differ only in that one token."
+        ),
+    )
+    gnomad_constraint_metrics: str = "gnomad/gnomad.v4.1.constraint_metrics.tsv"
+
+    mane_summary: str = "mane/MANE.GRCh38.v1.5.summary.txt.gz"
+    mane_gtf: str = "mane/MANE.GRCh38.v1.5.ensembl_genomic.gtf.gz"
+
+    snpeff_jar: str = "snpeff/snpEff/snpEff.jar"
+    snpeff_config: str = "snpeff/snpEff/snpEff.config"
+    snpeff_data_dir: str = "snpeff/data"
+    snpeff_genome: str = Field(
+        default="GRCh38.115",
+        description=(
+            "SnpEff genome database name. Not a path: SnpEff resolves it through "
+            "snpEff.config, and a name absent from that config is reported as a missing "
+            "database rather than as a configuration error."
+        ),
+    )
+    snpeff_java_binary: str = Field(
+        default="snpeff/jdk/bin/java",
+        description=(
+            "Resource-root-relative JRE. macOS ships a /usr/bin/java stub that reports "
+            "'Unable to locate a Java Runtime', so resolving 'java' through PATH is not "
+            "safe here; the install script symlinks a real JDK to this path."
+        ),
+    )
+    snpeff_pins: str = Field(
+        default="snpeff/snpeff_pins.json",
+        description=(
+            "The digests `tools/setup/install_snpeff.sh` wrote AFTER checking each "
+            "artifact against the reviewed EXPECT_* constants in the script. Read with "
+            "`SnpEffArtifactPins.from_manifest`, never with `measure()`: measure() hashes "
+            "whatever happens to be installed, which pins the install to itself and "
+            "verifies nothing. Unlike its neighbours this file is not a registered "
+            "resource — it is the record of a review, produced locally, so it has no "
+            "upstream release to pin it against."
+        ),
+    )
+
+    hpo_obo: str = "hpo/hp.obo"
+    hpo_annotations: str = "hpo/phenotype.hpoa"
+    hpo_genes_to_phenotype: str = "hpo/genes_to_phenotype.txt"
+    hpo_phenotype_to_genes: str = "hpo/phenotype_to_genes.txt"
+
+    integrity_mode: str = Field(
+        default="spot",
+        pattern=r"^(spot|full)$",
+        description=(
+            "How hard to verify pinned resources before a run. 'spot' (default) checks "
+            "exact size plus a sha256 over a fixed, published sample of each file — at "
+            "most 24 MiB per file, 1.7 s for the whole 202.8 GB set. 'full' re-hashes "
+            "every byte: correct, 159 s. There is deliberately no 'off'; see ADR 0020 "
+            "for what each mode does and does not prove."
+        ),
+    )
+
+    def gnomad_shard(self, contig: str) -> str:
+        """The root-relative path of one gnomAD sites shard, e.g. ``contig='chr21'``."""
+        return f"{self.gnomad_exomes_dir}/{self.gnomad_exomes_filename.format(contig=contig)}"
+
+    @field_validator(
+        "reference_fasta",
+        "reference_fasta_index",
+        "clinvar_vcf",
+        "clinvar_vcf_index",
+        "gnomad_exomes_dir",
+        "gnomad_constraint_metrics",
+        "mane_summary",
+        "mane_gtf",
+        "snpeff_jar",
+        "snpeff_config",
+        "snpeff_data_dir",
+        "snpeff_java_binary",
+        "snpeff_pins",
+        "hpo_obo",
+        "hpo_annotations",
+        "hpo_genes_to_phenotype",
+        "hpo_phenotype_to_genes",
+    )
+    @classmethod
+    def _must_be_relative(cls, value: str) -> str:
+        if Path(value).is_absolute():
+            msg = (
+                f"Resource path {value!r} is absolute. Resource paths are relative to the "
+                "resource root ($MVA_RESOURCES) so that a committed config stays correct on "
+                "a machine whose reference data lives somewhere else."
+            )
+            raise ValueError(msg)
+        if ".." in Path(value).parts:
+            msg = f"Resource path {value!r} escapes the resource root via '..'."
             raise ValueError(msg)
         return value
 
@@ -325,11 +563,30 @@ class CaseConfig(StrictModel):
 
     inputs: InputPaths
     knowledge: KnowledgeSources = Field(default_factory=KnowledgeSources)
+    resources: ResourceSettings = Field(
+        default_factory=ResourceSettings,
+        description=(
+            "Locations of the out-of-repo public reference releases, relative to "
+            "$MVA_RESOURCES. Separate from `knowledge` (small, committed, in-repo tables) "
+            "and from `inputs` (patient data in the external workspace) because the three "
+            "have different sizes, different sensitivities and different integrity "
+            "regimes — see ADR 0020."
+        ),
+    )
 
     weights: ScoringWeights = Field(default_factory=ScoringWeights)
     phase_weights: PhaseWeights = Field(default_factory=PhaseWeights)
     frequency: FrequencyThresholds = Field(default_factory=FrequencyThresholds)
     quality: QualityThresholds = Field(default_factory=QualityThresholds)
+    selection: SelectionThresholds = Field(
+        default_factory=SelectionThresholds,
+        description=(
+            "Cut-points for the one stage entitled to DELETE a valid record (ADR 0019). "
+            "Kept apart from `frequency`, whose cut-points only down-rank, so that the "
+            "filter/rank separation this pipeline is built on is visible in the config "
+            "as well as in the code (GP-13)."
+        ),
+    )
 
     max_submission_rows: int = Field(
         default=10,

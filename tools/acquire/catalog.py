@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from tools.acquire.models import ResourceEntry
+from tools.acquire.models import ResourceEntry, ResourceKind
 
 # --------------------------------------------------------------------------- licenses
 #
@@ -280,6 +280,108 @@ _REFERENCE: Final[tuple[ResourceEntry, ...]] = (
     ),
 )
 
+#: The two artifacts the pipeline actually reads are DERIVED from the download
+#: above, not served: the `.fna.gz` is decompressed to a plain FASTA and then
+#: faidx-indexed, because htslib cannot random-access a plain-gzip FASTA (it needs
+#: BGZF or an uncompressed file). Registering only the archive would leave the
+#: 3.14 GB the reference lookup opens on every indel completely unpinned.
+#:
+#: `derived_from` is what keeps `url` honest on these two: the URL states where
+#: the bytes originated, and the derivation states what was done to them locally.
+#: Without it the entry would read as a claim that this exact file was served,
+#: which it was not.
+_REFERENCE_DERIVED: Final[tuple[ResourceEntry, ...]] = (
+    ResourceEntry(
+        name="grch38_no_alt_fa",
+        url=_REFERENCE[0].url,
+        version="GCA_000001405.15",
+        path="reference/GRCh38_no_alt.fa",
+        license=_REFERENCE_LICENSE,
+        derived_from="grch38_no_alt_fasta (gunzip)",
+        description=(
+            "GRCh38 no-alt analysis set, decompressed. THIS is the file the reference "
+            "lookup opens: htslib cannot random-access a plain-gzip FASTA, so the "
+            "downloaded .fna.gz is unusable directly."
+        ),
+    ),
+    ResourceEntry(
+        name="grch38_no_alt_fa_fai",
+        url=_REFERENCE[0].url,
+        version="GCA_000001405.15",
+        path="reference/GRCh38_no_alt.fa.fai",
+        license=_REFERENCE_LICENSE,
+        derived_from="grch38_no_alt_fa (samtools faidx)",
+        description=(
+            "faidx index for the decompressed GRCh38 FASTA. Pinned separately because an "
+            "index built against a DIFFERENT FASTA still opens and still returns "
+            "sequence -- silently offset sequence, which produces confidently wrong "
+            "left-alignment. The format check cross-reads it against the FASTA."
+        ),
+    ),
+)
+
+_SNPEFF_LICENSE: Final[str] = (
+    "SnpEff: MIT License (Pablo Cingolani). The bundled GRCh38.115 gene model is "
+    "derived from Ensembl release 115, which is distributed under the Apache License "
+    "2.0 with no restriction on use. Cite Cingolani P et al., 'A program for "
+    "annotating and predicting the effects of single nucleotide polymorphisms, "
+    "SnpEff', Fly 2012;6(2):80-92."
+)
+
+_SNPEFF_BASE_URL: Final = "https://snpeff-public.s3.amazonaws.com"
+
+#: SnpEff, pinned because its publisher does not pin it. The core archive is
+#: published as `snpEff_latest_core.zip` -- a name that is a promise the bytes will
+#: change -- and SnpEff rebuilds a genome database under an unchanged name when the
+#: upstream Ensembl annotation is corrected. Without a content pin, two runs months
+#: apart produce different transcripts and different HGVS while stamping the
+#: identical `5.4c/GRCh38.115` provenance onto every EvidenceItem, which is exactly
+#: the failure that recording a version is supposed to prevent (GP-30).
+_SNPEFF: Final[tuple[ResourceEntry, ...]] = (
+    ResourceEntry(
+        name="snpeff_jar",
+        url=f"{_SNPEFF_BASE_URL}/versions/snpEff_latest_core.zip",
+        version="5.4c",
+        path="snpeff/snpEff/snpEff.jar",
+        license=_SNPEFF_LICENSE,
+        derived_from="snpEff_latest_core.zip (unzip)",
+        description=(
+            "The SnpEff executable jar, 5.4c (build 2026-02-23). Pinned by content "
+            "because the URL it came from is named 'latest'."
+        ),
+    ),
+    ResourceEntry(
+        name="snpeff_config",
+        url=f"{_SNPEFF_BASE_URL}/versions/snpEff_latest_core.zip",
+        version="5.4c",
+        path="snpeff/snpEff/snpEff.config",
+        license=_SNPEFF_LICENSE,
+        derived_from="snpEff_latest_core.zip (unzip)",
+        description=(
+            "snpEff.config. Load-bearing rather than incidental: SnpEff resolves a "
+            "genome name THROUGH this file, so a config missing the GRCh38.115 stanza "
+            "makes the installed database report as absent."
+        ),
+    ),
+    ResourceEntry(
+        name="snpeff_database_grch38_115",
+        url=f"{_SNPEFF_BASE_URL}/databases/v5_4/snpEff_v5_4_GRCh38.115.zip",
+        version="GRCh38.115",
+        path="snpeff/data/GRCh38.115",
+        kind=ResourceKind.DIRECTORY,
+        license=_SNPEFF_LICENSE,
+        derived_from="snpEff_v5_4_GRCh38.115.zip (unzip)",
+        description=(
+            "The SnpEff GRCh38.115 genome database, pinned as a DIRECTORY tree digest. "
+            "Pinning only snpEffectPredictor.bin would leave the 25 sequence*.bin files "
+            "unpinned, and those are what supply every codon -- without them SnpEff "
+            "still annotates, but HGVS.c and HGVS.p are silently absent from every "
+            "consequence. Ensembl 115 gene model, retrieval_date 2025-12-01 per "
+            "snpEff.config."
+        ),
+    ),
+)
+
 KNOWN_RESOURCES: Final[tuple[ResourceEntry, ...]] = (
     _CLINVAR
     + _HPO
@@ -287,6 +389,8 @@ KNOWN_RESOURCES: Final[tuple[ResourceEntry, ...]] = (
     + _GENEPANELS
     + _MANE
     + _REFERENCE
+    + _REFERENCE_DERIVED
+    + _SNPEFF
     + _gnomad_exome_entries(GNOMAD_EXOME_CHROMOSOMES)
 )
 

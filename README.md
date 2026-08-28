@@ -38,9 +38,9 @@ keeping the architecture able to represent other models and other variant classe
 ## The specific way this problem goes wrong
 
 Both tracks have a characteristic failure mode, and the architecture is built
-around resisting them rather than around producing an answer quickly.
+to resist them rather than to produce an answer quickly.
 
-**Track 1** fails by filtering. The conventional pipeline drops everything above a
+**Track 1 fails by filtering.** The conventional pipeline drops everything above a
 frequency cut-off, drops non-PASS calls, drops low-impact consequences, then ranks
 the survivors. A variant removed at step one leaves no trace, so a causal variant
 that was filtered is indistinguishable from one that never existed. We separate
@@ -58,6 +58,13 @@ So direction of effect is a mandatory, signed, type-checked field, and a drug
 whose observed direction disagrees with the required correction **cannot be
 constructed as an accepted hypothesis** — the validator refuses. No weight change
 can resurrect a contraindicated compound.
+
+Run against the real BUB1B literature, that gate does what it was built for: of
+13 real agents, an MPS1 inhibitor comes out **last** with `WRONG_DIRECTION`, five
+agents are rejected for pushing the disease direction, and the highest-scoring
+agent in the catalogue is rejected anyway because it is not an approved medicine
+and nobody has measured whether it worsens chromosomal instability. The full case,
+with every citation, is `docs/track2-hypothesis.md`.
 
 ## Architecture
 
@@ -83,13 +90,15 @@ phenotype, mechanism, evidence quality, contradiction penalty. "Why is this rank
 first?" is answerable without re-running anything.
 
 **No claim without evidence.** Every score contribution and every report sentence
-resolves to an `EvidenceItem` carrying its source, tool, version, and — mandatory
-— its **limitations**. A renderer refuses to emit an unsourced assertion. Evidence
-that *contradicts* a hypothesis is stored alongside evidence that supports it and
-is surfaced, never discarded.
+resolves to an `EvidenceItem` carrying its source, tool, version, and its
+mandatory **limitations**. A renderer refuses to emit an unsourced assertion.
+Evidence that *contradicts* a hypothesis is stored alongside evidence that
+supports it and is surfaced, never discarded.
 
 **Deterministic and local.** The patient-data path contains no model inference.
-Repeat runs are byte-identical, which is checked, not asserted.
+Repeat runs are byte-identical under the frozen demo clock, which is checked, not
+asserted; for a real case the scientific content is identical and only recorded
+timestamps move (scope: `docs/handoff-integrity.md` §4).
 
 Full detail: `docs/architecture.md`. Decisions and their rationale:
 `docs/decisions/`.
@@ -163,7 +172,8 @@ Threat model, controls and macOS-specific deletion guidance:
 
 **Deterministic** — ingestion, normalisation, QC, annotation lookup, filtering,
 pairing, phase inference, scoring, ranking, submission rendering, evidence
-persistence, provenance. Same inputs and config produce byte-identical artifacts.
+persistence, provenance. Same inputs and config produce identical scientific
+content; artifact bytes are identical too under a fixed clock (TD-21).
 
 **Heuristic** — every scoring weight. They were chosen by reasoning about a severe
 paediatric recessive disorder and are **not calibrated against any labelled
@@ -173,10 +183,18 @@ dataset**. No composite score is a probability.
 link is labelled as inferred; a drug hypothesis is a proposal for an experiment,
 not a treatment.
 
-**Mocked** — annotation, the drug catalogue and the mechanism library are
-synthetic stand-ins for VEP/gnomAD/ClinVar/DrugBank. `docs/maturity-ledger.md`
-grades every module `real`, `synthetic-substitute` or `stub`. A synthetic
-substitute is never described as biologically valid.
+**Mocked** — annotation, and the drug catalogue and mechanism library **that the
+demo runs on**, are synthetic stand-ins for VEP/gnomAD/ClinVar/DrugBank.
+`docs/maturity-ledger.md` grades every module `real`, `synthetic-substitute` or
+`stub`. A synthetic substitute is never described as biologically valid.
+
+**Literature-derived** — neither machine-acquired nor synthetic, so ADR 0022
+makes it a third kind of knowledge source alongside those two. `knowledge/literature/bub1b/`
+holds a real BUB1B/BubR1 mechanism chain and a 13-agent drug catalogue in which
+every row is cited to a PMID, checked in both directions by test. The scientific
+case built on it is `docs/track2-hypothesis.md`. It is real biology and it is still
+a hypothesis: nothing in it is medical advice, and no patient data was used to
+produce it.
 
 ## Connecting real data later
 

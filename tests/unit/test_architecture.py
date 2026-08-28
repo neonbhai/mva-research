@@ -29,6 +29,11 @@ LAYERS: dict[str, int] = {
     # like "novel and ultra-rare" (ADR 0018).
     "alleles": 1,
     "config": 2,
+    # Out-of-repo reference releases: root resolution, the read side of
+    # knowledge/manifests/resources.yaml, and the tiered integrity check (ADR 0020).
+    # Layer 2 alongside config because it consumes CaseConfig and is consumed by the
+    # composition root; it imports no stage and no network client.
+    "resources": 2,
     "privacy": 3,
     "ingestion": 4,
     "annotation": 4,
@@ -156,43 +161,273 @@ def test_models_are_leaf_modules() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# PRIV-05: what may be imported on the patient-data path.
+#
+# Read the docstring of `test_no_network_clients_in_sensitive_stages` before
+# relying on any of this. It is an import lint. It is not a network boundary.
+# ---------------------------------------------------------------------------
+
+#: Packages that speak a network protocol on the caller's behalf. The realistic
+#: accident: someone adds `requests.get(...)` to an annotation step.
+NETWORK_CLIENT_IMPORTS: frozenset[str] = frozenset(
+    {
+        "requests",
+        "httpx",
+        "urllib",
+        "urllib3",
+        "aiohttp",
+        "http",
+        "ftplib",
+        "smtplib",
+        "poplib",
+        "imaplib",
+        "nntplib",
+        "telnetlib",
+        "xmlrpc",
+        "webbrowser",
+        "paramiko",
+        "pycurl",
+        "websockets",
+        "grpc",
+        "boto3",
+    }
+)
+
+#: The layer underneath those. `socket` is what every client above is built on,
+#: and `socket.send` on an already-connected socket emits no audit event at all,
+#: so `mva.privacy.netguard` cannot see it (see that module's honest-limits list).
+#: `asyncio` carries `open_connection` and `loop.sock_connect`.
+DIRECT_SOCKET_IMPORTS: frozenset[str] = frozenset({"socket", "socketserver", "ssl", "asyncio"})
+
+#: Routes that reach the network *without* the runtime guard ever being consulted.
+#: These are not network clients; they are the documented ways around the audit
+#: hook, and `mva.privacy.netguard` names all three in its own docstring:
+#:
+#: * `ctypes`/`cffi` — `CDLL("libc").connect(...)` never touches the socket module.
+#: * `subprocess` — audit hooks are per-interpreter. A spawned child has an
+#:   unrestricted network, and no amount of care in this process changes that.
+#: * `importlib` — `import_module("socket")` is invisible to an AST import lint,
+#:   which is to say invisible to this test.
+AUDIT_HOOK_BYPASS_IMPORTS: frozenset[str] = frozenset({"ctypes", "cffi", "subprocess", "importlib"})
+
+FORBIDDEN_ON_PATIENT_PATH: frozenset[str] = (
+    NETWORK_CLIENT_IMPORTS | DIRECT_SOCKET_IMPORTS | AUDIT_HOOK_BYPASS_IMPORTS
+)
+
+SENSITIVE_PACKAGES: frozenset[str] = frozenset(
+    {"ingestion", "annotation", "phenotype", "prioritization"}
+)
+
+#: `(repo-relative path, import root) -> why this one is allowed`.
+#:
+#: Every entry is a decision that someone has to defend, which is the point: an
+#: exemption list makes a hole visible, whereas a short forbidden list makes the
+#: same hole invisible by simply never asking about it. Widening this map is a
+#: reviewable event; it must never be widened to make a red test green.
+PATIENT_PATH_IMPORT_EXEMPTIONS: dict[tuple[str, str], str] = {
+    (
+        "annotation/snpeff_local.py",
+        "subprocess",
+    ): (
+        "SnpEff is a Java program; there is no in-process alternative. The child "
+        "gets the proband's coordinates as a VCF on stdin (never a file, never an "
+        "argv), a hand-built 6-key environment rather than os.environ, a scratch "
+        "cwd/HOME/TMPDIR, and -nodownload/-noStats/-noLog. Those constrain SnpEff's "
+        "EXPECTED behaviour; none of them is a network boundary for the child, and "
+        "this test cannot see inside it at all. See TD-06."
+    ),
+    (
+        "ingestion/reader.py",
+        "importlib",
+    ): (
+        "`importlib.util.find_spec('pysam')` — a capability probe that imports "
+        "nothing. It is exempted rather than ignored because `import_module` in the "
+        "same package would defeat every import assertion in this file."
+    ),
+}
+
+
+def forbidden_imports(source: str, *, filename: str = "<test>") -> set[tuple[str, int]]:
+    """Import roots this lint objects to, as `(root, lineno)`.
+
+    Extracted so the matcher can be exercised against sources written for the
+    purpose. A lint asserted only against the tree it already passes on is a lint
+    whose blind spots are structurally invisible — which is exactly how `socket`
+    and `ctypes` went unlisted while the docstring claimed a structural guarantee.
+    """
+    tree = ast.parse(source, filename=filename)
+    found: set[tuple[str, int]] = set()
+    for node in ast.walk(tree):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name.split(".")[0] for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names = [node.module.split(".")[0]]
+        else:
+            continue
+        found.update((name, node.lineno) for name in names if name in FORBIDDEN_ON_PATIENT_PATH)
+    return found
+
+
 @pytest.mark.unit
 def test_no_network_clients_in_sensitive_stages() -> None:
-    """PRIV-05: modules on the patient-data path must not import network clients.
+    """PRIV-05, and an honest statement of how far it reaches.
 
-    A remote annotation service that receives a proband's coordinates is a
-    re-identification vector. The rule is structural, not conventional: the import
-    simply may not exist in these packages.
+    **What this proves.** No module in `ingestion`, `annotation`, `phenotype` or
+    `prioritization` contains a top-level or function-level `import` of a network
+    client, of `socket`/`ssl`/`asyncio`, or of `ctypes`/`cffi`/`subprocess`/
+    `importlib` — except for the entries in
+    :data:`PATIENT_PATH_IMPORT_EXEMPTIONS`, each of which states its reason. That
+    is a real property and it catches the realistic accident: someone adding
+    `requests.get(...)` to an annotation step, or reaching for a raw socket.
+
+    **What this does NOT prove, and must not be read as proving.**
+
+    * **It says nothing about child processes.** `annotation/snpeff_local.py` is
+      exempted above and spawns a JVM with the proband's coordinates on its stdin.
+      Audit hooks are per-interpreter; that child has a completely unrestricted
+      network. `-nodownload/-noStats/-noLog` constrain what SnpEff is *expected*
+      to do — they are flags to a cooperative program, not a boundary around an
+      uncooperative one. No test in this repository observes the child's sockets.
+    * **It says nothing about C extensions.** `pysam`/htslib and `cyvcf2` are
+      imported by five modules on this path and call `connect(2)` and libcurl from
+      C, emitting no Python audit event. They are deliberately *not* forbidden
+      here: they are the primary genomics I/O path and there is no alternative.
+      htslib's CRAM reference auto-fetch is handled by an environment control
+      (`REF_PATH=/dev/null`), not by this lint and not by `netguard`.
+    * **It is an AST lint over import statements only.** `getattr(__builtins__,
+      '__import__')('socket')`, an `exec` of a computed string, or a socket handed
+      in as a constructor argument all pass it. Adding `importlib` above raises the
+      cost of the obvious evasion; it does not close the class.
+    * **It is a lint, not a runtime control.** It observes source text at test
+      time. It cannot observe a run.
+
+    The only control that actually bounds the child process is at the OS. On the
+    macOS target that is `sandbox-exec` with a Seatbelt profile denying
+    `network-outbound`, wrapped around the *whole* `mva run` invocation so the
+    JVM inherits it — a child cannot escape its parent's sandbox. Nothing in this
+    repository applies or verifies it; `NetworkProfile.OFFLINE_ENFORCED` is the
+    operator asserting they did, which the CLI prints as an assertion rather than
+    an observation. That gap is TD-06, and it is the reason this docstring is long.
     """
-    forbidden = {"requests", "httpx", "urllib", "aiohttp", "http", "ftplib", "smtplib"}
-    sensitive = {"ingestion", "annotation", "phenotype", "prioritization"}
     violations: list[str] = []
     for path in _iter_source_files():
-        if _top_level_package(path) not in sensitive:
+        if _top_level_package(path) not in SENSITIVE_PACKAGES:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.Import):
-                names = [a.name.split(".")[0] for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                names = [node.module.split(".")[0]]
-            else:
+        relative = path.relative_to(SRC).as_posix()
+        for name, lineno in sorted(forbidden_imports(path.read_text(encoding="utf-8"))):
+            if (relative, name) in PATIENT_PATH_IMPORT_EXEMPTIONS:
                 continue
-            for name in names:
-                if name in forbidden:
-                    violations.append(
-                        f"  {path.relative_to(SRC.parent.parent)}:{node.lineno} — "
-                        f"imports network client '{name}'"
-                    )
+            violations.append(
+                f"  {path.relative_to(SRC.parent.parent)}:{lineno} — imports '{name}' "
+                f"on the patient-data path"
+            )
     assert not violations, (
-        "PRIV-05 violated: network client on the patient-data path.\n"
-        + "\n".join(violations)
+        "PRIV-05 violated: a network-reaching import on the patient-data path.\n"
+        + "\n".join(sorted(violations))
         + "\n\nPRIV-05 remediation: annotation of patient coordinates must be LOCAL. "
         "Use a pre-downloaded, hash-pinned resource under knowledge/ via an adapter. "
         "If a remote source is genuinely needed, it belongs in a separate offline "
         "acquisition step that fetches PUBLIC reference data only and never sends "
-        "proband coordinates."
+        "proband coordinates. If the import is genuinely unavoidable — a local tool "
+        "with no in-process equivalent — add it to PATIENT_PATH_IMPORT_EXEMPTIONS in "
+        "tests/unit/test_architecture.py WITH the reason and the residual risk, and "
+        "update docs/privacy-model.md. Do not widen the forbidden set's complement."
+    )
+
+
+@pytest.mark.unit
+def test_the_patient_path_lint_catches_the_direct_and_bypass_routes() -> None:
+    """The lint is exercised against sources written to defeat it.
+
+    `socket`, `ctypes` and `importlib` were absent from the forbidden set while
+    the test's own docstring claimed the rule was "structural, not conventional".
+    Asserting a lint only against a tree it already passes on cannot detect that:
+    the missing cases produce no output to be wrong about. So the matcher is fed
+    the code it is supposed to object to.
+    """
+    must_catch = {
+        "import socket": "socket",
+        "import ctypes": "ctypes",
+        "from ctypes import CDLL": "ctypes",
+        "import importlib": "importlib",
+        "import subprocess": "subprocess",
+        "import ssl": "ssl",
+        "import asyncio": "asyncio",
+        "import requests": "requests",
+        "import urllib3": "urllib3",
+        "from http import client": "http",
+        "def f():\n    import socket\n": "socket",
+    }
+    missed = [
+        source
+        for source, expected in must_catch.items()
+        if expected not in {name for name, _ in forbidden_imports(source)}
+    ]
+    assert not missed, (
+        "the PRIV-05 import lint does not object to:\n"
+        + "\n".join(f"  {source!r}" for source in missed)
+        + "\n\nAdd the missing root to NETWORK_CLIENT_IMPORTS, DIRECT_SOCKET_IMPORTS "
+        "or AUDIT_HOOK_BYPASS_IMPORTS in this file."
+    )
+
+    # And must not object to the genomics backends, which are the point of the
+    # stage. Over-forbidding would force the exemption list to swallow the rule.
+    for allowed in ("import pysam", "import cyvcf2", "import gzip", "import struct"):
+        assert not forbidden_imports(allowed), f"{allowed!r} is not a network route"
+
+
+@pytest.mark.unit
+def test_every_patient_path_import_exemption_is_real_and_reasoned() -> None:
+    """An exemption for an import that no longer exists is a rule quietly relaxed.
+
+    Both halves matter. A stale entry means the forbidden set is weaker than it
+    reads. A reason-less entry means nobody can tell whether the hole was decided
+    or inherited.
+    """
+    stale: list[str] = []
+    for (relative, name), reason in sorted(PATIENT_PATH_IMPORT_EXEMPTIONS.items()):
+        path = SRC / relative
+        assert path.is_file(), f"exemption names a file that does not exist: {relative}"
+        assert len(reason) > 80, (
+            f"exemption ({relative}, {name}) has no substantive reason; an exemption "
+            "without a stated residual risk is indistinguishable from an oversight"
+        )
+        if name not in {found for found, _ in forbidden_imports(path.read_text(encoding="utf-8"))}:
+            stale.append(f"  ({relative}, {name}) — no longer imported")
+    assert not stale, (
+        "PATIENT_PATH_IMPORT_EXEMPTIONS has entries that no longer apply:\n"
+        + "\n".join(stale)
+        + "\n\nDelete them. An exemption that outlives its import silently re-opens "
+        "the rule for the next person who adds that import back."
+    )
+
+
+@pytest.mark.unit
+def test_the_only_subprocess_on_the_patient_data_path_is_the_declared_one() -> None:
+    """The subprocess hole is bounded to one file, and that is all it is.
+
+    `mva.privacy.netguard` states plainly that a spawned child has an unrestricted
+    network, and the pipeline runs the offline profile non-strict by default
+    because `strict=True` would block `subprocess.Popen` and so break the
+    provenance manifest's `git` calls. So the guard cannot stop the SnpEff JVM, and
+    is not configured to try.
+
+    What is enforceable from here is that the exposure does not grow silently: a
+    second stage shelling out on this path fails this test rather than inheriting
+    the first one's justification. It is a containment assertion about the source
+    tree, and explicitly NOT a claim that the one remaining child is contained.
+    """
+    spawning = {
+        relative for (relative, name) in PATIENT_PATH_IMPORT_EXEMPTIONS if name == "subprocess"
+    }
+    assert spawning == {"annotation/snpeff_local.py"}, (
+        "the set of patient-path modules permitted to spawn a process changed.\n"
+        f"  now: {sorted(spawning)}\n"
+        "\nEach one is an unpoliced network peer holding proband coordinates. "
+        "Adding another needs a decision record and a docs/privacy-model.md update, "
+        "not an exemption-list edit."
     )
 
 

@@ -4,7 +4,15 @@ You are a pharmacologist reviewing the drug-repurposing reasoning in
 `mva-research` adversarially. Read `src/mva/mechanisms/`,
 `src/mva/interventions/`, `knowledge/public/drug_catalog.tsv`,
 `knowledge/public/mechanism_meta.tsv`, `docs/scientific-assumptions.md`
-(ASSUMPTION-DRUG-01..07). Do NOT modify files.
+(ASSUMPTION-DRUG-01..09). Do NOT modify files.
+
+**Then review the real case, which is where a sign error would actually cost
+something:** `docs/track2-hypothesis.md`, `knowledge/literature/bub1b/*` (chain,
+catalogue and `SOURCES.md`), ADR 0022 and ADR 0025. Every row there claims a
+citation; verify a sample against PubMed rather than trusting the table. The
+machinery review below is the general attack; the BUB1B tables are the instance,
+and a fabricated or mis-attached citation there is the single most damaging
+defect this project could ship.
 
 ## The central claim to attack
 The pipeline claims it cannot recommend a compound that acts on the right target
@@ -39,6 +47,21 @@ mechanism that gets a contraindicated agent through. Specifically:
 8. **The rejection record.** Are rejections preserved with reasons (GP-19), and
    are the reasons correctly distinguished (wrong-direction vs not-approved vs
    target-not-in-mechanism)?
+
+## Specific to the BUB1B case
+9. **Is the target node right?** ADR 0025 puts it at BubR1 abundance rather than
+   the checkpoint. Argue the other side. If the checkpoint were the target, which
+   candidates change verdict?
+10. **The nicotinamide sign claim.** The document says nicotinamide is both an
+    NAD⁺ precursor and a sirtuin product inhibitor, so its net direction on BubR1
+    abundance cannot be signed. Is `CONTEXT_DEPENDENT` the honest cell, or is it
+    hedging on something that has in fact been measured?
+11. **The compensatory-node call.** Senescence and immune clearance are flagged
+    `deviation_is_pathological = 0`. In BubR1-hypomorphic mice, p16-driven
+    senescence *drives* the progeroid phenotype. Is "compensatory" the right
+    label, or is it a way of avoiding a hard call?
+12. **The tumour arm.** TD-25 says it is not modelled. Does any sentence in the
+    report read as advice about the rhabdomyosarcoma?
 
 ## Output
 Severity-ranked findings, file:line, the concrete scenario, the fix. Be
