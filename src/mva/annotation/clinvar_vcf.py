@@ -73,11 +73,14 @@ from mva.alleles import (
     CanonicalAllele,
     LeftAlignmentStatus,
     ReferenceLookup,
+    ReferenceStatus,
     canonicalise_allele,
-    rightmost_equivalent_position,
+    rightmost_equivalent_bound,
 )
+from mva.annotation.bgzf import index_covers_data
 from mva.determinism import hash_file
 from mva.errors import AdapterUnavailableError, GenomeBuildMismatchError
+from mva.models.base import error_token
 from mva.models.genome import CANONICAL_CONTIGS, GenomeBuild, normalise_contig
 from mva.models.variant import ClinicalAssertion
 
@@ -224,7 +227,7 @@ class _Query:
     a repeat. An index query finds records by the span they occupy, so a source
     record that spells this same insertion further right occupies a disjoint span
     and is never even fetched — a miss indistinguishable from "ClinVar has no
-    record". See :func:`mva.alleles.rightmost_equivalent_position`."""
+    record". See :func:`mva.alleles.rightmost_equivalent_bound`."""
 
     @property
     def canonical_key(self) -> str:
@@ -537,13 +540,38 @@ class ClinvarVcfAdapter:
             raise AdapterUnavailableError(msg)
 
         _verify_integrity(vcf_path, expected_sha256=expected_sha256, expected_md5=expected_md5)
+        # The pin above proves the DATA is the reviewed bytes. It says nothing about
+        # the index, and htslib will region-query a complete release through an
+        # index built from a shorter file without complaint — answering "no record"
+        # for every variant past the point the index reaches. That is not evidence
+        # of benignity (GP-14), and on this adapter it is expensive: a single 520 kb
+        # window holds 1,761 Pathogenic/Likely_pathogenic indel assertions. The
+        # check is on content rather than mtime, because a correct index is
+        # routinely older than the file it describes; see index_covers_data.
+        if index_covers_data(vcf_path, index_path) is False:
+            msg = (
+                f"The tabix index beside ClinVar release {vcf_path.name!r} does not reach "
+                "the end of the release: it was built from a shorter file, or the release "
+                "was replaced without reindexing. Refusing to open it. htslib would answer "
+                "every query past the index's reach with 'no record', which is "
+                "indistinguishable from 'ClinVar has nothing on record' and is not evidence "
+                "of benignity. Re-run `tabix -p vcf` over the release, or re-download both "
+                "halves together. No coordinate is echoed (PRIV-09)."
+            )
+            raise AdapterUnavailableError(msg)
 
         self._vcf_path = vcf_path
         self._index_path = index_path
         self._build = build
         self._merge_window_bp = merge_window_bp
         self._reference = reference
+        # Per-run count of alleles whose canonicalisation could not read the
+        # reference. Not a boolean: the report states how many records are
+        # affected, and "one unreadable base" and "the FASTA is gone" are
+        # different operator problems.
+        self._unusable_reference_alleles = 0
         self._tabix = _open_tabix(vcf_path)
+        self._closed = False
         self._version = _release_version(self._tabix, path=vcf_path, build=build)
         self._contig_map = _resolve_contig_map(self._tabix.contigs)
 
@@ -595,23 +623,37 @@ class ClinvarVcfAdapter:
     def representation_status(self) -> LeftAlignmentStatus:
         """Whether this adapter can reconcile a *shifted* indel spelling, typed.
 
-        ``APPLIED`` when a reference was supplied, ``UNAVAILABLE_NO_REFERENCE``
-        otherwise. Trimming to the minimal representation is unconditional either
-        way, so the ``100 AT>AG`` versus ``101 T>G`` class of mismatch joins in both
-        states; what the degraded state costs is the repeat-tract class, where the
+        ``APPLIED`` only when a reference was supplied **and every read the rule
+        needed from it succeeded**. A reference object that is merely non-``None``
+        proves nothing: a FASTA that raises on every read yields trim-only keys, and
+        reporting those as reference-backed is a provenance lie no downstream
+        consumer can detect. Trimming to the minimal representation is unconditional
+        either way, so the ``100 AT>AG`` versus ``101 T>G`` class of mismatch joins in
+        both states; what the degraded state costs is the repeat-tract class, where the
         release and the proband place the same insertion at different positions.
         Typed rather than logged so a report can state the limitation instead of a
         reader having to infer it from an absent assertion.
         """
         if self._reference is None:
             return LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+        if self._unusable_reference_alleles:
+            return LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
         return LeftAlignmentStatus.APPLIED
 
     @property
     def representation_limitation(self) -> str | None:
         """One sentence for a report footer, or ``None`` when nothing is degraded."""
-        if self._reference is not None:
+        if self._reference is not None and not self._unusable_reference_alleles:
             return None
+        if self._reference is not None:
+            return (
+                f"A reference FASTA was supplied but could not be read for "
+                f"{self._unusable_reference_alleles} ClinVar lookup(s), which were "
+                "canonicalised by trimming only. Those variants may fail to join "
+                "against ClinVar's left-aligned alleles and would then be reported "
+                "as having no ClinVar record — absence of information, not evidence "
+                "of benignity."
+            )
         return (
             "ClinVar lookups were canonicalised by trimming only: no reference FASTA "
             "was supplied to the adapter, so an indel that ClinVar places at a "
@@ -649,6 +691,16 @@ class ClinvarVcfAdapter:
                 ``{build}:{contig}:{pos}:{ref}:{alt}`` form, or names a contig
                 this pipeline does not reason about.
         """
+        if self._closed:
+            msg = (
+                "This ClinVar adapter has been closed; its htslib handle is released. "
+                "Construct a new adapter rather than reusing a closed one — pysam answers "
+                "a closed handle with 'I/O operation on closed file', and a caller that "
+                "swallowed that would read the empty result as 'ClinVar has no record' "
+                "for every variant in the batch, which is not evidence of benignity "
+                "(GP-14). No coordinate is echoed (PRIV-09)."
+            )
+            raise AdapterUnavailableError(msg)
         ordered = _unique_ids(variant_ids)
         queries = tuple(self._parse_query(variant_id) for variant_id in ordered)
 
@@ -681,14 +733,39 @@ class ClinvarVcfAdapter:
                 # This release's index holds nothing for that chromosome at all.
                 continue
             for span in merge_query_spans(by_contig[ucsc_contig], self._merge_window_bp):
-                for line in self._tabix.fetch(index_contig, span[0] - 1, span[1]):
-                    for key, assertion in self._parse_record(line, ucsc_contig):
-                        for variant_id in by_key.get(key, ()):
-                            identity = (variant_id, _assertion_sort_key(assertion))
-                            if identity in seen:
-                                continue
-                            seen.add(identity)
-                            found.setdefault(variant_id, []).append(assertion)
+                # Both the fetch and the iteration are inside the guard. pysam puts
+                # the region string — a proband coordinate — into the message of
+                # anything it raises (``could not create iterator for region
+                # '15:40200239-40200239'``), and htslib defers work to the first
+                # ``next()``, so guarding only the call would move the leak rather
+                # than remove it. Exception text and traceback frames reach
+                # terminals, log files, crash reports and agent context (PRIV-09).
+                try:
+                    for line in self._tabix.fetch(index_contig, span[0] - 1, span[1]):
+                        for key, assertion in self._parse_record(line, ucsc_contig):
+                            for variant_id in by_key.get(key, ()):
+                                identity = (variant_id, _assertion_sort_key(assertion))
+                                if identity in seen:
+                                    continue
+                                seen.add(identity)
+                                found.setdefault(variant_id, []).append(assertion)
+                except Exception as exc:
+                    # Deliberately broad, and deliberately re-raised with the
+                    # context SUPPRESSED. ``raise ... from exc`` would chain the
+                    # original, whose message and frame are exactly what must not be
+                    # printed, and a bare ``raise`` re-exposes it the same way. The
+                    # token is a one-way handle, so two messages about one region
+                    # still correlate within a run.
+                    handle = error_token((ucsc_contig, span[0], span[1]))
+                    msg = (
+                        f"The tabix backend failed on a region query against ClinVar "
+                        f"{self._version} ({type(exc).__name__}). The region is a proband "
+                        f"coordinate and is not echoed; the correlation handle is "
+                        f"<region:{handle}> (PRIV-09). The release may be truncated, its "
+                        "index may not match its bytes, or the file may have changed under "
+                        "an open handle. Re-verify the release against its sha256 pin."
+                    )
+                    raise AdapterUnavailableError(msg) from None
 
         return {
             variant_id: tuple(sorted(found[variant_id], key=_assertion_sort_key))
@@ -697,8 +774,12 @@ class ClinvarVcfAdapter:
         }
 
     def close(self) -> None:
-        """Release the htslib file handle. Idempotent."""
+        """Release the htslib file handle. Idempotent.
+
+        A lookup afterwards is refused rather than answered: see :meth:`assertions`.
+        """
         self._tabix.close()
+        self._closed = True
 
     # ------------------------------------------------------------------ internals
 
@@ -715,13 +796,16 @@ class ClinvarVcfAdapter:
         join that happened to succeed. Agreement inferred from a passing join is
         exactly the evidence that was available while the two disagreed.
         """
-        return canonicalise_allele(
+        canonical = canonicalise_allele(
             contig=contig,
             position=position,
             ref=ref,
             alt=alt,
             reference=self._reference,
         )
+        if canonical.reference_status is ReferenceStatus.UNUSABLE:
+            self._unusable_reference_alleles += 1
+        return canonical
 
     def _parse_query(self, variant_id: str) -> _Query:
         """Decompose a canonical variant ID, refusing anything ambiguous.
@@ -762,16 +846,24 @@ class ClinvarVcfAdapter:
         canonical = self.canonicalise(contig, position, ref.strip().upper(), alt.strip().upper())
         search_end = canonical.position
         if self._reference is not None:
-            search_end = max(
-                search_end,
-                rightmost_equivalent_position(
-                    contig=contig,
-                    position=canonical.position,
-                    ref=canonical.ref,
-                    alt=canonical.alt,
-                    reference=self._reference,
-                ),
+            # `.proven` is False when the reference could not be read to the right
+            # of the record. The window is then the furthest point the search
+            # reached, which may be short — but the key is trim-only for the same
+            # reason, so the limitation is the one already reported by
+            # representation_status rather than a second, undeclared one.
+            bound = rightmost_equivalent_bound(
+                contig=contig,
+                position=canonical.position,
+                ref=canonical.ref,
+                alt=canonical.alt,
+                reference=self._reference,
             )
+            search_end = max(search_end, bound.position)
+            if not bound.proven and canonical.reference_status is not ReferenceStatus.UNUSABLE:
+                # `canonicalise` already counted the key; count the bound only when
+                # this allele is not already in the tally, so the number stays a
+                # count of affected lookups rather than of failed reads.
+                self._unusable_reference_alleles += 1
         return _Query(
             variant_id=variant_id,
             build=build,

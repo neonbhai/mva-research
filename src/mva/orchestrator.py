@@ -6,23 +6,32 @@ provenance, and accumulates the evidence ledger.
 
 Ordering:
 
-    validate -> ingest -> annotate -> prioritise -> mechanism -> drugs -> report
-             -> evidence persistence -> provenance -> privacy audit
+    validate -> ingest -> annotate -> select -> prioritise -> mechanism -> drugs
+             -> report -> evidence persistence -> provenance -> privacy audit
 """
 
 from __future__ import annotations
 
+from collections.abc import Generator, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mva.alleles import ReferenceLookup
+from mva.annotation.binding import (
+    BoundAdapters,
+    ResolvedResources,
+    build_real_adapter_set,
+    resolve_real_resources,
+)
 from mva.annotation.local_tables import load_default_adapters
-from mva.annotation.service import annotate_variants
+from mva.annotation.service import iter_annotated
 from mva.config import CaseConfig, NetworkProfile, Workspace
 from mva.determinism import canonical_json
 from mva.errors import ConfigError, ExportBlockedError
 from mva.evidence.ledger import AssertionResolver, EvidenceLedger
 from mva.evidence.store import EvidenceStore, GraphEdge
-from mva.ingestion.normalise import normalise_variants
+from mva.ingestion.normalise import normalise_variants, open_reference_fasta
 from mva.ingestion.qc import assess_quality
 from mva.ingestion.reader import read_vcf
 from mva.interventions.catalog import DrugCatalog
@@ -35,6 +44,7 @@ from mva.models.evidence import EvidenceItem
 from mva.models.mechanism import MechanismHypothesis
 from mva.models.pair import CandidatePair
 from mva.models.provenance import ArtifactKind, ArtifactProvenance, RunManifest
+from mva.models.variant import VariantRecord
 from mva.phenotype.hpo import GenePhenotypeIndex
 from mva.phenotype.loader import load_phenotype_profile
 from mva.phenotype.scoring import score_all_genes
@@ -46,10 +56,11 @@ from mva.pipeline import (
     validate_case,
     write_provenance_manifest,
 )
-from mva.prioritization.filters import apply_hard_filters, apply_soft_flags
+from mva.prioritization.filters import iter_hard_filtered, iter_soft_flagged
 from mva.prioritization.pairing import generate_pair_candidates
 from mva.prioritization.ranking import assign_discriminating_experiments, rank_pairs
 from mva.prioritization.scoring import score_pair
+from mva.prioritization.selection import iter_selected
 from mva.privacy.audit import run_audit
 from mva.privacy.export import PUBLIC_EXPORT_ALLOWLIST as _PUBLIC_EXPORT_ALLOWLIST
 from mva.privacy.export import gate_public_export
@@ -66,12 +77,20 @@ from mva.reporting.track2 import (
     build_rejection_record,
     build_track2_report,
 )
+from mva.resources import (
+    ResourceRoot,
+    ResourceRootError,
+    load_resource_manifest,
+    reference_fasta_path,
+    resolve_resource_root,
+)
 
 #: Stage names in execution order, for `--stop-after`.
 STAGES: tuple[str, ...] = (
     "validate",
     "ingest",
     "annotate",
+    "select",
     "prioritise",
     "mechanism",
     "drugs",
@@ -153,6 +172,120 @@ def _gate_public_artifact(context: RunContext, artifact: ArtifactProvenance) -> 
         raise ExportBlockedError(msg)
 
 
+def _resolve_case_resources(config: CaseConfig, workspace: Workspace) -> ResolvedResources | None:
+    """Which reference releases this case runs against, or ``None`` for synthetic.
+
+    **This is the policy the whole real-data path turns on, so it is stated here,
+    at the composition root, rather than buried in an adapter factory (GP-03).**
+
+    * ``synthetic: true`` -> ``None``. The case runs on the hash-pinned demo tables
+      under ``knowledge/public/``. That is what `just demo`, `just
+      demo-determinism` and every test do, and it must stay independent of whether
+      the machine happens to have 200 GB of reference data: a suite whose result
+      depends on ``$MVA_RESOURCES`` is a suite that passes in one place and fails
+      in another. It also keeps the fictional ``SYNTH*`` genes away from a real
+      gene model that has never heard of them.
+    * ``synthetic: false`` -> the real releases, **required**. No resource root, an
+      unregistered file, an unfetched entry or a failed integrity pin all raise.
+
+    There is deliberately no third branch, and in particular no silent fallback for
+    a real case with missing resources. The synthetic tables hold fictional genes
+    and invented allele frequencies; a real proband ranked against them would
+    produce a submission, a dossier and a provenance manifest that all looked
+    entirely healthy and were entirely fabricated (GP-20). ADR 0027 records the
+    trade — a loud failure that stops a run is recoverable in minutes; a quiet one
+    that ships is not recoverable at all.
+    """
+    if config.synthetic:
+        return None
+
+    root = _require_resource_root(config, workspace)
+    manifest_path = workspace.repo_root / config.resources.manifest
+    manifest = load_resource_manifest(manifest_path)
+    return resolve_real_resources(config, resource_root=root, manifest=manifest)
+
+
+def _require_resource_root(config: CaseConfig, workspace: Workspace) -> ResourceRoot:
+    """The external reference-data root, or a refusal that says why it matters."""
+    try:
+        return resolve_resource_root(repo_root=workspace.repo_root)
+    except ResourceRootError as exc:
+        msg = (
+            f"Case {config.case_id!r} declares synthetic=false, so it must be annotated "
+            f"against the real public reference releases — but: {exc}\n"
+            "Refusing to fall back to the synthetic tables under knowledge/public/. They "
+            "hold fictional genes and invented allele frequencies, so this run would rank a "
+            "real proband against fabricated evidence and every artifact it produced would "
+            "look healthy (GP-20, ADR 0027). Set MVA_RESOURCES, or set synthetic=true if "
+            "this case really is a demo."
+        )
+        raise ConfigError(msg) from exc
+
+
+def _open_reference(
+    config: CaseConfig,
+    workspace: Workspace,
+    *,
+    resolved: ResolvedResources | None,
+    stack: ExitStack,
+) -> ReferenceLookup | None:
+    """Open the GRCh38 FASTA that left-alignment and both joins need.
+
+    For a real case this is the verified release :func:`_resolve_case_resources`
+    already required, so it is never ``None``. For a synthetic case it is the
+    per-case ``inputs.reference_fasta`` override if one is set, and otherwise
+    ``None`` — which is the state every fixture and the demo run in, and which
+    ``normalise_variants`` reports as
+    :attr:`~mva.alleles.LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE` rather than
+    passing over in silence.
+    """
+    path = (
+        resolved.reference_fasta
+        if resolved is not None
+        else reference_fasta_path(config, workspace=workspace, resource_root=None)
+    )
+    if path is None:
+        return None
+    return stack.enter_context(_closing_reference(path))
+
+
+@contextmanager
+def _closing_reference(path: Path) -> Generator[ReferenceLookup]:
+    """Open an indexed FASTA and guarantee the htslib handle is released."""
+    handle = open_reference_fasta(path)
+    try:
+        yield handle
+    finally:
+        handle.close()
+
+
+def _bind_adapters(
+    *,
+    knowledge_root: Path,
+    manifest_path: Path,
+    resolved: ResolvedResources | None,
+    reference: ReferenceLookup | None,
+    stack: ExitStack,
+) -> BoundAdapters:
+    """Bind the annotation adapter set this case is entitled to.
+
+    The synthetic branch is byte-for-byte what the pipeline did before the real
+    adapters existed. The real branch passes ``reference=`` to **both** joining
+    adapters, which is the whole point: constructed without it they still work,
+    still pass their tests, and silently lose every repeat-tract indel join
+    (ADR 0018). ``build_real_adapter_set`` takes the keyword without a default so
+    it cannot be forgotten here, and reports the adapters' own
+    ``representation_limitation`` when it is ``None``.
+    """
+    bound = (
+        BoundAdapters(adapters=load_default_adapters(knowledge_root, manifest_path))
+        if resolved is None
+        else build_real_adapter_set(resolved, reference=reference)
+    )
+    stack.callback(bound.close)
+    return bound
+
+
 def _should_run(stage: str, stop_after: str | None) -> bool:
     if stop_after is None:
         return True
@@ -229,58 +362,133 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
     # Wired BEFORE the first artifact is written, so there is no window in which an
     # artifact is registered ungated. See `_gate_public_artifact`.
     context.on_register = _gate_public_artifact
-    ledger = EvidenceLedger(run_id=context.run_id)
+    # The spill directory is inside the workspace: evidence subjects are variant
+    # IDs, so the file carries proband coordinates and is SENSITIVE (GP-40).
+    # `close()` in `_finish` unlinks it. Without a spill_dir the ledger keeps its
+    # pre-existing all-in-memory behaviour, which is what every test gets.
+    ledger = EvidenceLedger(run_id=context.run_id, spill_dir=workspace.tmp_dir)
 
-    # ---------------------------------------------------------------- ingest
-    ingestion = read_vcf(
-        workspace.path(config.inputs.vcf),
-        expected_build=config.genome_build,
-        source_artifact="input_vcf",
-    )
-    normalised = normalise_variants(ingestion.variants)
-    qc = assess_quality(normalised.variants, thresholds=config.quality, clock=context.clock)
-    ledger.extend(qc.evidence)
-    context.warnings.extend(ingestion.warnings)
-    context.warnings.extend(normalised.warnings)
+    # Resolved BEFORE the VCF is opened. A real case whose reference releases are
+    # missing must fail before it has read one patient record, not after (ADR 0027).
+    resolved = _resolve_case_resources(config, workspace)
 
-    normalised_art = context.write_json_artifact(
-        "variants/normalised.json",
-        [v.model_dump(mode="json") for v in qc.variants],
-        kind=ArtifactKind.NORMALISED_VARIANTS,
-        stage="ingest",
-        row_count=len(qc.variants),
-    )
-    context.write_json_artifact(
-        "qc/qc_report.json",
-        {
-            "metrics": qc.metrics,
-            "normalisation_operations": normalised.operations_applied,
-            "skipped_count": ingestion.skipped_count,
-            "skipped_reasons": list(ingestion.skipped_reasons),
-        },
-        kind=ArtifactKind.QC_REPORT,
-        stage="ingest",
-        upstream=[normalised_art.artifact_id],
-    )
-    if not _should_run("annotate", stop_after):
-        return _finish(context, repo_root=repo_root, ledger=ledger, ranked=[])
+    # `ExitStack` spans ingest and annotate because the SAME reference FASTA handle
+    # serves both: normalisation left-aligns against it, and the ClinVar and gnomAD
+    # adapters reconcile a shifted indel against it. Two handles would be two
+    # caches over one immutable file. Everything is released as the block exits,
+    # including on an early `return _finish(...)` inside it.
+    with ExitStack() as stack:
+        reference = _open_reference(config, workspace, resolved=resolved, stack=stack)
 
-    # ---------------------------------------------------------------- annotate
-    adapters = load_default_adapters(knowledge_root, manifest_path)
-    annotation = annotate_variants(qc.variants, adapters=adapters, clock=context.clock)
-    ledger.extend(annotation.evidence)
-    context.warnings.extend(annotation.warnings)
+        # ---------------------------------------------------------------- ingest
+        ingestion = read_vcf(
+            workspace.path(config.inputs.vcf),
+            expected_build=config.genome_build,
+            source_artifact="input_vcf",
+        )
+        normalised = normalise_variants(ingestion.variants, reference=reference)
+        qc = assess_quality(normalised.variants, thresholds=config.quality, clock=context.clock)
+        ledger.extend(qc.evidence)
+        context.warnings.extend(ingestion.warnings)
+        context.warnings.extend(normalised.warnings)
 
-    annotated_art = context.write_json_artifact(
-        "variants/annotated.json",
-        [v.model_dump(mode="json") for v in annotation.variants],
-        kind=ArtifactKind.ANNOTATED_VARIANTS,
-        stage="annotate",
-        upstream=[normalised_art.artifact_id],
-        row_count=len(annotation.variants),
-    )
-    if not _should_run("prioritise", stop_after):
-        return _finish(context, repo_root=repo_root, ledger=ledger, ranked=[])
+        normalised_art = context.write_json_artifact(
+            "variants/normalised.json",
+            [v.model_dump(mode="json") for v in qc.variants],
+            kind=ArtifactKind.NORMALISED_VARIANTS,
+            stage="ingest",
+            row_count=len(qc.variants),
+        )
+        context.write_json_artifact(
+            "qc/qc_report.json",
+            {
+                "metrics": qc.metrics,
+                "normalisation_operations": normalised.operations_applied,
+                # The typed degraded state, not only the prose in `warnings`. A
+                # reader deciding whether an absent ClinVar assertion means
+                # anything has to be able to branch on this (GP-14, ADR 0018).
+                "left_alignment": normalised.left_alignment.as_dict(),
+                "skipped_count": ingestion.skipped_count,
+                "skipped_reasons": list(ingestion.skipped_reasons),
+            },
+            kind=ArtifactKind.QC_REPORT,
+            stage="ingest",
+            upstream=[normalised_art.artifact_id],
+        )
+        if not _should_run("annotate", stop_after):
+            return _finish(context, repo_root=repo_root, ledger=ledger, ranked=[])
+
+        # ---------------------------------------------------------------- annotate
+        bound = _bind_adapters(
+            knowledge_root=knowledge_root,
+            manifest_path=manifest_path,
+            resolved=resolved,
+            reference=reference,
+            stack=stack,
+        )
+        annotated = iter_annotated(qc.variants, adapters=bound.adapters, clock=context.clock)
+
+        # ONE pass drives everything: annotation feeds the ledger and the artifact,
+        # then the hard filter, the soft flags and selection. Nothing but the
+        # selected variants accumulates, and that is a few hundred records rather
+        # than 4.5 M (docs/scale-report.md, docs/handoff-scale.md §1.3).
+        #
+        # The artifact is written from the point BEFORE hard filtering, so
+        # `variants/annotated.json` still holds every annotated record. That is why
+        # this uses the PUSH sink: a puller cannot both write every record and hand
+        # a filtered subset onward in the same pass.
+        with context.open_json_rows_artifact(
+            "variants/annotated.json",
+            kind=ArtifactKind.ANNOTATED_VARIANTS,
+            stage="annotate",
+            upstream=[normalised_art.artifact_id],
+        ) as sink:
+
+            def _recorded() -> Iterator[VariantRecord]:
+                for item in annotated:
+                    ledger.extend(item.evidence)
+                    sink.write(item.variant.model_dump(mode="json"))
+                    yield item.variant
+
+            filtered = iter_hard_filtered(_recorded(), expected_build=config.genome_build)
+            flagged = iter_soft_flagged(
+                filtered, frequency=config.frequency, quality=config.quality
+            )
+            selection = iter_selected(
+                flagged,
+                frequency=config.frequency,
+                thresholds=config.selection,
+                clock=context.clock,
+            )
+            selected = list(selection)
+
+        annotated_art = sink.provenance
+        if annotated_art is None:  # pragma: no cover - set by the context manager
+            msg = "The annotated-variants artifact was not registered on exit."
+            raise ConfigError(msg)
+        context.warnings.extend(annotated.warnings())
+        # Coverage holes are known only once the adapters have been asked, so this
+        # is read after the pass, not at bind time.
+        context.warnings.extend(bound.run_warnings())
+
+        # ---------------------------------------------------------------- select
+        selection_report = selection.report()
+        ledger.extend(selection.evidence())
+        context.warnings.extend(selection_report.warnings)
+        context.write_json_artifact(
+            "selection/selection_report.json",
+            {
+                **selection_report.as_payload(),
+                "hard_filter": filtered.counts(),
+            },
+            kind=ArtifactKind.SELECTION_REPORT,
+            stage="select",
+            upstream=[annotated_art.artifact_id],
+            row_count=selection_report.input_count,
+        )
+
+        if not _should_run("prioritise", stop_after):
+            return _finish(context, repo_root=repo_root, ledger=ledger, ranked=[])
 
     # ---------------------------------------------------------------- phenotype
     profile = load_phenotype_profile(
@@ -294,15 +502,14 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
     )
 
     # ---------------------------------------------------------------- prioritise
-    filtered = apply_hard_filters(annotation.variants, expected_build=config.genome_build)
-    flagged = apply_soft_flags(
-        filtered.retained, frequency=config.frequency, quality=config.quality
-    )
+    # Hard filtering and soft flagging happened inside the annotate pass above; the
+    # records in `selected` have been through both and carry identical flags.
+    #
     # ADR 0013: bound the hypothesis space by plausibility, never by coordinate, and
     # surface it when a cap fires. A cap that silently deletes the correct pair is the
     # worst failure this pipeline can have, so the warning is part of the contract.
     pairing = generate_pair_candidates(
-        flagged,
+        selected,
         max_pairs_per_gene=config.max_pairs_per_gene,
         frequency=config.frequency,
     )
@@ -495,6 +702,11 @@ def _finish(
     )
 
     _write_privacy_audit(context, repo_root=repo_root)
+    # The spill file carries proband coordinates and the run is over. `close()` is a
+    # no-op on a ledger that never spilled, and `len(ledger)` keeps working after it;
+    # reading the ledger's CONTENTS afterwards raises rather than returning an empty
+    # ledger, which would read as a run that produced no evidence.
+    ledger.close()
 
     manifest = build_run_manifest(context, repo_root=repo_root)
     write_provenance_manifest(context, manifest)
@@ -557,7 +769,9 @@ def _persist_evidence(
     db_path = context.artifact_path("evidence/evidence.duckdb")
     with EvidenceStore(db_path) as store:
         store.initialise()
-        store.write_evidence(ledger.items())
+        # `items()` materialises; a spilled ledger holds more items than the process
+        # has memory for, which is why it spilled.
+        store.write_evidence_stream(ledger.iter_items())
         if ranked:
             store.write_pairs(list(ranked))
             store.write_variants([v for pair in ranked for v in pair.variants])

@@ -237,6 +237,44 @@ def test_decision_records_are_well_formed() -> None:
     )
 
 
+@pytest.mark.unit
+def test_no_two_decision_records_share_a_number() -> None:
+    """An ADR number is an address, so two files cannot answer to one.
+
+    This has now happened twice — 0019 and 0025 — and both times it was caught by
+    a human reading `git status`, not by the suite. Concurrent authors each take
+    "the next free number" from a directory listing that was already stale by the
+    time they read it, and nothing downstream complains: `test_adr_references_
+    resolve` is satisfied by *either* file existing, so `ADR 0025` in a code
+    comment silently points at whichever of two unrelated decisions the reader
+    opens first. That is worse than a dangling citation, which at least announces
+    itself.
+    """
+    by_number: dict[str, list[str]] = {}
+    for path in sorted(DECISIONS.glob("*.md")):
+        match = _ADR_FILENAME.match(path.name)
+        if match is None:
+            continue  # shape is test_decision_records_are_well_formed's job
+        by_number.setdefault(match.group(1), []).append(path.name)
+
+    collisions = {number: names for number, names in by_number.items() if len(names) > 1}
+
+    assert not collisions, (
+        "Two decision records share one number:\n"
+        + "\n".join(
+            f"  ADR {number}: " + ", ".join(names) for number, names in sorted(collisions.items())
+        )
+        + "\n\nRemediation: renumber the LATER one to the next genuinely free number "
+        "(check this list, not your memory), rename its file, fix its own title line, "
+        "and update every citation of it in the same commit — code comments, error "
+        "message strings and their tests, docs, and any `docs/decisions/NNNN-` link. "
+        "Grep for the old number afterwards and confirm every remaining hit belongs to "
+        "the ADR that kept it: a citation left pointing at the wrong decision is a "
+        "reader being told the wrong reason a constraint exists, which is the exact "
+        "failure the number is supposed to prevent."
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. Every ADR number cited resolves to a file
 # ---------------------------------------------------------------------------

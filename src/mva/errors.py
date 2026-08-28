@@ -33,8 +33,35 @@ class ReferenceMismatchError(IngestionError):
     """A record's REF allele disagrees with the reference genome."""
 
 
+class ReferenceUnusableError(MvaError):
+    """The reference genome could not supply a base the allele rule needed.
+
+    Distinct from :class:`ReferenceMismatchError`, which is a statement *about the
+    record* made by a reference that worked. This one says the reference itself is
+    broken — it raised, it is missing the contig, or it returned something that is
+    not a nucleotide — so nothing is known about the record at all.
+
+    Also distinct from "there is genuinely no base at this position", which is the
+    reference being complete and correct at the edge of a contig. Collapsing the
+    two is what let a failed FASTA read degrade a run to trim-only join keys while
+    the adapters went on reporting that left-alignment had been applied (ADR 0018).
+
+    Raised only by the reference-consuming primitives in :mod:`mva.alleles` whose
+    return type has nowhere to carry the degraded state.
+    """
+
+
 class AdapterUnavailableError(MvaError):
     """A required external tool or dataset is not present."""
+
+
+class AnnotationError(MvaError):
+    """The annotation stage was driven in a way it cannot honour.
+
+    Raised for misuse of the stage rather than for adapter failure: re-iterating a
+    single-pass stream, or asking for a batch size that cannot bound anything. An
+    adapter that is missing raises :class:`AdapterUnavailableError` instead.
+    """
 
 
 class EvidenceError(MvaError):

@@ -13,22 +13,34 @@ behaviours is in `docs/current-status.md`. Key locks:
 - the synthetic causal pair ranks first, produced by general scoring rather than
   a special case;
 - the wrong-direction drug is rejected;
-- repeat runs are byte-identical;
+- repeat runs are byte-identical under the frozen demo clock;
 - the submission CSV round-trips against the verified challenge contract.
 
 **What this establishes:** the implementation does what it says. **What it does
 not establish:** that what it says is biologically right.
 
-## Level 2 — Determinism and reproducibility (DONE)
+## Level 2 — Determinism and reproducibility (DONE for the synthetic case)
 
 `just demo-determinism` runs the demo twice into separate workspaces and compares
 artifact hashes. The run manifest records config hash, input hashes, git commit,
 dirty flag, tool versions and the network profile, so a third party can tell
 whether a rerun is expected to match.
 
-**Gap:** reproducibility is verified on one machine and one OS. Cross-platform
-byte-identity (linux/amd64 vs macOS/arm64) is untested; the container exists for
-this and has not been exercised.
+**Gap 1 — the clock.** Every determinism check here runs
+`config/synthetic-case.yaml`, which sets `synthetic: true` and therefore selects
+`FixedClock(2026-01-01T00:00:00Z)`. A real case gets `SystemClock`, there is no
+flag to override it, and `verify_determinism` neither freezes the clock nor masks
+fields — it skips two files by name. So byte-identity under a real clock is not
+merely unverified, it would currently fail, on eleven artifacts that differ in
+recorded time. What *is* established for a real run is that the scientific
+content is identical: no RNG, no time-derived id or hash, total orderings,
+checked across `PYTHONHASHSEED` and `TZ` variation. Scope and remediation:
+`docs/handoff-integrity.md` §4, tracked as TD-21. Organizers may rerun a
+submission, so this is a submission risk and not only a hygiene one.
+
+**Gap 2 — the platform.** Reproducibility is verified on one machine and one OS.
+Cross-platform byte-identity (linux/amd64 vs macOS/arm64) is untested; the
+container exists for this and has not been exercised (TD-05).
 
 ## Level 3 — Known-answer validation on public cases (NOT DONE)
 

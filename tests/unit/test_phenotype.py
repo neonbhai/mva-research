@@ -29,14 +29,20 @@ from mva.models.phenotype import (
     PhenotypeProfile,
 )
 from mva.phenotype import (
+    EXCLUDED_FREQUENCY_TERM,
+    HPO_FREQUENCY_TERMS,
     NEUTRAL_SCORE,
     STATUS_ALIASES,
     STRENGTH_WEIGHTS,
+    UNCURATED_ASSOCIATION_WEIGHT,
+    GeneAnnotationStatus,
     GeneAssociation,
     GenePhenotypeIndex,
+    HpoFrequencyKind,
     PhenotypeMatch,
     load_phenotype_profile,
     normalise_hpo_id,
+    parse_hpo_frequency,
     parse_onset,
     parse_status,
     score_all_genes,
@@ -506,6 +512,38 @@ def test_duplicate_hpo_term_in_profile_raises(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_loader_errors_tokenise_the_patient_s_hpo_term(tmp_path: Path) -> None:
+    """PRIV-09: an HPO term read from the proband's own file is patient data.
+
+    A handful of specific terms identifies a person the same way a handful of rare
+    coordinates does, and an IngestionError reaches terminals, logs, crash reports
+    and agent context. The line number locates the row without echoing it; the
+    tokenised handle still lets two reports be recognised as the same term.
+    Deliberately *not* extended to the public HPO ontology loaders, whose IDs are
+    reference data — overstating a limitation is its own dishonesty.
+    """
+    duplicate = _write_phenotype_tsv(
+        tmp_path / "dupe.tsv",
+        [
+            _row(MICROCEPHALY, "Microcephaly", "observed"),
+            _row(MICROCEPHALY, "Microcephaly", "excluded"),
+        ],
+    )
+    empty_label = _write_phenotype_tsv(
+        tmp_path / "no_label.tsv", [_row(MICROCEPHALY, "", "observed")]
+    )
+    for path in (duplicate, empty_label):
+        with pytest.raises(IngestionError) as excinfo:
+            load_phenotype_profile(
+                path, subject_id="S1", hpo_version=HPO_VERSION, source_artifact=path.name
+            )
+        message = str(excinfo.value)
+        assert MICROCEPHALY not in message, f"{path.name} echoed the HPO term"
+        assert "<hpo:" in message, f"{path.name} dropped the tokenised handle"
+        assert "line" in message, f"{path.name} dropped the row locator"
+
+
+@pytest.mark.unit
 def test_missing_required_column_raises(tmp_path: Path) -> None:
     path = tmp_path / "no_status.tsv"
     path.write_text("hpo_id\tlabel\nHP:0000252\tMicrocephaly\n", encoding="utf-8")
@@ -675,3 +713,183 @@ def test_computed_match_is_an_inference_tier_item(
     assert len(inferences) == 1
     assert inferences[0].direction is EvidenceDirection.SUPPORTS
     assert "curation judgement" in inferences[0].limitations
+
+
+# ---------------------------------------------------------------------------
+# 10. Two quantities, two columns (ADR 0021)
+#
+# `association_strength` (curated gene-disease clinical validity, from ClinGen and
+# DDG2P) and `hpo_frequency` (how often a feature occurs among cases of a disease,
+# from HPO) are different claims. They shared a column once; the reader failed closed
+# on the whole 221,813-row real table and TD-17 recorded it. These tests are the
+# regression guards for the conflation and for the absence handling it forced.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "frequency_token",
+    ["HP:0040280", "HP:0040281", "HP:0040282", "HP:0040283", "HP:0040284", "12/45", "50%"],
+)
+def test_hpo_frequency_token_is_refused_as_an_association_strength(frequency_token: str) -> None:
+    """THE MUTATION TEST for ADR 0021.
+
+    Reintroducing the conflation -- a generator writing HPO's frequency vocabulary into
+    the strength column -- fails here, and the message says what went wrong rather than
+    reporting a generic unknown value. This is what the reader failing closed protected;
+    the fix widened the vocabulary, it must not have widened it to include frequency.
+    """
+    with pytest.raises(IngestionError) as excinfo:
+        _assoc("GENEB", MICROCEPHALY, "Microcephaly", frequency_token)
+    message = str(excinfo.value)
+    assert "FREQUENCY" in message
+    assert "hpo_frequency" in message
+    assert "ADR 0021" in message
+
+
+@pytest.mark.unit
+def test_absent_association_strength_is_absent_not_a_default() -> None:
+    """No curation source classifies the gene. That is a real state, and it is not
+    'supporting' and not 'refuted' -- it is *no statement* (GP-14).
+    """
+    assoc = _assoc("GENEB", MICROCEPHALY, "Microcephaly", "")
+    assert assoc.association_strength is None
+    assert assoc.weight is None
+    # The caller must name what an uncurated association is worth; there is no default.
+    assert assoc.weight_or(UNCURATED_ASSOCIATION_WEIGHT) == UNCURATED_ASSOCIATION_WEIGHT
+    assert assoc.weight_or(0.123) == 0.123
+    # A curated association ignores the fallback entirely.
+    curated = _assoc("GENEC", MICROCEPHALY, "Microcephaly", "definitive")
+    assert curated.weight == 1.0
+    assert curated.weight_or(0.123) == 1.0
+
+
+@pytest.mark.unit
+def test_uncurated_weight_is_not_mistakable_for_a_curated_one() -> None:
+    """The two silent defaults ADR 0021 rejected, asserted as properties.
+
+    0.0 would erase a real HPO annotation; 1.0 would invent a definitive expert
+    classification. And because the value sits OFF the curated ladder, reading it back
+    out of an evidence item is itself the signal that nobody classified the gene.
+    """
+    assert UNCURATED_ASSOCIATION_WEIGHT > 0.0
+    assert max(STRENGTH_WEIGHTS.values()) > UNCURATED_ASSOCIATION_WEIGHT
+    assert UNCURATED_ASSOCIATION_WEIGHT not in set(STRENGTH_WEIGHTS.values())
+
+
+@pytest.mark.unit
+def test_uncurated_association_still_counts_toward_the_score(
+    profile: PhenotypeProfile, clock: Clock
+) -> None:
+    """An uncurated association is down-weighted, never deleted (GP-13).
+
+    A gene whose single observed-and-matching term carries no curated validity must
+    still score above the neutral value; weighting it at zero would make it
+    indistinguishable from a gene this pipeline knows nothing about.
+    """
+    index = _index([_assoc("UNCURATED1", MICROCEPHALY, "Microcephaly", "")])
+    match = score_gene_phenotype("UNCURATED1", profile=profile, index=index, clock=clock)
+    assert match.breakdown.annotation_status is GeneAnnotationStatus.ANNOTATED
+    assert match.breakdown.informative_weight == UNCURATED_ASSOCIATION_WEIGHT
+    assert match.score > NEUTRAL_SCORE
+    assert MICROCEPHALY in match.matched_terms
+    # ...and every evidence item says the strength is unstated rather than implying one.
+    observed = [item for item in match.evidence if item.payload.get("hpo_id") == MICROCEPHALY]
+    assert observed
+    assert all(item.payload["association_strength"] == "" for item in observed)
+    assert any("uncurated" in item.claim for item in observed)
+
+
+@pytest.mark.unit
+def test_hpo_frequency_parser_accepts_exactly_hpos_own_vocabulary() -> None:
+    for term_id, (label, lower, upper) in HPO_FREQUENCY_TERMS.items():
+        parsed = parse_hpo_frequency(term_id, context="unit test")
+        assert parsed is not None
+        assert parsed.kind is HpoFrequencyKind.TERM
+        assert (parsed.label, parsed.lower_bound, parsed.upper_bound) == (label, lower, upper)
+
+    fraction = parse_hpo_frequency("12/45", context="unit test")
+    assert fraction is not None
+    assert fraction.kind is HpoFrequencyKind.FRACTION
+    # A counted value is a point, not a band: bounds are equal, never widened.
+    assert fraction.lower_bound == fraction.upper_bound == 12 / 45
+
+    percentage = parse_hpo_frequency("50%", context="unit test")
+    assert percentage is not None
+    assert percentage.kind is HpoFrequencyKind.PERCENTAGE
+    assert percentage.lower_bound == percentage.upper_bound == 0.5
+
+
+@pytest.mark.unit
+def test_absent_hpo_frequency_is_none_never_zero() -> None:
+    """HPO's '-' arrives as an empty cell. Not stated is unmeasured, not 'never
+    occurs' -- a 0.0 here would be a specific and false claim (GP-14).
+    """
+    assert parse_hpo_frequency("", context="unit test") is None
+    assert parse_hpo_frequency("   ", context="unit test") is None
+
+
+@pytest.mark.unit
+def test_hpo_frequency_parser_refuses_the_excluded_term_and_malformed_values() -> None:
+    """HP:0040285 (Excluded, 0% of cases) is a NEGATED annotation: carrying it into an
+    association table would weight 'this feature is not part of this disease' exactly
+    like a positive association.
+    """
+    with pytest.raises(IngestionError) as excinfo:
+        parse_hpo_frequency(EXCLUDED_FREQUENCY_TERM, context="unit test")
+    assert "NEGATED" in str(excinfo.value)
+
+    for malformed in ["definitive", "HP:0000252", "9/0", "12/5", "150%", "lots"]:
+        with pytest.raises(IngestionError):
+            parse_hpo_frequency(malformed, context="unit test")
+
+
+@pytest.mark.unit
+def test_both_qualifiers_survive_a_round_trip_through_the_tsv_reader(tmp_path: Path) -> None:
+    """One reader, both table shapes: the optional columns are read when present and
+    are simply absent (not zero, not defaulted) when the file omits them.
+    """
+    with_columns = tmp_path / "with.tsv"
+    with_columns.write_text(
+        "gene_symbol\thpo_id\tlabel\tassociation_strength\tassociation_strength_source\t"
+        "hpo_frequency\tsource\tversion\n"
+        f"GENEB\t{MICROCEPHALY}\tMicrocephaly\tdefinitive\tClinGen\tHP:0040281\tHPO\tv1\n"
+        f"GENEB\t{SEIZURE}\tSeizure\t\t\t\tHPO\tv1\n",
+        encoding="utf-8",
+    )
+    index = GenePhenotypeIndex.from_tsv(with_columns, version="v1")
+    by_term = {assoc.hpo_id: assoc for assoc in index.terms_for_gene("GENEB")}
+    assert by_term[MICROCEPHALY].association_strength == "definitive"
+    assert by_term[MICROCEPHALY].association_strength_source == "ClinGen"
+    frequency = by_term[MICROCEPHALY].hpo_frequency
+    assert frequency is not None
+    assert frequency.raw == "HP:0040281"
+    assert by_term[SEIZURE].association_strength is None
+    assert by_term[SEIZURE].association_strength_source is None
+    assert by_term[SEIZURE].hpo_frequency is None
+
+    # The shipped synthetic table has neither optional column and still loads.
+    synthetic = GenePhenotypeIndex.from_tsv(GENE_PHENOTYPE_KNOWLEDGE, version=KNOWLEDGE_VERSION)
+    assert synthetic.associations
+    assert all(assoc.hpo_frequency is None for assoc in synthetic.associations)
+    assert all(assoc.association_strength is not None for assoc in synthetic.associations)
+
+
+@pytest.mark.unit
+def test_a_curation_panel_without_a_classification_is_a_contradiction() -> None:
+    """Provenance for a value that does not exist is not a partial record. Either the
+    classification was lost in transit or the panel name was, and both are worth a
+    loud failure rather than a half-populated row.
+    """
+    with pytest.raises(IngestionError) as excinfo:
+        GeneAssociation(
+            gene_symbol="GENEB",
+            hpo_id=MICROCEPHALY,
+            label="Microcephaly",
+            association_strength="",
+            source="HPO",
+            version="v1",
+            association_strength_source="ClinGen",
+        )
+    assert "ClinGen" in str(excinfo.value)
+    assert "association_strength" in str(excinfo.value)

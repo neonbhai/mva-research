@@ -178,10 +178,18 @@ class TestResourceEntry:
 
 
 class TestResolveResourceRoot:
-    def test_default_falls_back_to_documented_path(self, tmp_path: Path) -> None:
-        # repo_root injected so this never depends on where the real repo lives.
-        root = resolve_resource_root(env={}, repo_root=tmp_path)
-        assert root == Path("~/Contri/bio-hackathon/mva-resources").expanduser()
+    def test_absent_configuration_raises_rather_than_guessing(self, tmp_path: Path) -> None:
+        """There is deliberately NO default root (ADR 0020).
+
+        This previously fell back to a hard-coded `~/Contri/bio-hackathon/mva-resources`,
+        which is one contributor's layout. On any other machine that resolved to a
+        directory which did not exist, and by the time the absence reached an adapter
+        "resource missing" was indistinguishable from "resource not registered". A
+        guessed path that is wrong is worse than no path, because it fails later and
+        somewhere less obvious.
+        """
+        with pytest.raises(ResourceRootError, match="No resource root configured"):
+            resolve_resource_root(env={}, repo_root=tmp_path)
 
     def test_env_var_overrides_default(self, tmp_path: Path) -> None:
         outside = tmp_path / "outside" / "resources"

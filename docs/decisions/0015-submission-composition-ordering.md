@@ -1,8 +1,15 @@
 # ADR 0015 — A pair outranks the single it subsumes
 
-**Status:** accepted
+**Status:** accepted; amended by ADR 0023
 **Date:** 2026-08-28
-**Touches:** ADR 0014 (EPCR injectivity), GP-32
+**Touches:** ADR 0014 (EPCR injectivity), ADR 0023, GP-32
+
+> **Amended by ADR 0023 in two places.** (1) "Applied after truncation" below was
+> a defect worth 50 rank points: it deleted any pair ranked below the cut before
+> promotion could look for it. Promotion now runs on the full ranked list, before
+> truncation. (2) "The single is kept, not dropped" holds only while keeping it is
+> free. When a pair has to cross the ten-row cut, it is **exchanged** with its own
+> subset rather than displacing an unrelated row.
 
 ## Context
 
@@ -28,8 +35,9 @@ prediction set at the top threshold is identical.
 **When a single-variant candidate is a strict subset of a pair candidate that is
 also being emitted, the pair ranks above the single. Both rows are kept.**
 
-Applied after truncation and **before** EPCR separation, so separation is handed
-the order we actually mean to submit and remains order-preserving.
+Applied **before** EPCR separation, so separation is handed the order we actually
+mean to submit and remains order-preserving. (This ADR said "after truncation";
+ADR 0023 corrected it to *before* truncation, and priced the difference.)
 
 Three reasons for this shape rather than the alternatives:
 
@@ -39,16 +47,21 @@ Three reasons for this shape rather than the alternatives:
    `is_compound_het = len(true_variants) == 2` and offers partial credit only in
    that branch; `groundtruth.py`'s own local fallback holds two variants.
    Promoting the pair bets with the challenge's explicit statement.
-2. **The single is kept, not dropped.** Rows below the answer cannot lower either
-   metric (verified). Dropping the single would forfeit a full match in the
-   low-probability world where the truth is single-variant, and gain nothing in
-   the likely one.
+2. **The single is kept, not dropped** — *while keeping it is free*. Rows below
+   the answer cannot lower either metric (verified), so dropping the single would
+   forfeit a full match in the low-probability world where the truth is
+   single-variant and gain nothing in the likely one. ADR 0023 bounds this: once a
+   pair has to cross the ten-row cut, keeping the single costs an unrelated pair's
+   slot, and the pair takes the single's slot instead.
 3. **It is composition, not scoring.** No composite score is touched. Adjusting
    scores to achieve this ordering would make a scoring change masquerade as a
    rendering fix, and the ranking is a scientific judgement that must stay
    auditable as one.
 
 ## Before / after on the golden case
+
+*(As of this ADR. ADR 0023 moved promotion before truncation and records the
+one further row that changed.)*
 
 Promotion fires where predicted — the single `chr15:40206000` sat above two pairs
 carrying it:

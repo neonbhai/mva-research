@@ -15,11 +15,12 @@ import json
 import platform
 import subprocess
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import yaml
 
@@ -60,6 +61,10 @@ ARTIFACT_SENSITIVITY: dict[ArtifactKind, Sensitivity] = {
     ArtifactKind.DOSSIER: Sensitivity.SENSITIVE,
     # Aggregate counts only; no genotypes.
     ArtifactKind.QC_REPORT: Sensitivity.DERIVED_SAFE,
+    # Counts by reason and the thresholds that produced them. Same class as the
+    # QC report: it says how many variants selection set aside and why, never
+    # which ones (GP-41).
+    ArtifactKind.SELECTION_REPORT: Sensitivity.DERIVED_SAFE,
     ArtifactKind.RUN_MANIFEST: Sensitivity.DERIVED_SAFE,
     ArtifactKind.PROVENANCE_MANIFEST: Sensitivity.DERIVED_SAFE,
     ArtifactKind.PRIVACY_AUDIT: Sensitivity.DERIVED_SAFE,
@@ -186,7 +191,14 @@ class RunContext:
         upstream: Sequence[str] = (),
         row_count: int | None = None,
     ) -> ArtifactProvenance:
-        """Write canonical JSON so repeat runs are byte-identical (GP-30)."""
+        """Write canonical JSON: stable *serialisation* of whatever it is given (GP-30).
+
+        Fixed key order, fixed float repr, UTC. That removes the encoder as a source
+        of difference between two runs; it says nothing about the payload, so an
+        artifact carrying a wall-clock timestamp still differs between runs and does
+        so through this function. Which artifacts those are, and why none of them
+        differs in scientific content, is in ``docs/handoff-integrity.md`` §4.
+        """
         text = canonical_json(payload)
         return self.write_text_artifact(
             relative,
@@ -226,6 +238,88 @@ class RunContext:
             upstream=upstream,
             row_count=row_count,
         )
+
+    @contextmanager
+    def open_json_rows_artifact(
+        self,
+        relative: str,
+        *,
+        kind: ArtifactKind,
+        stage: str,
+        upstream: Sequence[str] = (),
+    ) -> Generator[JsonRowsSink]:
+        """Open a streamed JSON-array artifact that the caller pushes rows into.
+
+        The push counterpart of :meth:`write_json_rows_artifact`, for the case
+        where the artifact is written *while* the same single pass feeds later
+        stages. The provenance record is registered on exit, so
+        :meth:`ArtifactProvenance.content_hash` covers the finished file.
+
+        Use it as::
+
+            with context.open_json_rows_artifact(...) as sink:
+                for record in stream:
+                    sink.write(record.model_dump(mode="json"))
+            artifact = sink.provenance
+
+        An exception inside the block leaves a truncated file on disk and
+        registers nothing: a half-written artifact with provenance claiming it is
+        complete is worse than one that is obviously unfinished.
+        """
+        path = self.artifact_path(relative)
+        with path.open("w", encoding="utf-8") as handle:
+            sink = JsonRowsSink(handle)
+            yield sink
+            sink.close()
+        sink.provenance = self.register_artifact(
+            kind=kind,
+            path=path,
+            stage=stage,
+            upstream=upstream,
+            row_count=sink.row_count,
+        )
+
+
+class JsonRowsSink:
+    """An open JSON-array artifact that rows are pushed into one at a time.
+
+    :meth:`RunContext.write_json_rows_artifact` PULLS from an iterable, which is
+    the right shape when the artifact is the end of the chain. It is the wrong
+    shape when the artifact is in the MIDDLE of one — writing every annotated
+    record while the same pass feeds hard filtering, selection and pairing. A
+    puller cannot do that without a second consumer of the same generator, which
+    does not exist.
+
+    So this is the push form. Bytes are identical to the pull form and to
+    ``canonical_json(list(rows))``: same separators, same sorted keys, same
+    array framing, one row at a time (GP-30).
+    """
+
+    __slots__ = ("_handle", "_written", "provenance")
+
+    def __init__(self, handle: TextIO) -> None:
+        self._handle = handle
+        self._written = 0
+        #: Set by :meth:`RunContext.open_json_rows_artifact` when the block exits,
+        #: so the caller reads it from the sink rather than from
+        #: ``context.artifacts[-1]`` -- which is correct only until something else
+        #: registers an artifact.
+        self.provenance: ArtifactProvenance | None = None
+        handle.write("[")
+
+    def write(self, row: object) -> None:
+        if self._written:
+            self._handle.write(",")
+        self._handle.write(canonical_json(row))
+        self._written += 1
+
+    @property
+    def row_count(self) -> int:
+        return self._written
+
+    def close(self) -> None:
+        """Terminate the array. Called by the context manager that opened it."""
+        self._handle.write("]\n")
 
 
 # ---------------------------------------------------------------------------

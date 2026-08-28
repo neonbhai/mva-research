@@ -26,14 +26,24 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import os
+import re
+import traceback
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pysam
 import pytest
 
-from mva.alleles import LeftAlignmentStatus
+from mva.alleles import (
+    LeftAlignmentStatus,
+    ReferenceLookup,
+    canonicalise_allele,
+    is_sequence_allele,
+    trim_parsimoniously,
+)
 from mva.annotation import (
     SYNTHETIC_STANDIN_LIMITATION,
     AdapterRole,
@@ -56,6 +66,7 @@ from mva.annotation.clinvar_vcf import (
 from mva.clock import FixedClock
 from mva.determinism import hash_file, stable_hash
 from mva.errors import AdapterUnavailableError, GenomeBuildMismatchError
+from mva.ingestion.normalise import open_reference_fasta
 from mva.models.base import AssertionTier
 from mva.models.evidence import EvidenceDirection, EvidenceStrength
 from mva.models.genome import GenomeBuild, GenomicCoordinate
@@ -1039,6 +1050,36 @@ def test_a_reference_reconciles_a_shifted_indel_spelling(tmp_path: Path) -> None
         with_reference.close()
 
 
+def test_a_broken_reference_is_not_reported_as_applied(tmp_path: Path) -> None:
+    """The adapter must not claim reference-backed canonicalisation it did not get.
+
+    Reproduced before the fix: `representation_status` was derived from
+    `self._reference is not None`, so a FASTA raising on every read reported
+    APPLIED over trim-only join keys. A ClinVar miss then reads as "no assertion
+    on record", which is absence of information and not evidence of benignity
+    (GP-14).
+    """
+
+    class _Broken:
+        def fetch(self, contig: str, start: int, end: int) -> str:
+            raise OSError("handle closed")
+
+    path = write_indexed_vcf(
+        tmp_path,
+        MINIMAL_HEADER + "15\t40200235\t8888\tG\tGC\t.\t.\tCLNSIG=Likely_pathogenic\n",
+    )
+    instance = open_adapter(path, reference=_Broken())
+    try:
+        # Degraded, not dead: an unreadable base must not propagate as an exception.
+        assert instance.assertions(["GRCh38:chr15:40200240:C:CC"]) == {}
+        assert instance.representation_status is (LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE)
+        limitation = instance.representation_limitation
+        assert limitation is not None
+        assert "trimming only" in limitation
+    finally:
+        instance.close()
+
+
 def test_a_shifted_release_record_is_still_found_from_the_left_most_query(tmp_path: Path) -> None:
     """The mirror case: the *release* holds the right-shifted spelling.
 
@@ -1110,3 +1151,411 @@ def test_repeat_lookups_are_byte_identical_with_and_without_a_reference(tmp_path
             assert dump(instance.assertions(ids)) == dump(instance.assertions(ids))
         finally:
             instance.close()
+
+
+# ------------------------------------------- adversarial review, findings 2 and 3
+#
+# Finding 2 was raised against the gnomAD adapter, where it is closed: htslib puts
+# the queried region — a proband coordinate — into the message of anything it
+# raises, and an unwrapped backend failure therefore prints it to the terminal,
+# the log, a crash report and an agent's context. The *same* backend is reached
+# the same way here, and this adapter's fetch was not wrapped, so the leak was
+# live in the clinical slot as well. Verified against the real pysam:
+#
+#     >>> pysam.TabixFile(release).fetch("nope", 1, 2)
+#     ValueError: could not create iterator for region 'nope:2-2'
+#
+# Finding 3 is the ClinVar half of ADR 0018, measured here the way the gnomAD half
+# was measured, against the real 2026-08-22 release and GRCh38.
+
+
+class _ExplodingTabix:
+    """A tabix handle whose fetch fails the way htslib's does: with the region."""
+
+    def __init__(self, inner: object, *, on_iteration: bool) -> None:
+        self._inner = inner
+        self._on_iteration = on_iteration
+
+    @property
+    def contigs(self) -> list[str]:
+        return list(getattr(self._inner, "contigs"))  # noqa: B009 - untyped backend
+
+    @property
+    def header(self) -> Iterator[str]:
+        return iter(getattr(self._inner, "header"))  # noqa: B009 - untyped backend
+
+    def fetch(self, reference: str, start: int, end: int) -> Iterator[str]:
+        region = f"{reference}:{start + 1}-{end}"
+        if not self._on_iteration:
+            msg = f"could not create iterator for region '{region}'"
+            raise ValueError(msg)
+
+        def _iterate() -> Iterator[str]:
+            msg = f"htslib failed reading {region}"
+            raise OSError(msg)
+            yield ""  # pragma: no cover - unreachable, makes this a generator
+
+        return _iterate()
+
+    def close(self) -> None:
+        closer = getattr(self._inner, "close", None)
+        if closer is not None:
+            closer()
+
+
+@pytest.mark.parametrize("on_iteration", [False, True])
+def test_a_backend_failure_never_echoes_the_queried_region(
+    monkeypatch: pytest.MonkeyPatch, on_iteration: bool
+) -> None:
+    """PRIV-09 on the error path, both at the call and at the first ``next()``.
+
+    htslib defers work to the iterator, so guarding only the ``fetch`` call would
+    move the leak rather than remove it. The replacement is raised with the
+    context suppressed: chaining would print the original message again.
+    """
+    instance = open_adapter(FIXTURE)
+    # Replaced after construction so the header parse and the contig map are the
+    # real ones: what is under test is the lookup path, not the open.
+    monkeypatch.setattr(
+        instance, "_tabix", _ExplodingTabix(instance._tabix, on_iteration=on_iteration)
+    )
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        instance.assertions([UNREVIEWED_PATHOGENIC])
+    instance.close()
+
+    rendered = "".join(
+        traceback.format_exception(type(excinfo.value), excinfo.value, excinfo.value.__traceback__)
+    )
+    assert "40200239" not in rendered, "the position reached the traceback"
+    assert "could not create iterator for region" not in rendered, "htslib's text was chained"
+    assert "htslib failed reading" not in rendered, "htslib's text was chained"
+    assert "ClinVar" in rendered
+    # The backend's exception *class* survives — a diagnostic carrying no patient
+    # data — while its message and its frame do not.
+    assert ("ValueError" in rendered) is not on_iteration
+    assert ("OSError" in rendered) is on_iteration
+    assert re.search(r"<region:[0-9a-f]{8}>", rendered), "no correlation handle was given"
+
+
+def test_a_lookup_after_close_is_refused_rather_than_answered_as_absence() -> None:
+    """A closed handle must not answer 'ClinVar has no record' for a whole batch."""
+    instance = open_adapter(FIXTURE)
+    assert instance.assertions([UNREVIEWED_PATHOGENIC])
+    instance.close()
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        instance.assertions([UNREVIEWED_PATHOGENIC])
+    message = str(excinfo.value)
+    assert "closed" in message
+    assert "40200239" not in message
+    # Idempotent, as before.
+    instance.close()
+
+
+# --------------------------------------- finding 3: the ClinVar half of ADR 0018
+#
+# ADR 0018 measured the gnomAD half against the real v4.1 exomes chr21 shard. This
+# is the same measurement on the same terms against the real ClinVar release, and
+# it is a test rather than a paragraph so that a release which stops behaving this
+# way fails instead of quietly losing assertions.
+#
+# The window is chr17:43,000,000-43,520,000 — 520 kb, the same width as the gnomAD
+# measurement, over the BRCA1 neighbourhood, which is the densest curated exonic
+# region ClinVar has. Public reference data throughout.
+#
+# Measured 2026-08-28 against ClinVar 2026-08-22 and GRCh38_no_alt:
+#
+#   ClinVar records in the window          15,862
+#   indel ALT alleles                       3,595
+#     in a repeat tract                     2,215  (61.6%)
+#     of those, no germline CLNSIG              4
+#   distinct right-shifted spellings        2,215
+#   join WITHOUT a reference                    0
+#   join WITH a reference                   2,211  (= 2,215 - the 4 with no CLNSIG)
+#   of the recovered, Pathogenic/LP         1,761
+#
+# The accounting closes exactly: every right-shifted spelling that ClinVar holds a
+# germline classification for is recovered by the reference, and the only ones
+# that are not are the four records that carry no germline classification at all,
+# which GP-14 requires to stay omitted.
+
+FULL_CLINVAR = Path(
+    os.environ.get(
+        "MVA_CLINVAR_VCF",
+        str(REPO_ROOT.parent / "mva-resources" / "clinvar" / "clinvar.vcf.gz"),
+    )
+)
+FULL_REFERENCE = Path(
+    os.environ.get(
+        "MVA_REFERENCE_FASTA",
+        str(REPO_ROOT.parent / "mva-resources" / "reference" / "GRCh38_no_alt.fa"),
+    )
+)
+
+requires_full_clinvar = pytest.mark.skipif(
+    not (FULL_CLINVAR.is_file() and FULL_REFERENCE.is_file()),
+    reason=f"full ClinVar release or GRCh38 FASTA absent ({FULL_CLINVAR}, {FULL_REFERENCE})",
+)
+
+MEASURED_CONTIG = "chr17"
+MEASURED_START = 43_000_000
+MEASURED_END = 43_520_000
+MEASURED = {
+    "records": 15_862,
+    "indel_alleles": 3_595,
+    "in_repeat": 2_215,
+    "no_germline_classification": 4,
+    "joins_without_reference": 0,
+    "joins_with_reference": 2_211,
+    "recovered_pathogenic": 1_761,
+}
+
+
+def roll_right_max(
+    contig: str, position: int, ref: str, alt: str, reference: ReferenceLookup
+) -> tuple[int, str, str, int]:
+    """The right-most VCF-conventional spelling of one anchored indel.
+
+    The mirror of :func:`mva.alleles._left_shift`, written out here rather than
+    imported because it is the *wrong* representation on purpose: it manufactures
+    the spelling a VCF that was never left-aligned would carry, which is the input
+    the adapter has to reconcile. ``steps == 0`` means the event has exactly one
+    legal spelling and so is not in a repeat tract.
+
+    ``rightmost_equivalent_position`` is deliberately not used for the repeat-tract
+    count: it over-reaches by one base by design (its docstring says so), because
+    it bounds a *fetch window* and under-reaching there would re-open the silent
+    miss. Counting repeats with it would call every indel a repeat.
+    """
+    steps = 0
+    for _ in range(1000):
+        if len(ref) > 1 and len(alt) > 1:
+            break  # a complex substitution: not a shiftable indel
+        if ref[0] != alt[0]:
+            break  # a delins, not an anchored pure indel: it has no other spelling
+        insertion = len(alt) > len(ref)
+        sequence = alt[1:] if insertion else ref[1:]
+        probe = position + 1 if insertion else position + len(ref)
+        try:
+            following = reference.fetch(contig, probe, probe).upper()
+        except (KeyError, ValueError):
+            break
+        if following != sequence[0]:
+            break  # the tract ends here; this is the right-most spelling
+        rotated = sequence[1:] + sequence[0]
+        position += 1
+        anchor = sequence[0]
+        ref, alt = (anchor, anchor + rotated) if insertion else (anchor + rotated, anchor)
+        steps += 1
+    return position, ref, alt, steps
+
+
+@dataclass(frozen=True)
+class _WindowScan:
+    """What the measured window holds, before any adapter is asked anything."""
+
+    records: int
+    indel_alleles: int
+    in_repeat: int
+    no_germline: int
+    right_shifted_ids: tuple[str, ...]
+
+
+def _scan_measured_window(reference: ReferenceLookup) -> _WindowScan:
+    """Read the window and manufacture one right-shifted spelling per repeat indel."""
+    records = 0
+    indel_alleles = 0
+    in_repeat = 0
+    no_germline = 0
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    handle = pysam.TabixFile(str(FULL_CLINVAR))
+    try:
+        for line in handle.fetch(
+            MEASURED_CONTIG.removeprefix("chr"), MEASURED_START - 1, MEASURED_END
+        ):
+            columns = line.split("\t", 8)
+            records += 1
+            position = int(columns[1])
+            ref = columns[3].strip().upper()
+            classified = "CLNSIG=" in columns[7]
+            for raw_alt in columns[4].split(","):
+                alt = raw_alt.strip().upper()
+                if not is_sequence_allele(ref) or not is_sequence_allele(alt):
+                    continue
+                trimmed = trim_parsimoniously(position, ref, alt)
+                if len(trimmed[1]) == len(trimmed[2]):
+                    continue  # a substitution, not an indel
+                indel_alleles += 1
+                canonical = canonicalise_allele(
+                    contig=MEASURED_CONTIG,
+                    position=position,
+                    ref=ref,
+                    alt=alt,
+                    reference=reference,
+                )
+                shifted = roll_right_max(
+                    MEASURED_CONTIG,
+                    canonical.position,
+                    canonical.ref,
+                    canonical.alt,
+                    reference,
+                )
+                if shifted[3] == 0:
+                    continue  # one legal spelling only: no representation risk
+                in_repeat += 1
+                if not classified:
+                    no_germline += 1
+                variant_id = f"GRCh38:{MEASURED_CONTIG}:{shifted[0]}:{shifted[1]}:{shifted[2]}"
+                if variant_id not in seen:
+                    seen.add(variant_id)
+                    queries.append(variant_id)
+    finally:
+        handle.close()
+    return _WindowScan(
+        records=records,
+        indel_alleles=indel_alleles,
+        in_repeat=in_repeat,
+        no_germline=no_germline,
+        right_shifted_ids=tuple(queries),
+    )
+
+
+@pytest.mark.slow
+@requires_full_clinvar
+def test_the_measured_cost_of_an_unreferenced_clinvar_join() -> None:
+    """ADR 0018's gnomAD measurement, repeated on the clinical slot.
+
+    Every number in ``MEASURED`` is asserted, so the claim in the report is the
+    claim the code produces. A ClinVar release that stops being reconcilable this
+    way fails here rather than quietly returning fewer pathogenic assertions.
+    """
+    reference = open_reference_fasta(FULL_REFERENCE)
+    scan = _scan_measured_window(reference)
+    queries = list(scan.right_shifted_ids)
+
+    md5 = read_shipped_md5(FULL_CLINVAR.with_name(FULL_CLINVAR.name + ".md5"))
+    degraded = ClinvarVcfAdapter(FULL_CLINVAR, expected_md5=md5)
+    try:
+        without_reference = degraded.assertions(queries)
+        assert degraded.representation_status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+        assert degraded.representation_limitation is not None
+    finally:
+        degraded.close()
+
+    referenced = ClinvarVcfAdapter(FULL_CLINVAR, expected_md5=md5, reference=reference)
+    try:
+        with_reference = referenced.assertions(queries)
+        assert referenced.representation_status is LeftAlignmentStatus.APPLIED
+        assert referenced.representation_limitation is None
+    finally:
+        referenced.close()
+
+    recovered = set(with_reference) - set(without_reference)
+    strongly_pathogenic = {
+        variant_id
+        for variant_id in recovered
+        if any(
+            assertion.significance.startswith(("Pathogenic", "Likely_pathogenic"))
+            and "Conflicting" not in assertion.significance
+            for assertion in with_reference[variant_id]
+        )
+    }
+
+    assert scan.records == MEASURED["records"]
+    assert scan.indel_alleles == MEASURED["indel_alleles"]
+    assert scan.in_repeat == MEASURED["in_repeat"]
+    assert scan.no_germline == MEASURED["no_germline_classification"]
+    assert len(queries) == MEASURED["in_repeat"], "every repeat indel has a distinct spelling here"
+    assert len(without_reference) == MEASURED["joins_without_reference"]
+    assert len(with_reference) == MEASURED["joins_with_reference"]
+    # A reference only ever adds joins; it never moves or removes one.
+    assert not set(without_reference) - set(with_reference)
+    # And the gap closes exactly: the only right-shifted spellings that stay
+    # unjoined are the records carrying no germline classification at all, which
+    # GP-14 requires to stay omitted rather than be reported as benign.
+    assert len(queries) - len(with_reference) == MEASURED["no_germline_classification"]
+    assert len(strongly_pathogenic) == MEASURED["recovered_pathogenic"]
+
+
+# ------------------------------------- the same short-index door, on the clinical slot
+#
+# Found while closing finding 1 on the gnomAD adapter, and reproduced here before
+# being fixed: the identical failure exists on this adapter and costs more. The
+# release's *data* is sha256-pinned; its *index* is only checked to exist. An
+# index built from a shorter file region-queries the complete release perfectly
+# happily and answers "no record" for everything past its reach — which is not
+# evidence of benignity (GP-14), and which the measurement above prices at 1,761
+# Pathogenic/Likely_pathogenic assertions in a single 520 kb window.
+
+
+def stale_indexed_release(tmp_path: Path) -> tuple[Path, str]:
+    """A COMPLETE ClinVar slice beside an index built from only its first half."""
+    with gzip.open(FIXTURE, "rt", encoding="utf-8") as handle:
+        lines = handle.readlines()
+    header = [line for line in lines if line.startswith("#")]
+    records = [line for line in lines if not line.startswith("#")]
+
+    half = tmp_path / "half.vcf"
+    half.write_text("".join(header + records[: len(records) // 2]), encoding="utf-8")
+    pysam.tabix_compress(str(half), str(tmp_path / "half.vcf.gz"), force=True)
+    pysam.tabix_index(str(tmp_path / "half.vcf.gz"), preset="vcf", force=True)
+
+    release = tmp_path / "clinvar.vcf.gz"
+    release.write_bytes(FIXTURE.read_bytes())
+    release.with_name(release.name + ".tbi").write_bytes(
+        (tmp_path / "half.vcf.gz.tbi").read_bytes()
+    )
+    columns = records[-1].split("\t")
+    return release, f"GRCh38:chr{columns[0]}:{columns[1]}:{columns[3]}:{columns[4]}"
+
+
+def test_an_index_that_does_not_reach_the_end_of_the_release_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Reproduced by execution: the assertion was silently absent, not reported missing.
+
+    Before this check the adapter constructed cleanly, the sha256 pin passed
+    (the data really is intact), and the query returned ``{}`` — indistinguishable
+    from "ClinVar has nothing on record here".
+    """
+    release, past_the_index = stale_indexed_release(tmp_path)
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        open_adapter(release)
+    message = str(excinfo.value)
+    assert "index" in message
+    assert "does not reach" in message
+    # PRIV-09: the file and the shape of the failure, never a coordinate.
+    assert past_the_index.split(":")[2] not in message
+
+
+def test_a_healthy_release_and_the_real_one_are_not_rejected(tmp_path: Path) -> None:
+    """The control, on both the committed fixture and every in-test release.
+
+    A check that rejected healthy pairs would be worse than no check: it would push
+    the next operator to delete it.
+    """
+    instance = open_adapter(FIXTURE)
+    try:
+        assert instance.assertions([UNREVIEWED_PATHOGENIC])
+    finally:
+        instance.close()
+
+    built = write_indexed_vcf(tmp_path, MINIMAL_HEADER + "15\t100\t1\tA\tG\t.\t.\tCLNSIG=Benign\n")
+    instance = open_adapter(built)
+    try:
+        assert instance.assertions(["GRCh38:chr15:100:A:G"])
+    finally:
+        instance.close()
+
+
+@pytest.mark.slow
+@requires_full_clinvar
+def test_the_real_release_index_reaches_the_end_of_the_release() -> None:
+    """The 193 MB release on disk, measured rather than assumed."""
+    md5 = read_shipped_md5(FULL_CLINVAR.with_name(FULL_CLINVAR.name + ".md5"))
+    instance = ClinvarVcfAdapter(FULL_CLINVAR, expected_md5=md5)
+    try:
+        assert instance.assertions(["GRCh38:chr15:40200239:A:G"])
+    finally:
+        instance.close()

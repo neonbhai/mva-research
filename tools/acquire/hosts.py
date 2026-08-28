@@ -39,6 +39,17 @@ ALLOWED_HOSTS: Final[frozenset[str]] = frozenset(
         "www.ebi.ac.uk",
         "ftp.ebi.ac.uk",
         "search.clinicalgenome.org",
+        # Added deliberately, 2026-08-28, for the SnpEff consequence adapter. SnpEff
+        # publishes its core jar and its per-genome databases only from its own
+        # bucket -- there is no mirror on any host already listed here -- and the
+        # GRCh38.115 database is what gene assignment runs against, which is the
+        # difference between the pipeline emitting candidate pairs and emitting
+        # none. It serves fixed, named archives over https and is content-pinned in
+        # knowledge/manifests/resources.yaml, so a silent republish under an
+        # unchanged name (which SnpEff does do: the core archive is literally called
+        # `snpEff_latest_core.zip`) fails the manifest check rather than changing
+        # transcripts underneath an existing report.
+        "snpeff-public.s3.amazonaws.com",
     }
 )
 

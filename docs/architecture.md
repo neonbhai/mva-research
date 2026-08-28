@@ -61,7 +61,9 @@ annotated are separately hashable artifacts.
 
 **`EvidenceItem`** — one structured, attributable, falsifiable claim, with
 mandatory `limitations`. Content-derived IDs mean the same conclusion drawn twice
-is one piece of evidence, which is also what makes repeat runs byte-identical.
+is one piece of evidence, so the ID is stable across runs. The *record* is not
+byte-identical across runs under a real clock: `timestamp` is excluded from the ID
+but is still written to `evidence_items.parquet` (`docs/handoff-integrity.md` §4).
 
 **`CandidatePair`** — the Track 1 unit of prediction. Its defining choice is that
 the score is a **vector, not a scalar**: eight component scores stay visible into
@@ -104,16 +106,24 @@ second system to secure and delete, while leaving the export path open.
 ## Determinism
 
 Byte-identical repeat runs are an acceptance criterion, not an aspiration
-(GP-30). The mechanisms:
+(GP-30) — **under a fixed clock**, which is what `config.synthetic` selects and
+what every determinism check in this repo runs under. For a real case the clock
+is `SystemClock` (`pipeline.py:450`), so the scientific content is identical and
+eleven artifacts differ in recorded time only; the artifact-by-artifact map is in
+`docs/handoff-integrity.md` §4 and the fix is TD-21. The mechanisms:
 
 - all timestamps come from an injected `Clock`; a lint forbids `datetime.now()`;
 - evidence and pair IDs are content-derived;
 - every sort key is total (score, then genomic position);
 - Parquet writes are sorted by primary key with pinned compression and row-group
-  size, and embed no timestamps;
+  size, and the *writer* embeds no timestamp of its own — though
+  `evidence_items` carries the evidence timestamp as data;
 - canonical JSON for every hash.
 
-`just demo-determinism` runs the demo twice and compares artifact hashes.
+`just demo-determinism` runs the **demo** twice and compares artifact hashes,
+skipping `provenance.json` and the DuckDB container by filename. Nothing has
+ever run it against a non-synthetic config, and pointed at one it would report
+a failure on the eleven time-bearing artifacts.
 
 ## Privacy in the architecture
 

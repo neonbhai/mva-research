@@ -1,12 +1,13 @@
 """Unit tests for the real, SnpEff-backed consequence adapter.
 
-Most of these run against a **stub SnpEff** (``tests/fixtures/synthetic/consequence/stub_snpeff.sh``)
-rather than the real ~1 GB installation, and that is deliberate rather than a
-compromise. The adapter under test is entirely real; what is faked is the
-counterparty, so that the properties which actually go wrong in a subprocess
-integration — an offline flag quietly dropped, a chromosome name silently
-unmatched, a transcript list quietly collapsed, an input VCF echoed into a
-traceback — are locked by tests that run in a second on any machine, with no JRE.
+Most of these run against a **stub SnpEff**
+(``tests/fixtures/synthetic/consequence/stub_snpeff.sh``) rather than the real
+~1 GB installation, and that is deliberate rather than a compromise. The
+adapter under test is entirely real; what is faked is the counterparty, so that
+the properties which actually go wrong in a subprocess integration — an offline
+flag quietly dropped, a chromosome name silently unmatched, a transcript list
+quietly collapsed, an input VCF echoed into a traceback — are locked by tests
+that run in a second on any machine, with no JRE.
 
 The real tool is exercised by :func:`test_real_snpeff_annotates_a_known_variant`,
 which skips when the installation produced by ``tools/setup/install_snpeff.sh``
@@ -275,8 +276,14 @@ def test_every_transcript_survives(adapter_factory: AdapterFactory) -> None:
 
 @pytest.mark.unit
 def test_unknown_variant_is_omitted_not_empty(adapter_factory: AdapterFactory) -> None:
-    """GP-14: absence is a missing key. An empty tuple would assert 'no consequence'."""
-    result = adapter_factory().annotate([SINGLE_TRANSCRIPT, UNKNOWN_TO_TOOL])
+    """GP-14: absence is a missing key. An empty tuple would assert 'no consequence'.
+
+    Read through `annotate_with_report`, which is the explicit opt-in to a batch
+    the tool did not fully answer: `annotate` refuses a record with no ANN field
+    rather than returning it as an absent key. See
+    `test_a_record_with_no_ann_field_fails_closed_through_the_protocol`.
+    """
+    result, _ = adapter_factory().annotate_with_report([SINGLE_TRANSCRIPT, UNKNOWN_TO_TOOL])
     assert SINGLE_TRANSCRIPT in result
     assert UNKNOWN_TO_TOOL not in result
     assert result.get(UNKNOWN_TO_TOOL) is None
@@ -344,12 +351,15 @@ def test_repeat_runs_are_byte_identical(adapter_factory: AdapterFactory) -> None
     """GP-30. A subprocess is a determinism hazard; this is the acceptance criterion."""
     variants = [MULTI_TRANSCRIPT, SINGLE_TRANSCRIPT, INTRONIC, UNKNOWN_TO_TOOL, FRAMESHIFT]
     adapter = adapter_factory()
-    first = _snapshot(adapter.annotate(variants))
-    second = _snapshot(adapter.annotate(variants))
+    # `annotate_with_report` because the batch deliberately contains a record the
+    # stub returns with no ANN field, which `annotate` refuses; determinism has to
+    # hold on the partial answer too, since that is what a caller who opted in gets.
+    first = _snapshot(adapter.annotate_with_report(variants)[0])
+    second = _snapshot(adapter.annotate_with_report(variants)[0])
     assert first == second
     # A freshly constructed adapter, i.e. a fresh JVM and a fresh scratch
     # directory, must agree too: no temp path or start time may leak into output.
-    assert _snapshot(adapter_factory().annotate(variants)) == first
+    assert _snapshot(adapter_factory().annotate_with_report(variants)[0]) == first
     assert "/tmp" not in first  # noqa: S108 - asserting a temp path is ABSENT
     assert "mva-snpeff-" not in first
     assert "2024-09-24" not in first
@@ -743,11 +753,19 @@ def test_run_report_is_exposed_after_a_plain_annotate_call(
 ) -> None:
     adapter = adapter_factory()
     assert adapter.last_run_report is None
-    adapter.annotate([SINGLE_TRANSCRIPT, UNKNOWN_TO_TOOL])
+    adapter.annotate([SINGLE_TRANSCRIPT, MULTI_TRANSCRIPT])
     report = adapter.last_run_report
     assert isinstance(report, SnpEffRunReport)
     assert report.records_returned == 2
-    assert report.without_ann == (UNKNOWN_TO_TOOL,)
+    assert report.without_ann == ()
+
+    # And it survives the fail-closed path, so the refusal is diagnosable rather
+    # than leaving the caller with an exception and no accounting.
+    with pytest.raises(AdapterUnavailableError):
+        adapter.annotate([SINGLE_TRANSCRIPT, UNKNOWN_TO_TOOL])
+    after = adapter.last_run_report
+    assert after is not None
+    assert after.without_ann == (UNKNOWN_TO_TOOL,)
 
 
 @pytest.mark.unit
@@ -1287,3 +1305,263 @@ def test_real_snpeff_argv_is_offline_and_lossless(
     assert "-canon" not in argv
     assert argv[-1] == REAL_DATABASE
     assert str(real_adapter.java_binary) == argv[0]
+
+
+# ------------------------------------------------- adversarial review, finding 5
+#
+# Two halves, both reproduced by execution before they were fixed.
+#
+# (a) SnpEff can exit ZERO having written a record with no ``ANN`` field at all.
+#     ``parse_ann_entries`` already refuses an ANN whose *shape* it cannot read,
+#     but a record carrying none was classified into ``SnpEffRunReport.without_ann``
+#     and then omitted from the mapping. ``annotate`` is the method the
+#     ``ConsequenceAdapter`` Protocol exposes and the only one
+#     ``annotation.service`` calls, so that classification was invisible: the
+#     caller saw a key missing, which it reads as "this variant has no
+#     consequence" -- and since ``VariantRecord.gene_symbols`` is derived from
+#     ``consequences`` alone, the variant leaves gene grouping and pairing
+#     entirely. Same shape as the gnomAD defect ADR 0018 closed: a report property
+#     is something a caller can forget to read.
+#
+# (b) The installation was not content-pinned in any way a run could actually use.
+#     ``SnpEffArtifactPins`` existed and was mandatory, but the only way to obtain
+#     one was ``measure()``, which hashes whatever happens to be installed -- so
+#     the pin verified the install against itself. ``tools/setup/install_snpeff.sh``
+#     writes ``snpeff_pins.json`` *after* checking every digest against the
+#     reviewed EXPECT_* constants in the script, and nothing in ``src`` could read
+#     it.
+
+
+@pytest.mark.unit
+def test_a_record_with_no_ann_field_fails_closed_through_the_protocol(
+    adapter_factory: AdapterFactory,
+) -> None:
+    """`annotate` refuses output it could not interpret; `annotate_with_report` opts in.
+
+    The stub returns `UNKNOWN_TO_TOOL` as a well-formed VCF row whose INFO carries
+    no `ANN=` at all. SnpEff annotates even an intergenic site, so a record with no
+    ANN is output this adapter cannot read -- not a finding that the variant has no
+    consequence.
+    """
+    adapter = adapter_factory()
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        adapter.annotate([SINGLE_TRANSCRIPT, UNKNOWN_TO_TOOL])
+    message = str(excinfo.value)
+    assert "no ANN" in message
+    assert "annotate_with_report" in message, "the deliberate way through must be named"
+    assert "pairing" in message, "the consequence of the silence must be stated"
+    # PRIV-09: the shape of the failure, never the record.
+    for secret in ("999999", "chr12", "\tA\tC"):
+        assert secret not in message, f"{secret!r} leaked into the exception message"
+
+    # The report is still exposed, so the failure is diagnosable.
+    report = adapter.last_run_report
+    assert report is not None
+    assert report.without_ann == (UNKNOWN_TO_TOOL,)
+
+    # And the explicit opt-in still answers, with the gap named in the result.
+    result, report = adapter_factory().annotate_with_report([SINGLE_TRANSCRIPT, UNKNOWN_TO_TOOL])
+    assert set(result) == {SINGLE_TRANSCRIPT}
+    assert report.without_ann == (UNKNOWN_TO_TOOL,)
+
+
+@pytest.mark.unit
+def test_a_clean_batch_is_not_escalated(adapter_factory: AdapterFactory) -> None:
+    """The fail-closed check fires on unreadable output, not on a variant SnpEff placed."""
+    result = adapter_factory().annotate([SINGLE_TRANSCRIPT, MULTI_TRANSCRIPT])
+    assert set(result) == {SINGLE_TRANSCRIPT, MULTI_TRANSCRIPT}
+
+
+@pytest.mark.unit
+def test_pins_can_be_loaded_from_the_installer_manifest(tmp_path: Path) -> None:
+    """The reviewed manifest is loadable, so a run can pin to it rather than to itself."""
+    manifest = tmp_path / "snpeff_pins.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "snpeff_release": "5.4c",
+                "genome_database": "GRCh38.115",
+                "jar": "a" * 64,
+                "config": "b" * 64,
+                "predictor": "c" * 64,
+                "mane_summary": "d" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    pins = SnpEffArtifactPins.from_manifest(manifest)
+    assert pins.jar == "a" * 64
+    assert pins.config == "b" * 64
+    assert pins.predictor == "c" * 64
+    assert pins.mane_summary == "d" * 64
+    assert pins.snpeff_release == "5.4c"
+    assert pins.genome_database == "GRCh38.115"
+    # The declared identity is not part of the artifact digest: that is over bytes.
+    assert pins.as_rows() == (
+        ("jar", "a" * 64),
+        ("config", "b" * 64),
+        ("predictor", "c" * 64),
+        ("mane_summary", "d" * 64),
+    )
+
+
+def _drop_jar(payload: dict[str, Any]) -> None:
+    del payload["jar"]
+
+
+def _drop_database(payload: dict[str, Any]) -> None:
+    del payload["genome_database"]
+
+
+def _corrupt_predictor(payload: dict[str, Any]) -> None:
+    payload["predictor"] = "not-a-digest"
+
+
+def _empty_config(payload: dict[str, Any]) -> None:
+    payload["config"] = ""
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (_drop_jar, "jar"),
+        (_corrupt_predictor, "64 lowercase hex"),
+        (_drop_database, "genome_database"),
+        (_empty_config, "64 lowercase hex"),
+    ],
+)
+def test_a_manifest_that_pins_less_than_it_claims_is_refused(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], None], expected: str
+) -> None:
+    """A manifest missing a role would verify three artifacts and report success."""
+    payload: dict[str, Any] = {
+        "snpeff_release": "5.4c",
+        "genome_database": "GRCh38.115",
+        "jar": "a" * 64,
+        "config": "b" * 64,
+        "predictor": "c" * 64,
+    }
+    mutate(payload)
+    manifest = tmp_path / "snpeff_pins.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        SnpEffArtifactPins.from_manifest(manifest)
+    assert expected in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_a_manifest_for_another_database_is_refused_at_construction(
+    adapter_factory: AdapterFactory, tmp_path: Path
+) -> None:
+    """Pins that describe a different genome verify bytes that answer a different question.
+
+    The digests would still match if the operator happened to install both, and
+    the run would then stamp one database's provenance onto the other's answers.
+    """
+    good = adapter_factory().pins
+    mismatched = SnpEffArtifactPins(
+        jar=good.jar,
+        config=good.config,
+        predictor=good.predictor,
+        snpeff_release=good.snpeff_release,
+        genome_database="GRCh37.75",
+    )
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        adapter_factory(pins=mismatched)
+    message = str(excinfo.value)
+    assert "GRCh37.75" in message
+    assert REAL_DATABASE in message
+
+
+@pytest.mark.unit
+def test_a_manifest_naming_another_snpeff_release_is_refused(
+    adapter_factory: AdapterFactory,
+) -> None:
+    """The JAR that actually runs must be the release the manifest was reviewed for."""
+    good = adapter_factory().pins
+    mismatched = SnpEffArtifactPins(
+        jar=good.jar,
+        config=good.config,
+        predictor=good.predictor,
+        snpeff_release="4.3t",
+        genome_database=REAL_DATABASE,
+    )
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        adapter_factory(pins=mismatched)
+    message = str(excinfo.value)
+    assert "4.3t" in message
+
+
+@pytest.mark.unit
+def test_the_shipped_pins_manifest_matches_the_expectations_in_this_file() -> None:
+    """The manifest the installer wrote and the digests this file asserts on are one thing.
+
+    Skips where the ~1 GB installation is absent. Where it is present, this is the
+    check that stops the two drifting: `REAL_PINS` is what the real-SnpEff
+    assertions below were measured against, and `snpeff_pins.json` is what a
+    composition root will actually load.
+    """
+    manifest = REAL_INSTALL_ROOT / "snpeff_pins.json"
+    if not manifest.is_file():
+        pytest.skip(f"no installer manifest at {manifest}")
+    pins = SnpEffArtifactPins.from_manifest(manifest, genome_database=REAL_DATABASE)
+    assert pins.jar == REAL_PINS.jar
+    assert pins.config == REAL_PINS.config
+    assert pins.predictor == REAL_PINS.predictor
+    assert pins.mane_summary == REAL_PINS.mane_summary
+    assert pins.genome_database == REAL_DATABASE
+
+
+# ------------------------------------------------------ finding 6: build confusion
+
+
+@pytest.mark.unit
+def test_cross_build_annotation_is_refused_through_the_protocol(
+    adapter_factory: AdapterFactory,
+) -> None:
+    """The guard is on the method `annotation.service` calls, not only on `plan_batch`.
+
+    A GRCh37 batch that came back as `{}` would read as "none of these variants has
+    a consequence", which removes every one of them from `gene_symbols`, from gene
+    grouping and from pairing. One stray build among valid ids must poison the
+    batch rather than be dropped from it: a plausible partial answer is the outcome
+    a caller cannot detect.
+    """
+    adapter = adapter_factory()
+    with pytest.raises(GenomeBuildMismatchError) as excinfo:
+        adapter.annotate(["GRCh37:chr15:40200000:C:T"])
+    assert "GRCh37" in str(excinfo.value)
+
+    with pytest.raises(GenomeBuildMismatchError):
+        adapter.annotate([SINGLE_TRANSCRIPT, "GRCh37:chr15:40200000:C:T"])
+
+    # PRIV-09: build names, never the coordinate.
+    assert "40200000" not in str(excinfo.value)
+
+
+@pytest.mark.slow
+@requires_real_snpeff
+def test_the_real_installation_is_pinned_from_the_manifest_it_shipped_with() -> None:
+    """End to end: the adapter verifies the bytes it is actually about to run.
+
+    Not `measure()`, which hashes whatever is installed and therefore pins the
+    installation to itself. `tools/setup/install_snpeff.sh` checks every artifact
+    against the reviewed EXPECT_* digests in the script and only then writes
+    `snpeff_pins.json`, so loading that file is a verification rather than a
+    recording. The release string in the manifest is checked against what the JAR
+    says about itself, which is the half a digest cannot cover.
+    """
+    manifest = REAL_INSTALL_ROOT / "snpeff_pins.json"
+    if not manifest.is_file():
+        pytest.skip(f"no installer manifest at {manifest}")
+    pins = SnpEffArtifactPins.from_manifest(manifest, genome_database=REAL_DATABASE)
+    adapter = _build_real_adapter(pins=pins)
+    assert adapter.pins.genome_database == REAL_DATABASE
+    assert adapter.pins.snpeff_release == "5.4c"
+    assert adapter.version == f"5.4c/{REAL_DATABASE}+{pins.composite_digest}"
+    # The digests are over bytes, so a manifest-loaded pin and a hardcoded one
+    # produce the identical provenance string.
+    assert pins.composite_digest == REAL_PINS.composite_digest
+    result = adapter.annotate([BUB1B_NONSENSE])
+    assert result[BUB1B_NONSENSE]

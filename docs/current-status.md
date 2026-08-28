@@ -44,6 +44,15 @@ GRCh38 `2026-08-22` (185 MB), HPO `2026-06-23` (66 MB), gnomAD v4.1 constraint
   order-preserving by construction. Causal pair still row 1 at REDACTED-EPCR.
 - **Pairing cap no longer truncates by coordinate** — it orders by plausibility
   and reports when it fires (ADR 0013).
+- **Track 2 runs on real BUB1B literature, not the synthetic tables.**
+  `knowledge/literature/bub1b/` holds a 12-node, 13-link cited mechanism chain and
+  13 real agents with signed directions (ADR 0022, ADR 0025). Triage output:
+  1 accepted, 12 rejected, 89 evidence rows; the MPS1 inhibitor ranks **last**
+  with `WRONG_DIRECTION`, and the highest-scoring agent is rejected anyway. Case:
+  `docs/track2-hypothesis.md`. Asserted by
+  `tests/unit/test_track2_bub1b.py` (22 tests), including a both-directions
+  citation check over `SOURCES.md`. **Deliberately not wired into the composition
+  root** — see ADR 0022.
 - 756 tests passing.
 
 ## What is incomplete

@@ -40,6 +40,7 @@ from mva.reporting.track1 import (
     build_submission_rows,
     composite_to_epcr,
     render_submission_csv,
+    render_submission_csv_unvalidated,
     truncation_notice,
     validate_submission,
     write_submission,
@@ -199,7 +200,10 @@ def test_validation_rejects_a_chromosome_without_the_prefix() -> None:
         alt_2="",
         epcr=0.5,
     )
-    ok, errors = validate_submission(render_submission_csv([bare]))
+    # Rendered through the unvalidated path on purpose: `render_submission_csv`
+    # now refuses invalid rows outright (ADR 0023), and a validator can only be
+    # shown to work on bytes that fail it.
+    ok, errors = validate_submission(render_submission_csv_unvalidated([bare]))
     assert not ok
     assert any("chr" in error and "prefix" in error for error in errors)
 
@@ -300,7 +304,7 @@ def test_validation_rejects_an_eleven_row_file() -> None:
         max_rows=MAX_SUBMISSION_ROWS,
     )
     assert len(rows) == 10
-    eleven = render_submission_csv([*rows, rows[0]])
+    eleven = render_submission_csv_unvalidated([*rows, rows[0]])
     ok, errors = validate_submission(eleven)
     assert not ok
     assert any("11 data rows" in error for error in errors)

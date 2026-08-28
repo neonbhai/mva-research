@@ -61,17 +61,15 @@ from mva.annotation import (
     is_synthetic,
     load_default_adapters,
 )
+from mva.annotation.bgzf import BGZF_EOF, has_bgzf_eof, index_path_for
 from mva.annotation.gnomad_sites import (
     ADAPTER_NAME,
-    BGZF_EOF,
     GLOBAL_POPULATION,
     PASS_FILTER,
     UNREPRESENTABLE_GNOMAD_FACTS,
     FrequencyLookup,
     GnomadSitesFrequencyAdapter,
     check_source_complete,
-    has_bgzf_eof,
-    index_path_for,
     merge_query_regions,
 )
 from mva.clock import FixedClock
@@ -1376,6 +1374,24 @@ def test_a_reference_that_raises_cannot_leak_a_coordinate_or_break_the_lookup(
     )
 
 
+def test_a_broken_reference_is_not_reported_as_applied() -> None:
+    """The adapter must not claim reference-backed canonicalisation it did not get.
+
+    Reproduced before the fix: `representation_status` was derived from
+    `self._reference is not None`, so a FASTA raising on every read reported
+    APPLIED over trim-only join keys.
+    """
+
+    class _Broken:
+        def fetch(self, contig: str, start: int, end: int) -> str:
+            raise OSError("handle closed")
+
+    with open_adapter(FIXTURE, reference=_Broken()) as instance:
+        instance.frequencies([REPEAT_INSERTION_SHIFTED_ONE])
+        assert instance.representation_status is (LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE)
+        assert instance.representation_limitation is not None
+
+
 def test_several_indels_at_one_position_stay_apart(
     adapter: GnomadSitesFrequencyAdapter,
 ) -> None:
@@ -2232,3 +2248,219 @@ def test_a_failed_construction_leaves_no_open_handles(tmp_path: Path) -> None:
         with pytest.raises(AdapterUnavailableError, match="different pipeline run"):
             open_adapter(tmp_path)
     assert FIXTURE.name in closed
+
+
+# ------------------------------------------- adversarial review, findings 1 and 6
+#
+# Finding 1 was raised while the 184.8 GB download was still in flight. All 24
+# shards are now on disk, which removes the *occasion* for the defect and not the
+# defect, so these assert the guard against the real, complete release rather than
+# against a constructed one. The synthetic half — one complete shard beside one
+# truncated shard — is
+# ``test_query_on_incomplete_shard_fails_closed`` above.
+
+
+@requires_full_release
+def test_the_complete_release_still_fails_closed_on_a_contig_it_has_no_shard_for() -> None:
+    """Complete is not the same as total, and the difference must still raise.
+
+    gnomAD v4.1 **exomes** ships 24 shards: chr1-22, X and Y. There is no
+    mitochondrial shard at all, so ``chrM`` is a coverage hole in a release that is
+    fully downloaded and entirely healthy. Returning those variants as missing keys
+    would score every mitochondrial candidate as novel and ultra-rare on the
+    strength of a dataset that was never asked. This is the finding-1 guard
+    exercised against the real directory, where ``incomplete_sources`` is empty and
+    nothing else in the run would hint at the gap.
+    """
+    with GnomadSitesFrequencyAdapter(FULL_RELEASE_DIR, release=RELEASE, subset=SUBSET) as instance:
+        assert instance.incomplete_sources == (), "the release is complete"
+        assert len(instance.available_contigs) == 24
+        assert "chr21" in instance.available_contigs
+        assert "chrY" in instance.available_contigs
+        assert "chrM" not in instance.available_contigs
+
+        with pytest.raises(AdapterUnavailableError) as excinfo:
+            instance.frequencies(["GRCh38:chrM:8993:T:G"])
+        message = str(excinfo.value)
+        assert "chrM" in message
+        assert "8993" not in message, "PRIV-09: the position must not be echoed"
+        assert "lookup_partial" in message, "the deliberate way through must be named"
+
+        # And the deliberate way through names the gap in the result rather than
+        # leaving it to be inferred from an absent key.
+        partial = instance.lookup_partial(["GRCh38:chrM:8993:T:G", "GRCh38:chr21:5031905:C:T"])
+        assert partial.unqueryable_contigs == ("chrM",)
+        assert partial.unqueryable_variant_ids == ("GRCh38:chrM:8993:T:G",)
+        assert set(partial.frequencies) == {"GRCh38:chr21:5031905:C:T"}
+        assert not partial.is_complete
+        assert "must not be scored as rarity" in partial.describe_gap()
+        assert "8993" not in partial.describe_gap()
+
+
+@requires_full_release
+def test_a_wrong_build_query_against_the_complete_release_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 6, against the real release: a wrong build is refused, never missed.
+
+    The failure this project already had once returned zero records instead of
+    erroring, and zero records is what "this variant is novel" looks like. One
+    GRCh37 id among GRCh38 ids must poison the batch rather than be dropped from
+    it: a plausible partial answer is the outcome a caller cannot detect.
+    """
+    monkeypatch.setenv("MVA_TEST_NO_OP", "1")
+    with GnomadSitesFrequencyAdapter(FULL_RELEASE_DIR, release=RELEASE, subset=SUBSET) as instance:
+        assert instance.build is GenomeBuild.GRCH38
+        with pytest.raises(GenomeBuildMismatchError) as excinfo:
+            instance.frequencies(["GRCh38:chr21:5031905:C:T", "GRCh37:chr21:5031905:C:T"])
+        message = str(excinfo.value)
+        assert "GRCh37" in message
+        assert "GRCh38" in message
+        assert "5031905" not in message, "PRIV-09: the coordinate must not be echoed"
+
+
+# ------------------------------- finding 1, second door: an index that falls short
+#
+# The BGZF end-of-file marker proves the *data* stream is whole. It says nothing
+# about the *index*, and htslib will happily region-query a complete data file
+# through an index built from a shorter one — returning nothing for every record
+# past the point the index reaches. That is byte-for-byte what "gnomAD has never
+# seen this variant" looks like, so it is the same failure finding 1 names,
+# arriving through a door the EOF check does not cover.
+#
+# Not hypothetical on this machine: every one of the 24 real shards has a `.tbi`
+# older than its `.bgz`, so htslib prints "The index file is older than the data
+# file" on every open. Those particular indexes are gnomAD's own and are complete
+# — proven below by `test_every_real_shard_is_covered_by_its_own_index` — but the
+# warning is indistinguishable from the one a restarted download would produce,
+# and nothing in the adapter was reading it.
+#
+# The check is on content, not on mtime. mtime would fail the real release.
+
+
+def _stale_index_release(tmp_path: Path) -> tuple[Path, str]:
+    """A COMPLETE shard beside an index built from only its first half.
+
+    Returns the release directory and the variant ID of a record that really is in
+    the data file but sits past the point the index reaches.
+    """
+    with gzip.open(FIXTURE, "rt", encoding="utf-8") as handle:
+        lines = handle.readlines()
+    header = [line for line in lines if line.startswith("#")]
+    records = [line for line in lines if not line.startswith("#")]
+
+    half = tmp_path / "half.vcf"
+    half.write_text("".join(header + records[: len(records) // 2]), encoding="utf-8")
+    pysam.tabix_compress(str(half), str(tmp_path / "half.vcf.gz"), force=True)
+    pysam.tabix_index(str(tmp_path / "half.vcf.gz"), preset="vcf", force=True)
+
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / FIXTURE.name).write_bytes(FIXTURE.read_bytes())
+    (release / (FIXTURE.name + ".tbi")).write_bytes((tmp_path / "half.vcf.gz.tbi").read_bytes())
+
+    columns = records[-1].split("\t")
+    return release, f"GRCh38:chr21:{columns[1]}:{columns[3]}:{columns[4]}"
+
+
+def test_an_index_that_does_not_reach_the_end_of_its_data_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    """A complete BGZF stream with a short index must not read as complete.
+
+    Reproduced by execution before the check existed: ``is_complete`` was True,
+    ``reasons`` was empty, ``incomplete_sources`` was empty, and a real gnomAD
+    record in the second half of the file came back as ``{}``.
+    """
+    release, past_the_index = _stale_index_release(tmp_path)
+    data = release / FIXTURE.name
+
+    status = check_source_complete(data)
+    assert status.has_bgzf_eof, "the data file itself is whole; that is the point"
+    assert status.index_covers_data is False
+    assert not status.is_complete
+    assert any("index" in reason and "does not reach" in reason for reason in status.reasons)
+
+    # And the adapter refuses the shard rather than answering from it.
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        open_adapter(release)
+    assert "index" in str(excinfo.value)
+
+    # The record really is in the data file, which is what made the silence so
+    # convincing: only the index could not reach it.
+    with gzip.open(data, "rt", encoding="utf-8") as handle:
+        assert any(past_the_index.split(":")[2] in line for line in handle)
+
+
+def test_a_short_index_is_named_and_excluded_rather_than_read(tmp_path: Path) -> None:
+    """Beside a healthy shard, the short-indexed one is excluded and reported.
+
+    The whole release must not fail because one shard's index is stale; that shard
+    must be named in ``incomplete_sources`` and its contig must then fail closed on
+    lookup, exactly as a truncated data file already does.
+    """
+    release, _ = _stale_index_release(tmp_path)
+    (release / FIXTURE.name).rename(release / "gnomad.exomes.v4.1.sites.chr22.vcf.bgz")
+    (release / (FIXTURE.name + ".tbi")).rename(
+        release / "gnomad.exomes.v4.1.sites.chr22.vcf.bgz.tbi"
+    )
+    (release / FIXTURE.name).write_bytes(FIXTURE.read_bytes())
+    (release / (FIXTURE.name + ".tbi")).write_bytes(
+        (FIXTURE.parent / (FIXTURE.name + ".tbi")).read_bytes()
+    )
+
+    with open_adapter(release) as instance:
+        assert instance.available_contigs == ("chr21",)
+        assert any(
+            "chr22" in source and "does not reach" in source
+            for source in instance.incomplete_sources
+        ), instance.incomplete_sources
+
+
+def test_the_index_reach_check_accepts_a_healthy_pair() -> None:
+    """The control: the committed fixture's own index reaches its own data.
+
+    Without this the test above would pass just as well against a check that
+    always said False.
+    """
+    status = check_source_complete(FIXTURE)
+    assert status.index_covers_data is True
+    assert status.is_complete
+    assert status.reasons == ()
+
+
+def test_a_csi_index_cannot_be_measured_and_does_not_block(tmp_path: Path) -> None:
+    """A stated limit, asserted rather than left to be discovered.
+
+    Only the ``.tbi`` layout is parsed. A CSI index (needed for contigs over
+    512 Mb, and shipped by neither gnomAD nor ClinVar) reports ``None`` — unknown,
+    not broken — and does not block, because refusing a legitimate release we
+    cannot measure would be its own false negative.
+    """
+    data = tmp_path / FIXTURE.name
+    data.write_bytes(FIXTURE.read_bytes())
+    (tmp_path / (FIXTURE.name + ".csi")).write_bytes(b"CSI\x01not really an index")
+
+    status = check_source_complete(data)
+    assert status.has_index, "a .csi counts as an index"
+    assert status.index_covers_data is None
+    assert status.is_complete, "unknown must not block"
+    assert status.reasons == ()
+
+
+@requires_full_release
+def test_every_real_shard_is_covered_by_its_own_index() -> None:
+    """The 24 shards on disk, measured rather than assumed.
+
+    htslib warns on every one of them that the index is older than the data,
+    because the indexes were downloaded before the shards finished. This proves
+    the warning is about mtime and not about coverage: every index reaches the end
+    of its own data file. If a download is ever restarted and leaves a genuinely
+    short index behind, this is the test that stops it being read as absence.
+    """
+    shards = sorted(FULL_RELEASE_DIR.glob("gnomad.exomes.v4.1.sites.*.vcf.bgz"))
+    assert len(shards) == 24
+    for shard in shards:
+        status = check_source_complete(shard)
+        assert status.index_covers_data is True, f"{shard.name} index falls short"
+        assert status.is_complete, f"{shard.name}: {status.reasons}"

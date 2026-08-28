@@ -94,9 +94,26 @@ depend on. A synthetic substitute is never described as biologically valid.
 
 ## Determinism & provenance
 
-**GP-30 — Repeat runs are byte-identical.**
-No wall-clock timestamps, RNG, dict-order or set-order dependence in artifact
-content. Sorting is explicit and total. Timestamps come from the injected clock.
+**GP-30 — Repeat runs are byte-identical, under a fixed clock.**
+No RNG, no dict-order or set-order dependence, and no time-derived identifier or
+hash in artifact content. Sorting is explicit and total. Every timestamp comes
+from the injected clock, and a lint forbids `datetime.now()`.
+
+**Scope, because the unqualified sentence was false.** The clock injected for a
+real case is `SystemClock` (`pipeline.py:450` selects on `config.synthetic`), and
+no caller passes the `clock` override. So for a real run:
+
+- **the scientific content is byte-identical** — every value, ordering,
+  identifier and content hash, verified across `PYTHONHASHSEED` and `TZ`
+  variation;
+- **eleven artifacts differ in recorded time only** — the four Track 2 reports,
+  `candidates/ranked_pairs.json`, `provenance.json` and four Parquet tables;
+- **nothing differs in scientific content.**
+
+Byte-identity of the whole tree is verified only for `config/synthetic-case.yaml`,
+which selects `FixedClock(2026-01-01T00:00:00Z)`. Quote GP-30 with that scope
+until a run-scoped fixed clock exists: TD-21, and the artifact-by-artifact map is
+in `docs/handoff-integrity.md` §4.
 
 **GP-31 — Every artifact has provenance.**
 Written artifacts register an `ArtifactProvenance` with content hash, upstream

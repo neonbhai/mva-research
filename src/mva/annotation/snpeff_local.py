@@ -90,13 +90,15 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 import os
+import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Final, NoReturn
+from typing import Final, NoReturn, cast
 
 from mva.determinism import hash_file
 from mva.errors import AdapterUnavailableError, GenomeBuildMismatchError
@@ -328,6 +330,19 @@ _VCF_MIN_COLUMNS: Final = 8
 
 # --------------------------------------------------------------------------- pinning
 
+#: Artifact roles a pins manifest must carry. Required rather than best-effort:
+#: a manifest that names three of the four leaves the fourth free to change while
+#: the run still reports itself as pinned.
+_PIN_REQUIRED_ROLES: Final[tuple[str, ...]] = ("jar", "config", "predictor")
+
+#: Roles that are pinned only when the corresponding artifact is configured.
+_PIN_OPTIONAL_ROLES: Final[tuple[str, ...]] = ("mane_summary",)
+
+#: A sha256 as ``sha256sum`` and :func:`mva.determinism.hash_file` render one.
+#: Matched whole, so a truncated or upper-cased digest is refused rather than
+#: silently compared against something that can never equal it.
+_SHA256_RE: Final = re.compile(r"[0-9a-f]{64}")
+
 
 @dataclass(frozen=True, slots=True)
 class SnpEffArtifactPins:
@@ -359,12 +374,135 @@ class SnpEffArtifactPins:
     they are ~550 MB, they are re-read on every construction, and a change to them
     without a change to the predictor is not a case SnpEff's packaging produces.
     That is a stated limit of this pin, not an oversight.
+
+    Two further fields, ``snpeff_release`` and ``genome_database``, are *declared
+    identity* rather than artifact bytes. They say which release and which genome
+    the reviewed digests above were reviewed *for*, and the adapter checks the
+    installation it is actually about to run against them
+    (:meth:`SnpEffConsequenceAdapter._verify_pins` and
+    :meth:`~SnpEffConsequenceAdapter._probe_version`). Four matching digests
+    handed to an adapter configured for a different genome would verify bytes
+    that answer a different question, and stamp one database's provenance onto
+    the other's answers. They are deliberately **not** part of :meth:`as_rows`
+    or :attr:`composite_digest`, which are over bytes.
     """
 
     jar: str
     config: str
     predictor: str
     mane_summary: str | None = None
+    snpeff_release: str | None = None
+    """The SnpEff release these digests were reviewed for, e.g. ``5.4c``. Checked
+    against the release the JAR reports about itself; ``None`` skips the check."""
+    genome_database: str | None = None
+    """The genome the ``predictor`` digest belongs to, e.g. ``GRCh38.115``. Checked
+    against the adapter's configured database; ``None`` skips the check."""
+
+    @classmethod
+    def from_manifest(cls, path: Path, *, genome_database: str | None = None) -> SnpEffArtifactPins:
+        """Load the reviewed pins ``tools/setup/install_snpeff.sh`` wrote.
+
+        This is the counterpart to :meth:`measure`, and the difference between
+        them is the whole point. ``measure`` hashes whatever is installed, so
+        feeding its output back into the constructor pins the installation to
+        itself and verifies nothing. The installer writes ``snpeff_pins.json``
+        only *after* checking every digest against the reviewed ``EXPECT_*``
+        constants in the script and refusing to finish otherwise, so the manifest
+        is an assertion about which bytes were reviewed rather than a recording of
+        which bytes are present.
+
+        Every field is validated. A manifest missing a role would leave that
+        artifact unpinned while the run reported itself as pinned, which is worse
+        than no pin at all: a version string that cannot distinguish two different
+        answers is decoration.
+
+        Args:
+            path: the installer's ``snpeff_pins.json``.
+            genome_database: when given, the database the caller intends to run.
+                A manifest describing a different genome is refused here rather
+                than at the first annotation.
+
+        Raises:
+            AdapterUnavailableError: the file is missing, is not a JSON object, is
+                missing a required key, carries a digest that is not a sha256, or
+                describes a different genome from ``genome_database``.
+        """
+        if not path.is_file():
+            msg = (
+                f"SnpEff pins manifest {path.as_posix()!r} not found. Run "
+                "tools/setup/install_snpeff.sh, which verifies every artifact against "
+                "the reviewed digests in the script and then writes this file. Running "
+                "unpinned is refused: see SnpEffArtifactPins."
+            )
+            raise AdapterUnavailableError(msg)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            msg = (
+                f"SnpEff pins manifest {path.name!r} could not be read as JSON "
+                f"({type(exc).__name__}). It is written by tools/setup/install_snpeff.sh; "
+                "re-run it rather than hand-editing the file."
+            )
+            raise AdapterUnavailableError(msg) from exc
+        if not isinstance(payload, dict):
+            msg = (
+                f"SnpEff pins manifest {path.name!r} is not a JSON object, so it names no "
+                "artifact digests at all."
+            )
+            raise AdapterUnavailableError(msg)
+        entries = cast("dict[str, object]", payload)
+
+        digests: dict[str, str] = {}
+        for role in (*_PIN_REQUIRED_ROLES, *_PIN_OPTIONAL_ROLES):
+            raw = entries.get(role)
+            if raw is None:
+                if role in _PIN_REQUIRED_ROLES:
+                    msg = (
+                        f"SnpEff pins manifest {path.name!r} carries no {role!r} digest. "
+                        "Every artifact that can change an answer must be pinned: a "
+                        "manifest that pins three of four would verify the run and leave "
+                        "the fourth free to change while the provenance string stayed "
+                        "identical."
+                    )
+                    raise AdapterUnavailableError(msg)
+                continue
+            digest = str(raw).strip()
+            if _SHA256_RE.fullmatch(digest) is None:
+                msg = (
+                    f"SnpEff pins manifest {path.name!r} gives {role!r} a value that is not "
+                    "a sha256 digest (64 lowercase hex characters). Refusing to treat an "
+                    "unreadable pin as a pin."
+                )
+                raise AdapterUnavailableError(msg)
+            digests[role] = digest
+
+        declared_database = entries.get("genome_database")
+        if declared_database is None or not str(declared_database).strip():
+            msg = (
+                f"SnpEff pins manifest {path.name!r} names no 'genome_database'. The "
+                "predictor digest belongs to one genome and means nothing without it: "
+                "the same four digests handed to an adapter configured for another "
+                "database would verify successfully and mislabel every annotation."
+            )
+            raise AdapterUnavailableError(msg)
+        database = str(declared_database).strip()
+        if genome_database is not None and database != genome_database:
+            msg = (
+                f"SnpEff pins manifest {path.name!r} describes genome {database!r}, but "
+                f"{genome_database!r} was requested. Refusing to verify one genome's "
+                "bytes and annotate against another's."
+            )
+            raise AdapterUnavailableError(msg)
+
+        release = entries.get("snpeff_release")
+        return cls(
+            jar=digests["jar"],
+            config=digests["config"],
+            predictor=digests["predictor"],
+            mane_summary=digests.get("mane_summary"),
+            snpeff_release=str(release).strip() if release is not None else None,
+            genome_database=database,
+        )
 
     @classmethod
     def measure(
@@ -1057,11 +1195,46 @@ class SnpEffConsequenceAdapter:
         :attr:`last_run_report` -- omission is classified, never inferred from
         silence.
 
+        **This method additionally fails closed on output it could not read.** It
+        is the one the ``ConsequenceAdapter`` Protocol exposes, and therefore the
+        only one ``annotation.service`` calls, so a caller here has no way to reach
+        the report: a missing key is all it sees, and a missing key is read as "this
+        variant has no consequence". A record that came back with no ``ANN`` field
+        at all is not that. SnpEff annotates even an intergenic site, so a record
+        without one is a record whose output this adapter cannot interpret -- a
+        truncated writer, a full disk, a JVM that died between the columns -- and
+        returning it as absence deletes the variant from ``gene_symbols``, from
+        gene grouping and from pairing, silently. :meth:`annotate_with_report` is
+        the deliberate way through and hands the classification back in the result
+        rather than leaving it on a property a caller can forget to read.
+
+        The other omission buckets are *interpretable* answers and stay classified
+        rather than fatal: ``unplaceable`` is SnpEff explicitly reporting
+        ``ERROR_CHROMOSOME_NOT_FOUND`` (escalated separately when it is the whole
+        batch, which is a naming or build misconfiguration), ``incomplete`` is an
+        entry this repository's model cannot hold, and ``skipped_unannotatable``
+        was never sent because the caller supplied ``*`` or ``.``.
+
         Raises:
             AdapterUnavailableError: SnpEff's output could not be fully accounted
-                for. See :meth:`annotate_with_report`.
+                for (see :meth:`annotate_with_report`), or a returned record
+                carried no ``ANN`` field.
         """
-        return self.annotate_with_report(variant_ids)[0]
+        annotations, report = self.annotate_with_report(variant_ids)
+        if report.without_ann:
+            msg = (
+                f"SnpEff {self._genome_database} returned {len(report.without_ann)} of "
+                f"{report.records_returned} records with no ANN field at all. SnpEff "
+                "annotates every site it can place, including intergenic ones, so a "
+                "record without one is output this adapter cannot interpret -- not a "
+                "finding that the variant has no consequence. Returning it as an absent "
+                "key would remove the variant from gene grouping and therefore from "
+                "pairing, deleting candidate pairs with nothing in the run saying so. "
+                "Call annotate_with_report() to accept the gap explicitly; it returns the "
+                "classification in the result. No record content is echoed (PRIV-09)."
+            )
+            raise AdapterUnavailableError(msg)
+        return annotations
 
     def annotate_with_report(
         self, variant_ids: Sequence[str]
@@ -1268,6 +1441,16 @@ class SnpEffConsequenceAdapter:
                 "SnpEffArtifactPins.measure(...) and review them into the manifest."
             )
             raise AdapterUnavailableError(msg)
+        if pins.genome_database is not None and pins.genome_database != self._genome_database:
+            msg = (
+                f"These pins were reviewed for genome {pins.genome_database!r} but this "
+                f"adapter is configured for {self._genome_database!r}. Refusing to verify "
+                "one genome's bytes and annotate against another's: the predictor digest "
+                "belongs to a specific gene model, so four matching digests would report a "
+                "verified run while the transcripts, HGVS and impacts came from a "
+                "different database than the provenance string names."
+            )
+            raise AdapterUnavailableError(msg)
         if (pins.mane_summary is None) != (self._mane_summary is None):
             msg = (
                 "MANE summary pin and MANE summary path must be supplied together: a "
@@ -1362,7 +1545,18 @@ class SnpEffConsequenceAdapter:
         for line in (stdout + "\n" + stderr).splitlines():
             fields = [field.strip() for field in line.replace("\t", " ").split() if field.strip()]
             if len(fields) >= 2 and fields[0].lower().startswith("snpeff"):
-                return f"{fields[1]}/{self._genome_database}+{self._pins.composite_digest}"
+                release = fields[1]
+                declared = self._pins.snpeff_release
+                if declared is not None and release != declared:
+                    msg = (
+                        f"The JAR at {self._jar_path.name!r} reports SnpEff {release}, but "
+                        f"its pins were reviewed for {declared}. The digests are over "
+                        "bytes and the release is over behaviour; they disagree, so one of "
+                        "the two is stale. Refusing to annotate: a run must be able to say "
+                        "which predictor produced its answers."
+                    )
+                    raise AdapterUnavailableError(msg)
+                return f"{release}/{self._genome_database}+{self._pins.composite_digest}"
         msg = (
             f"Could not read a release string from {self._jar_path.name}. The adapter "
             "refuses to report a version it invented: `version` is what makes an "

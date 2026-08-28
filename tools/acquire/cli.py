@@ -17,7 +17,9 @@ from typing import Annotated, Final
 import typer
 
 from mva.config import find_repo_root
+from mva.resources import IntegrityMode
 from tools.acquire.catalog import KNOWN_RESOURCES
+from tools.acquire.digest import DigestCache, cache_path_for
 from tools.acquire.errors import AcquisitionError
 from tools.acquire.fetch import fetch_resource, resolve_resource_root
 from tools.acquire.manifest import load_resources_manifest, write_resources_manifest
@@ -40,14 +42,37 @@ ResourceRootOpt = Annotated[
     typer.Option(
         "--resource-root",
         help=(
-            "External resource root. Defaults to $MVA_RESOURCES, or "
-            "~/Contri/bio-hackathon/mva-resources."
+            "External resource root holding the reference releases. Defaults to "
+            "$MVA_RESOURCES. There is no fallback path: a guessed root that is wrong "
+            "fails later, somewhere less obvious."
         ),
     ),
 ]
 ManifestOpt = Annotated[
     Path | None,
     typer.Option("--manifest", help="Path to resources.yaml. Defaults to the repo's own copy."),
+]
+ModeOpt = Annotated[
+    IntegrityMode,
+    typer.Option(
+        "--mode",
+        help=(
+            "'spot' checks exact size plus a sha256 over a published sample of each file "
+            "(at most 24 MiB per file; 1.7 s for the whole 202.8 GB set). 'full' re-hashes "
+            "every byte (159 s). See ADR 0020 for what each proves."
+        ),
+    ),
+]
+RehashOpt = Annotated[
+    bool,
+    typer.Option(
+        "--rehash",
+        help=(
+            "Ignore the digest cache and re-read every byte. The cache is keyed on "
+            "(size, mtime_ns), which is a build-cache key and NOT an integrity check; "
+            "pass this whenever that distinction could matter."
+        ),
+    ),
 ]
 
 
@@ -56,16 +81,22 @@ def _default_manifest_path() -> Path:
 
 
 @app.command()
-def status(resource_root: ResourceRootOpt = None) -> None:
+def status(resource_root: ResourceRootOpt = None, rehash: RehashOpt = False) -> None:
     """Show the fetched/not-fetched state of every registered resource, from disk."""
     root = resolve_resource_root(resource_root)
-    surveyed = survey_all(root, KNOWN_RESOURCES)
+    cache = DigestCache(cache_path_for(root), enabled=not rehash)
+    surveyed = survey_all(root, KNOWN_RESOURCES, cache=cache)
+    cache.save()
     fetched = sum(1 for entry in surveyed if entry.status is ResourceStatus.FETCHED)
     typer.echo(f"resource root: {root.as_posix()}")
     typer.echo(f"{fetched}/{len(surveyed)} resources fetched\n")
     for entry in surveyed:
         marker = "FETCHED    " if entry.status is ResourceStatus.FETCHED else "NOT_FETCHED"
-        detail = entry.sha256[:12] if entry.sha256 else (entry.notes or "-")
+        if entry.sha256 is None:
+            detail = entry.notes or "-"
+        else:
+            check = entry.integrity.format_check.value if entry.integrity else "not_checked"
+            detail = f"{entry.sha256[:12]}  {check}"
         typer.echo(f"  {marker}  {entry.name:<32} {detail}")
 
 
@@ -106,25 +137,49 @@ def fetch(
 def write_manifest_command(
     manifest: ManifestOpt = None,
     resource_root: ResourceRootOpt = None,
+    rehash: RehashOpt = False,
+    verified_at: Annotated[
+        str | None,
+        typer.Option(
+            "--verified-at",
+            help=(
+                "ISO date to stamp on integrity records. Defaults to each artifact's own "
+                "mtime date, so re-running over unchanged bytes leaves the manifest "
+                "byte-identical (GP-30). Pass a date only when re-verifying deliberately."
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """Survey the resource root and (re)write the committed resources.yaml."""
+    """Survey the resource root and (re)write the committed resources.yaml.
+
+    Full sha256 over every registered artifact, plus a deep format probe and the
+    sampled digest the run-time check compares against. This is the expensive,
+    correct pass: 202.8 GB of reads, 159 s, on a complete set. The digest cache
+    makes an interrupted run resume rather than restart.
+    """
     root = resolve_resource_root(resource_root)
     manifest_path = manifest or _default_manifest_path()
-    surveyed = survey_all(root, KNOWN_RESOURCES)
+    cache = DigestCache(cache_path_for(root), enabled=not rehash)
+    surveyed = survey_all(root, KNOWN_RESOURCES, cache=cache, verified_at=verified_at)
+    cache.save()
     write_resources_manifest(manifest_path, surveyed)
     fetched = sum(1 for entry in surveyed if entry.status is ResourceStatus.FETCHED)
-    typer.echo(f"wrote {manifest_path.as_posix()} ({fetched}/{len(surveyed)} resources fetched)")
+    typer.echo(
+        f"wrote {manifest_path.as_posix()} ({fetched}/{len(surveyed)} resources fetched; "
+        f"{cache.hits} digest(s) reused, {cache.misses} recomputed)"
+    )
 
 
 @app.command()
 def verify(
     manifest: ManifestOpt = None,
     resource_root: ResourceRootOpt = None,
+    mode: ModeOpt = IntegrityMode.FULL,
     strict: Annotated[
         bool, typer.Option("--strict", help="Exit non-zero if any resource is MISSING or MISMATCH.")
     ] = True,
 ) -> None:
-    """Check the committed manifest's hashes against the resource root on disk."""
+    """Check the committed manifest's pins against the resource root on disk."""
     root = resolve_resource_root(resource_root)
     manifest_path = manifest or _default_manifest_path()
     parsed = load_resources_manifest(manifest_path)
@@ -132,12 +187,12 @@ def verify(
 
     if strict:
         try:
-            results = assert_verified(root, entries)
+            results = assert_verified(root, entries, mode=mode)
         except AcquisitionError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc
     else:
-        results = verify_all(root, entries)
+        results = verify_all(root, entries, mode=mode)
 
     for result in results:
         typer.echo(f"  {result.status.value.upper():<9} {result.name:<32} {result.message}")

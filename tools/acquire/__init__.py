@@ -27,6 +27,7 @@ Run it via ``uv run python -m tools.acquire <command>`` (see :mod:`tools.acquire
 from __future__ import annotations
 
 from tools.acquire.catalog import KNOWN_RESOURCES
+from tools.acquire.digest import DigestCache, cache_path_for
 from tools.acquire.errors import (
     AcquisitionError,
     DisallowedHostError,
@@ -35,12 +36,13 @@ from tools.acquire.errors import (
     ResourceVerificationError,
 )
 from tools.acquire.fetch import (
-    DEFAULT_RESOURCE_ROOT,
+    RESOURCE_ROOT_ENV_VAR,
     fetch_resource,
     is_download_stable,
     resolve_resource_root,
     sniff_content_mismatch,
 )
+from tools.acquire.formats import probe_format
 from tools.acquire.hosts import ALLOWED_HOSTS, assert_allowed_host
 from tools.acquire.manifest import (
     ResourceManifest,
@@ -48,7 +50,13 @@ from tools.acquire.manifest import (
     render_resources_yaml,
     write_resources_manifest,
 )
-from tools.acquire.models import ResourceEntry, ResourceStatus
+from tools.acquire.models import (
+    FormatCheck,
+    IntegrityRecord,
+    ResourceEntry,
+    ResourceKind,
+    ResourceStatus,
+)
 from tools.acquire.survey import survey_all, survey_resource
 from tools.acquire.verify import (
     VerificationResult,
@@ -60,12 +68,16 @@ from tools.acquire.verify import (
 
 __all__ = [
     "ALLOWED_HOSTS",
-    "DEFAULT_RESOURCE_ROOT",
     "KNOWN_RESOURCES",
+    "RESOURCE_ROOT_ENV_VAR",
     "AcquisitionError",
+    "DigestCache",
     "DisallowedHostError",
+    "FormatCheck",
+    "IntegrityRecord",
     "ResourceEntry",
     "ResourceFetchError",
+    "ResourceKind",
     "ResourceManifest",
     "ResourceRootError",
     "ResourceStatus",
@@ -74,9 +86,11 @@ __all__ = [
     "VerificationStatus",
     "assert_allowed_host",
     "assert_verified",
+    "cache_path_for",
     "fetch_resource",
     "is_download_stable",
     "load_resources_manifest",
+    "probe_format",
     "render_resources_yaml",
     "resolve_resource_root",
     "sniff_content_mismatch",

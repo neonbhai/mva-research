@@ -94,13 +94,26 @@ against the two-slash form never fires. ``mva.annotation`` is additionally
 forbidden from importing any network client by
 ``tests/unit/test_architecture.py::test_no_network_clients_in_sensitive_stages``.
 
-**Never a half-written file.** The sites VCFs are ~250 GB and arrive over hours.
-Reading a truncated BGZF stream yields corrupt or — worse — silently partial
-results, which look exactly like "this variant is novel". :func:`check_source_complete`
-must pass before a file is opened: index present, BGZF end-of-file marker present,
+**Never a half-written file, and never a half-written index.** The sites VCFs are
+~250 GB and arrive over hours. Reading a truncated BGZF stream yields corrupt or —
+worse — silently partial results, which look exactly like "this variant is novel".
+:func:`check_source_complete` must pass before a file is opened: index present,
+BGZF end-of-file marker present, the index actually reaching the end of the data,
 and (optionally) size stable across a probe interval. Incomplete shards are
 excluded and named in :attr:`GnomadSitesFrequencyAdapter.incomplete_sources` rather
 than being read.
+
+The index check is the one that is easy to leave out, because the EOF marker looks
+like it has already answered the question. It has not: it proves the *data* stream
+is whole and says nothing about the *index*, and htslib will region-query a
+complete data file through an index built from a shorter one without complaint,
+answering "no record" for everything past the point the index reaches. htslib does
+warn when an index is older than its data — and on the real release it warns on all
+24 shards, because the ``.tbi`` files finished downloading before the multi-gigabyte
+shards did. Every one of those indexes is nevertheless complete, so mtime is not
+the signal; :func:`index_covers_data` compares the index's furthest reachable block
+offset against the file size instead, which is exact and which the real release
+passes. See :func:`tabix_index_reach`.
 """
 
 from __future__ import annotations
@@ -117,8 +130,14 @@ from mva.alleles import (
     CanonicalAllele,
     LeftAlignmentStatus,
     ReferenceLookup,
+    ReferenceStatus,
     canonicalise_allele,
-    rightmost_equivalent_position,
+    rightmost_equivalent_bound,
+)
+from mva.annotation.bgzf import (
+    has_bgzf_eof,
+    index_covers_data,
+    index_path_for,
 )
 from mva.errors import AdapterUnavailableError, GenomeBuildMismatchError, NetworkDeniedError
 from mva.models.base import error_token
@@ -139,16 +158,6 @@ GLOBAL_POPULATION: Final = "global"
 
 #: Written into ``filter_status`` for a record whose FILTER column is ``PASS``.
 PASS_FILTER: Final = "PASS"  # noqa: S105 - VCF FILTER value, not a credential
-
-#: The 28-byte empty-BGZF block every complete bgzip stream ends with. Its absence
-#: means the file is truncated — mid-download, interrupted, or corrupt.
-BGZF_EOF: Final[bytes] = (
-    b"\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\x06\x00BC\x02\x00\x1b\x00\x03\x00"
-    b"\x00\x00\x00\x00\x00\x00\x00\x00"
-)
-
-#: Index suffixes tabix/htslib will accept for a bgzipped VCF.
-_INDEX_SUFFIXES: Final[tuple[str, ...]] = (".tbi", ".csi")
 
 #: Sites-VCF extensions the acquisition step may produce.
 _SOURCE_SUFFIXES: Final[tuple[str, ...]] = (".vcf.bgz", ".vcf.gz")
@@ -354,15 +363,6 @@ def _local_source_path(path: Path) -> Path:
     return resolved
 
 
-def index_path_for(path: Path) -> Path | None:
-    """The tabix/CSI index beside ``path``, or ``None`` when neither exists."""
-    for suffix in _INDEX_SUFFIXES:
-        candidate = path.with_name(path.name + suffix)
-        if candidate.is_file():
-            return candidate
-    return None
-
-
 # --------------------------------------------------------------- completeness check
 
 
@@ -383,18 +383,30 @@ class SourceCompleteness:
     size_bytes: int
     #: ``None`` when no stability probe was requested — unknown, not stable.
     size_stable: bool | None
+    #: Whether the index reaches the end of the data. ``None`` when it could not be
+    #: measured (a CSI index, or an unparseable one) — unknown, not broken. See
+    #: :func:`index_covers_data`, and note that this is a content check: the real
+    #: release's indexes are all *older* than their data and all complete.
+    index_covers_data: bool | None = None
 
     @property
     def is_complete(self) -> bool:
         """True only when every check that ran passed.
 
-        ``size_stable is None`` (not probed) does not block: the BGZF end-of-file
-        marker is the authoritative signal, and a stream that carries it is a
-        finished stream. The probe exists for the pathological case of a writer that
-        has flushed a valid-looking tail and is still appending.
+        Two of the four signals are tri-state, and ``None`` means "not measured"
+        rather than "failed" in both. ``size_stable is None`` (not probed) does not
+        block: the BGZF end-of-file marker is the authoritative signal for the data
+        stream, and a stream that carries it is a finished stream. Nor does
+        ``index_covers_data is None``, which is what a CSI index reports: refusing a
+        legitimate release we have no parser for would be a false negative of our
+        own making. ``False`` from either one blocks.
         """
         return (
-            self.exists and self.has_index and self.has_bgzf_eof and self.size_stable is not False
+            self.exists
+            and self.has_index
+            and self.has_bgzf_eof
+            and self.size_stable is not False
+            and self.index_covers_data is not False
         )
 
     @property
@@ -413,26 +425,12 @@ class SourceCompleteness:
             reasons.append("BGZF end-of-file marker missing (file is truncated or still arriving)")
         if self.size_stable is False:
             reasons.append("size changed during the stability probe (still being written)")
+        if self.index_covers_data is False:
+            reasons.append(
+                "the index does not reach the end of the data (built from a shorter file; "
+                "every record past its reach would report as absent)"
+            )
         return tuple(reasons)
-
-
-def has_bgzf_eof(path: Path) -> bool:
-    """Whether the file ends with the empty-BGZF block that terminates every bgzip stream.
-
-    This is the check that matters. A partially downloaded ``.vcf.bgz`` decompresses
-    perfectly up to its truncation point, so a reader that does not look for the EOF
-    marker gets a *silently short* dataset: every variant past the truncation point
-    reports as absent, which downstream reads as "novel, therefore interesting".
-    """
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return False
-    if size < len(BGZF_EOF):
-        return False
-    with path.open("rb") as handle:
-        handle.seek(size - len(BGZF_EOF))
-        return handle.read(len(BGZF_EOF)) == BGZF_EOF
 
 
 def check_source_complete(
@@ -473,13 +471,15 @@ def check_source_complete(
         sleeper(stability_probe_seconds)
         stable = path.is_file() and path.stat().st_size == size_before
 
+    index = index_path_for(path)
     return SourceCompleteness(
         path=path,
         exists=True,
-        has_index=index_path_for(path) is not None,
+        has_index=index is not None,
         has_bgzf_eof=has_bgzf_eof(path),
         size_bytes=size_before,
         size_stable=stable,
+        index_covers_data=index_covers_data(path, index),
     )
 
 
@@ -632,8 +632,18 @@ class _Query:
     """Right-most POS at which an equivalent spelling of this event could sit.
 
     Equal to ``position`` unless a reference is configured and the variant sits
-    in a repeat tract. See :func:`mva.alleles.rightmost_equivalent_position` and
+    in a repeat tract. See :func:`mva.alleles.rightmost_equivalent_bound` and
     :attr:`span`, which is where it is actually spent."""
+
+    reference_status: ReferenceStatus
+    """How far the reference could be trusted while building *this* query.
+
+    ``UNUSABLE`` when either the join key or ``search_end`` needed a base the
+    reference could not supply. Carried rather than discarded because the query
+    side is where the reference is actually read: a gnomAD release is already
+    left-aligned, so a release record almost never asks for a base, and an
+    adapter that counted only the release side would report ``APPLIED`` over a
+    FASTA that failed on every caller lookup."""
 
     @property
     def span(self) -> tuple[int, int]:
@@ -662,7 +672,7 @@ class _Query:
           record's POS leftwards, out of its raw span, so a release record
           spelling this insertion further along the tract occupies a span disjoint
           from ``position`` and would never be fetched at all.
-          ``rightmost_equivalent_position`` bounds that from the reference instead
+          ``rightmost_equivalent_bound`` bounds that from the reference instead
           of from a guessed padding constant, and the bound is provably sufficient:
           a record's raw POS is never greater than its own trimmed POS, which is
           never greater than the right-most legal spelling of the event.
@@ -731,17 +741,23 @@ def _parse_variant_id(
         reference=reference,
     )
     search_end = canonical.position
+    status = canonical.reference_status
     if reference is not None:
-        search_end = max(
-            search_end,
-            rightmost_equivalent_position(
-                contig=canonical_contig,
-                position=canonical.position,
-                ref=canonical.ref,
-                alt=canonical.alt,
-                reference=reference,
-            ),
+        # `.proven` is False when the reference could not be read to the right of
+        # the record. The window is then the furthest point the search reached,
+        # which may be short — but the key is trim-only for the same reason, so
+        # the limitation is the one already reported by representation_status
+        # rather than a second, undeclared one.
+        bound = rightmost_equivalent_bound(
+            contig=canonical_contig,
+            position=canonical.position,
+            ref=canonical.ref,
+            alt=canonical.alt,
+            reference=reference,
         )
+        search_end = max(search_end, bound.position)
+        if not bound.proven:
+            status = ReferenceStatus.UNUSABLE
     return _Query(
         variant_id=variant_id,
         contig=canonical_contig,
@@ -749,6 +765,7 @@ def _parse_variant_id(
         ref=canonical.ref,
         alt=canonical.alt,
         search_end=search_end,
+        reference_status=status,
     )
 
 
@@ -971,6 +988,11 @@ class GnomadSitesFrequencyAdapter:
         self._subset = subset.strip()
         self._merge_window_bp = merge_window_bp
         self._reference = reference
+        # Per-run count of alleles whose canonicalisation could not read the
+        # reference. Not a boolean: the report states how many records are
+        # affected, and "one unreadable base" and "the FASTA is gone" are
+        # different operator problems.
+        self._unusable_reference_alleles = 0
         if not self._release or not self._subset:
             msg = "gnomAD adapter requires a non-empty 'release' and 'subset' (GP-18)."
             raise AdapterUnavailableError(msg)
@@ -1236,9 +1258,12 @@ class GnomadSitesFrequencyAdapter:
     def representation_status(self) -> LeftAlignmentStatus:
         """Whether this adapter can reconcile a *shifted* indel spelling, typed.
 
-        ``APPLIED`` when a reference was supplied, ``UNAVAILABLE_NO_REFERENCE``
-        otherwise. Trimming is unconditional either way, so the non-minimal class
-        of mismatch joins in both states; what the degraded state costs is the
+        ``APPLIED`` only when a reference was supplied **and every read the rule
+        needed from it succeeded**. A reference object that is merely non-``None``
+        proves nothing: a FASTA that raises on every read yields trim-only keys,
+        and reporting those as reference-backed is a provenance lie no downstream
+        consumer can detect. Trimming is unconditional either way, so the non-minimal
+        class of mismatch joins in both states; what the degraded state costs is the
         repeat-tract class, where gnomAD and the caller place one insertion at
         different positions. Typed rather than logged so a report can state the
         limitation instead of a reader having to infer it from a missing key —
@@ -1246,13 +1271,25 @@ class GnomadSitesFrequencyAdapter:
         """
         if self._reference is None:
             return LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+        if self._unusable_reference_alleles:
+            return LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
         return LeftAlignmentStatus.APPLIED
 
     @property
     def representation_limitation(self) -> str | None:
         """One sentence for a report footer, or ``None`` when nothing is degraded."""
-        if self._reference is not None:
+        if self._reference is not None and not self._unusable_reference_alleles:
             return None
+        if self._reference is not None:
+            return (
+                f"A reference FASTA was supplied but could not be read for "
+                f"{self._unusable_reference_alleles} gnomAD lookup(s), which were "
+                "canonicalised by trimming only. Those variants may fail to join "
+                "against gnomAD's left-aligned alleles and would then be reported as "
+                "having no frequency data — absence of information, not evidence of "
+                "rarity. Check that the FASTA is the same assembly and patch release "
+                "as the callset, and that its .fai index matches the file."
+            )
         return (
             "gnomAD lookups were canonicalised by trimming only: no reference FASTA "
             "was supplied to the adapter, so an indel that gnomAD places at a "
@@ -1287,13 +1324,16 @@ class GnomadSitesFrequencyAdapter:
         passing join is exactly the evidence that was available while they
         disagreed.
         """
-        return canonicalise_allele(
+        canonical = canonicalise_allele(
             contig=contig,
             position=position,
             ref=ref,
             alt=alt,
             reference=self._reference,
         )
+        if canonical.reference_status is ReferenceStatus.UNUSABLE:
+            self._unusable_reference_alleles += 1
+        return canonical
 
     # --------------------------------------------------------------------- lookup
 
@@ -1367,6 +1407,9 @@ class GnomadSitesFrequencyAdapter:
             _parse_variant_id(variant_id, build=self.build, reference=self._reference)
             for variant_id in dict.fromkeys(variant_ids)
         ]
+        self._unusable_reference_alleles += sum(
+            1 for query in queries if query.reference_status is ReferenceStatus.UNUSABLE
+        )
         by_contig: dict[str, list[_Query]] = {}
         for query in queries:
             by_contig.setdefault(query.contig, []).append(query)

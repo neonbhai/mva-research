@@ -68,14 +68,27 @@ The five traps this module exists to not fall into
 What this module cannot say
 ---------------------------
 
-``ConsequenceAnnotation.impact`` is a required, non-optional field, and this
-adapter computes no impact. Every value of the enum would be a fabrication with
-measurable downstream consequences — see :data:`IMPACT_NOT_ASSESSED_REMEDIATION`
-and :class:`ManeGeneAdapter`, which refuses to fabricate one and instead fails
-closed with the exact model change needed. There is deliberately no override: a
-setting that supplied a stand-in severity would be the same fabrication behind a
-switch, and it would enter ranking as evidence while the adapter still declared
-``synthetic = False``.
+This adapter computes **no impact**, and says so by emitting
+``ConsequenceAnnotation.impact = None`` — NOT ASSESSED under ADR 0016. Every
+member of :class:`~mva.models.variant.ImpactSeverity` would be a fabrication with
+measurable downstream consequences: MODIFIER and LOW are both in
+``prioritization.filters.BENIGN_IMPACTS`` and would flag a variant nobody assessed
+as benign, while MODERATE and HIGH invent severity and HIGH additionally promotes
+every lone heterozygote in ``pairing._wants_single_candidate``.
+
+That honesty is enforced three ways rather than intended once. The module never
+names an ``ImpactSeverity`` member — a structural lint in
+``tests/unit/test_gene_intervals.py`` fails on the member access, which is the
+only way to obtain a severity value. :func:`model_accepts_unassessed_impact`
+round-trips a probe through the model and refuses construction unless the value
+comes back as ``None``, so a model that *accepts* None and substitutes a default
+is caught rather than trusted. And :meth:`ManeGeneAdapter._annotation` re-checks
+the annotation it is about to return, so a substitution introduced after
+construction is caught on the object that would actually reach ranking. There is
+deliberately no override: a setting that supplied a stand-in severity would be the
+same fabrication behind a switch, and it would enter ranking as evidence while the
+adapter still declared ``synthetic = False``. See
+:data:`IMPACT_NOT_ASSESSED_REMEDIATION`.
 """
 
 from __future__ import annotations
@@ -89,7 +102,7 @@ from enum import StrEnum
 from pathlib import Path
 from re import compile as _re_compile
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Final
 
 from pydantic import ValidationError
 
@@ -97,7 +110,7 @@ from mva.annotation.base import ConsequenceAdapter, is_synthetic
 from mva.determinism import hash_file
 from mva.errors import AdapterUnavailableError, GenomeBuildMismatchError
 from mva.models.genome import GenomeBuild, contig_sort_key, normalise_contig
-from mva.models.variant import ConsequenceAnnotation, ImpactSeverity
+from mva.models.variant import ConsequenceAnnotation
 
 # --------------------------------------------------------------------------- identity
 
@@ -1205,13 +1218,18 @@ def _unique(values: Iterable[str]) -> tuple[str, ...]:
 
 # --------------------------------------------------------------------------- adapter
 
-#: Why this adapter cannot produce a ``ConsequenceAnnotation`` today, and the
-#: change that would let it. Kept as a constant so the failure message, the module
-#: docstring and the test that asserts the refusal all state one thing.
+#: Why this adapter would be unable to produce a ``ConsequenceAnnotation`` at all,
+#: and the change that would let it. Kept as a constant so the failure message,
+#: the module docstring and the test that asserts the refusal all state one thing.
 #:
-#: ``ConsequenceAnnotation.impact`` is a required ``ImpactSeverity``. An interval
-#: join computes no impact, and every member of that enum is a fabrication with a
-#: measurable, checkable downstream effect:
+#: ADR 0016 widened ``ConsequenceAnnotation.impact`` to ``ImpactSeverity | None``,
+#: so this refusal does not fire today — :func:`model_accepts_unassessed_impact`
+#: returns True and the adapter emits the honest ``None``. It stays because the
+#: refusal is what makes the honesty structural rather than incidental: the probe
+#: also returns False for a model that *accepts* None and substitutes a severity,
+#: and this is the message that path raises. An interval join computes no impact,
+#: and every member of that enum is a fabrication with a measurable, checkable
+#: downstream effect:
 #:
 #: * ``MODIFIER`` scores 0.05 in ``prioritization.scoring._IMPACT_BASE`` and is a
 #:   member of ``prioritization.filters.BENIGN_IMPACTS``, so it would attach a
@@ -1256,9 +1274,20 @@ def model_accepts_unassessed_impact() -> bool:
     Probed by construction rather than by reading pydantic's field internals, so
     that the moment the model is widened this adapter starts emitting the honest
     annotation with no change here. Called once per adapter, not per variant.
+
+    **The probe reads the result back, not merely the absence of an exception.**
+    Asking only "does validating ``impact=None`` raise?" answers a weaker question
+    than the one that matters. A model that *accepts* None and substitutes a
+    severity — a field validator supplying a default, a model validator filling
+    gaps, a re-narrowed field with a non-None default — would pass that probe, and
+    this adapter would then stamp a prediction it never made onto every variant it
+    annotates while still declaring ``synthetic = False``. MODIFIER in particular
+    is a member of ``prioritization.filters.BENIGN_IMPACTS``, so the substituted
+    value would not be inert: it would flag unassessed variants as benign. The
+    probe therefore asserts the round trip.
     """
     try:
-        ConsequenceAnnotation.model_validate(
+        probe = ConsequenceAnnotation.model_validate(
             {
                 "gene_symbol": "PROBE",
                 "gene_id": None,
@@ -1269,7 +1298,7 @@ def model_accepts_unassessed_impact() -> bool:
         )
     except ValidationError:
         return False
-    return True
+    return probe.impact is None
 
 
 class ManeGeneAdapter:
@@ -1371,6 +1400,35 @@ class ManeGeneAdapter:
     def _annotation(
         self, assignment: GeneAssignment, transcript: ManeTranscript
     ) -> ConsequenceAnnotation:
+        """One annotation, checked to carry no impact before it is handed back.
+
+        The construction-time probe (:func:`model_accepts_unassessed_impact`) runs
+        once, against a probe object. This checks the object that is actually
+        returned, so a substitution introduced *after* construction — a model
+        swapped, a validator registered, a subclass bound — is caught on the value
+        that would otherwise reach ranking, rather than on a value nobody scores.
+        A single identity comparison per annotation; the honest answer costs
+        nothing to verify and the dishonest one costs a benign flag on a variant
+        nobody assessed (GP-14).
+        """
+        annotation = self._build_annotation(assignment, transcript)
+        if annotation.impact is not None:
+            msg = (
+                f"This adapter emitted an impact severity ({annotation.impact.value!r}) that "
+                "it did not compute. It assigns genes by interval join and predicts no "
+                "molecular consequence, so the only honest value is None (NOT ASSESSED). "
+                "A severity here reaches prioritization.scoring as evidence and, for "
+                "MODIFIER or LOW, attaches a benign_consequence flag to a variant nobody "
+                "assessed — while this adapter still declares synthetic = False. "
+                "ConsequenceAnnotation is substituting a value for None; see "
+                "model_accepts_unassessed_impact."
+            )
+            raise AdapterUnavailableError(msg)
+        return annotation
+
+    def _build_annotation(
+        self, assignment: GeneAssignment, transcript: ManeTranscript
+    ) -> ConsequenceAnnotation:
         gene = assignment.gene
         return ConsequenceAnnotation(
             gene_symbol=gene.gene_symbol,
@@ -1384,8 +1442,12 @@ class ManeGeneAdapter:
             consequence_terms=((GENE_LOCUS_TERM,) if assignment.is_overlap else (INTERGENIC_TERM,)),
             # NOT ASSESSED. An interval join computes no molecular consequence, and
             # every member of ImpactSeverity would be a prediction this adapter did
-            # not make. Construction already refused unless the model can hold it.
-            impact=cast(ImpactSeverity, None),
+            # not make. Construction already refused unless the model can hold it,
+            # and _annotation re-checks the value on the way out. Written as a plain
+            # None rather than a cast: the field is `ImpactSeverity | None`, so a
+            # cast here would be telling the type checker something untrue about a
+            # value whose truthfulness is the entire point.
+            impact=None,
             source_tool=MANE_ADAPTER_NAME,
             source_tool_version=self._version,
         )

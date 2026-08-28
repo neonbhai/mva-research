@@ -17,7 +17,7 @@ silently, which is why this module has none.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 from mva.config import FrequencyThresholds, QualityThresholds
@@ -207,6 +207,118 @@ def apply_hard_filters(
     )
 
 
+class HardFilterStream:
+    """The hard filter as a stream: retained records out, counts at the end.
+
+    Construct via :func:`iter_hard_filtered`. Same decisions as
+    :func:`apply_hard_filters`, same order, and it yields exactly
+    :attr:`FilterResult.retained` — the records **unmodified**.
+
+    Not :attr:`FilterResult.flagged`, and the difference is load-bearing. The
+    composition root consumes ``.retained`` and hands it to
+    :func:`apply_soft_flags`, so that is the sequence this stream has to
+    reproduce. The two are not interchangeable: ``apply_hard_filters`` attaches
+    the configuration-free flags first, and ``with_qc_flags`` appends rather than
+    re-orders, so soft-flagging an already-flagged record produces the same flag
+    SET in a different ORDER — and ``qc_flags`` is a tuple that reaches
+    ``candidate_pairs.json`` and the evidence store. ``apply_hard_filters``'s
+    docstring calls ``apply_soft_flags`` "idempotent with respect to these",
+    which is true of the set and not of the order. Feeding ``.flagged`` here
+    would therefore have silently changed the bytes of every downstream artifact,
+    which is how `tests/integration/test_scale_composition.py` found it.
+
+    The one thing this stream does NOT keep is :attr:`FilterResult.removed`, the
+    ``(variant_id, reason)`` list of everything discarded. That omission is
+    deliberate on two grounds. At whole-genome scale the list is millions of
+    entries and is the very allocation this class exists to avoid. And it is a
+    list of build-qualified proband coordinates held for the length of a run in
+    order to be counted; the counts are what a report can state anyway, and a
+    count is not a coordinate (GP-41). A caller that genuinely needs the
+    identities of discarded records is working at fixture scale and should call
+    :func:`apply_hard_filters`.
+    """
+
+    __slots__ = ("_expected_build", "_input", "_reasons", "_retained", "_source", "_started")
+
+    def __init__(self, variants: Iterable[VariantRecord], *, expected_build: GenomeBuild) -> None:
+        self._source = variants
+        self._expected_build = expected_build
+        self._input = 0
+        self._retained = 0
+        self._reasons: dict[str, int] = dict.fromkeys(HARD_FILTER_REASONS, 0)
+        self._started = False
+
+    def __iter__(self) -> Iterator[VariantRecord]:
+        if self._started:
+            msg = (
+                "This hard-filter stream has already been iterated. Re-iterating "
+                "would double every count. Call iter_hard_filtered() again."
+            )
+            raise ValueError(msg)
+        self._started = True
+        return self._drive()
+
+    def _drive(self) -> Iterator[VariantRecord]:
+        expected_build = self._expected_build
+        for variant in self._source:
+            self._input += 1
+            reason = _hard_filter_reason(variant, expected_build)
+            if reason is not None:
+                self._reasons[reason] += 1
+                continue
+            self._retained += 1
+            yield variant
+
+    def counts(self) -> dict[str, int]:
+        """Exactly the mapping :attr:`FilterResult.counts` carries."""
+        counts: dict[str, int] = {
+            "input": self._input,
+            "retained": self._retained,
+            "removed": self._input - self._retained,
+        }
+        for reason in HARD_FILTER_REASONS:
+            counts[f"removed_{reason}"] = self._reasons[reason]
+        return counts
+
+
+def iter_hard_filtered(
+    variants: Iterable[VariantRecord], *, expected_build: GenomeBuild
+) -> HardFilterStream:
+    """Hard-filter a stream without holding the callset.
+
+    Yields the same records :attr:`FilterResult.retained` holds, in the same
+    order and unmodified — see :class:`HardFilterStream` for why that is
+    ``retained`` and not ``flagged``. Counts come from
+    :meth:`HardFilterStream.counts` once the stream is drained.
+    """
+    return HardFilterStream(variants, expected_build=expected_build)
+
+
+def iter_soft_flagged(
+    variants: Iterable[VariantRecord],
+    *,
+    frequency: FrequencyThresholds,
+    quality: QualityThresholds,
+) -> Iterator[VariantRecord]:
+    """:func:`apply_soft_flags` as a generator. Same flags, same order, nothing held.
+
+    No stream class here because there is nothing to report: soft flagging is a
+    pure per-record function with no run-level statistic of its own.
+    """
+    for variant in variants:
+        found: set[str] = set()
+        frequency_flag = _frequency_flag(variant, frequency)
+        if frequency_flag is not None:
+            found.add(frequency_flag)
+        found.update(_quality_flags(variant, quality))
+        consequence_flag = _consequence_flag(variant)
+        if consequence_flag is not None:
+            found.add(consequence_flag)
+        if variant.genotype.zygosity is Zygosity.HOM_ALT:
+            found.add(FLAG_HOMOZYGOUS_CALL)
+        yield variant.with_qc_flags(*(flag for flag in SOFT_FLAGS if flag in found))
+
+
 def _frequency_flag(variant: VariantRecord, frequency: FrequencyThresholds) -> str | None:
     """Frequency band flag, using the MAXIMUM AF across populations.
 
@@ -292,21 +404,7 @@ def apply_soft_flags(
     ``possible_mosaic`` and ``homozygous_call``. Flags are additive and
     order-stable, so re-running this pass is a no-op.
     """
-    flagged: list[VariantRecord] = []
-    for variant in variants:
-        found: set[str] = set()
-        frequency_flag = _frequency_flag(variant, frequency)
-        if frequency_flag is not None:
-            found.add(frequency_flag)
-        found.update(_quality_flags(variant, quality))
-        consequence_flag = _consequence_flag(variant)
-        if consequence_flag is not None:
-            found.add(consequence_flag)
-        if variant.genotype.zygosity is Zygosity.HOM_ALT:
-            found.add(FLAG_HOMOZYGOUS_CALL)
-        ordered = tuple(flag for flag in SOFT_FLAGS if flag in found)
-        flagged.append(variant.with_qc_flags(*ordered))
-    return tuple(flagged)
+    return tuple(iter_soft_flagged(variants, frequency=frequency, quality=quality))
 
 
 def select_candidate_variants(

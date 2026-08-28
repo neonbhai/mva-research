@@ -35,6 +35,21 @@ Two properties of that standard decide the shape of everything below:
   homopolymer or a tandem repeat means reading the bases to its left. A caller
   without a :class:`ReferenceLookup` cannot do it, must not pretend it did, and
   must say so — see :class:`LeftAlignmentReport`.
+
+And one property of *failure* decides the rest:
+
+* **A reference that cannot be read is not the same as a position with no base.**
+  Position 0 is before the start of a contig and the base past the end of a contig
+  does not exist; stopping there is the reference being complete. A FASTA that
+  raises, that is missing the contig, that returns an empty string mid-contig or
+  that returns something which is not a nucleotide is *broken*, and nothing about
+  the record is known. Both used to arrive at the same silent ``None``, which
+  turned an I/O error into a quality downgrade no caller could observe — while the
+  adapters went on reporting that left-alignment had been applied. The distinction
+  is now made in :func:`_read_one_base` and carried out of here in
+  :class:`ReferenceStatus`, on the same principle as
+  :attr:`CanonicalAllele.operations`: never claim what did not happen. ADR 0026
+  records the reasoning and the limits that remain.
 """
 
 from __future__ import annotations
@@ -43,6 +58,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Protocol
 
+from mva.errors import ReferenceUnusableError
+from mva.models.base import error_token
 from mva.models.variant import OP_LEFT_ALIGN, OP_TRIM
 
 #: Bases a plain, non-symbolic allele may contain. ``<DEL>``, ``*`` and ``.`` are
@@ -72,6 +89,38 @@ class ReferenceLookup(Protocol):
         ...
 
 
+class ReferenceStatus(StrEnum):
+    """What the reference was able to tell the rule about *this one* allele.
+
+    Per-allele, and deliberately not the same axis as
+    :class:`LeftAlignmentStatus`, which is a per-batch summary. A caller building
+    a batch report derives the batch status from these; a caller building a single
+    join key branches on this one directly.
+    """
+
+    NOT_SUPPLIED = "not_supplied"
+    """No :class:`ReferenceLookup` was passed. The result is trimmed only, and an
+    indel may be spelled differently from a left-aligned source."""
+
+    USABLE = "usable"
+    """A reference was supplied and every base the rule needed from it was read.
+
+    Vacuously true when the rule needed no base at all — a SNV, an allele already
+    proven left-most by its own last bases, or a variant at position 1. The claim
+    being made is "nothing the rule asked for was denied", not "a read happened",
+    and for representation purposes those have the same consequence: the result
+    *is* the left-most spelling."""
+
+    UNUSABLE = "unusable"
+    """A base the rule needed could not be read: the accessor raised, the contig is
+    absent, the sequence came back empty mid-contig, or it was not a nucleotide.
+
+    **The result is trimmed only and is not proven left-most.** It must never be
+    reported as reference-backed canonicalisation. This is the state that used to
+    be indistinguishable from success, and the one that silently turned a common
+    gnomAD allele into "frequency unknown"."""
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalAllele:
     """A canonicalised ``(position, ref, alt)`` and the account of how it got there.
@@ -85,12 +134,19 @@ class CanonicalAllele:
     It names only what actually happened. ``left_align`` is absent when no
     reference was supplied, because recording an operation that was never
     performed is a provenance lie no downstream consumer can detect.
+
+    ``reference_status`` is that same discipline applied to the failure case.
+    ``operations`` answers "did the position move"; a position that did *not* move
+    is ambiguous on its own — it may be already left-most, or the reference may
+    have been unreadable. Only ``reference_status`` separates those, and the
+    separation is the difference between a trustworthy join key and a silent miss.
     """
 
     position: int
     ref: str
     alt: str
     operations: tuple[str, ...]
+    reference_status: ReferenceStatus = ReferenceStatus.NOT_SUPPLIED
 
     @property
     def trimmed(self) -> bool:
@@ -100,6 +156,18 @@ class CanonicalAllele:
     def left_aligned(self) -> bool:
         """True only when the position actually moved leftwards."""
         return OP_LEFT_ALIGN in self.operations
+
+    @property
+    def left_alignment_proven(self) -> bool:
+        """True when this spelling is the left-most one, and that was *established*.
+
+        The property an adapter must branch on before claiming
+        :attr:`LeftAlignmentStatus.APPLIED`. False both when no reference was
+        supplied and when the one supplied could not be read — two different
+        operator problems (configure a FASTA / fix the FASTA you configured) with
+        the same consequence for this allele's join key.
+        """
+        return self.reference_status is ReferenceStatus.USABLE
 
     @property
     def changed(self) -> bool:
@@ -139,32 +207,61 @@ def canonicalise_allele(
             **not** left-aligned, and ``operations`` will not claim otherwise.
 
     Returns:
-        The canonical allele. Non-sequence alleles (``*``, ``.``, ``<DEL>``, an
-        empty string) are returned verbatim with no operations, because there is no
-        defined trimming or shifting of a symbolic allele and inventing one would
-        move a coordinate on a guess.
+        The canonical allele, carrying both what was done to it (``operations``)
+        and how far the reference could be trusted (``reference_status``).
+        Non-sequence alleles (``*``, ``.``, ``<DEL>``, an empty string) are returned
+        verbatim with no operations, because there is no defined trimming or
+        shifting of a symbolic allele and inventing one would move a coordinate on
+        a guess.
+
+    Does not raise on a broken reference. This function's return type has room for
+    the degraded state, so it reports it rather than raising; a per-record
+    exception in a whole-callset loop would turn one bad base into a dead run,
+    which GP-13 forbids for a record-level problem. The one thing it may not do is
+    stay silent — see :class:`ReferenceStatus`.
     """
     if not is_sequence_allele(ref) or not is_sequence_allele(alt):
-        return CanonicalAllele(position=position, ref=ref, alt=alt, operations=())
+        return CanonicalAllele(
+            position=position,
+            ref=ref,
+            alt=alt,
+            operations=(),
+            reference_status=(
+                ReferenceStatus.NOT_SUPPLIED if reference is None else ReferenceStatus.USABLE
+            ),
+        )
 
     trimmed_position, trimmed_ref, trimmed_alt = trim_parsimoniously(position, ref, alt)
     trimmed = (trimmed_position, trimmed_ref, trimmed_alt) != (position, ref, alt)
 
     shifted = False
+    status = ReferenceStatus.NOT_SUPPLIED
     if reference is not None:
-        shift_position, shift_ref, shift_alt = _left_shift(
-            contig, trimmed_position, trimmed_ref, trimmed_alt, reference
-        )
-        shifted = (shift_position, shift_ref, shift_alt) != (
-            trimmed_position,
-            trimmed_ref,
-            trimmed_alt,
-        )
-        # Re-trim: the shift loop grows the alleles leftwards by one anchor base at
-        # a time, and the standard requires the final form to be parsimonious.
-        after = trim_parsimoniously(shift_position, shift_ref, shift_alt)
-        trimmed = trimmed or after != (shift_position, shift_ref, shift_alt)
-        trimmed_position, trimmed_ref, trimmed_alt = after
+        status = ReferenceStatus.USABLE
+        try:
+            shift_position, shift_ref, shift_alt = _left_shift(
+                contig, trimmed_position, trimmed_ref, trimmed_alt, reference
+            )
+        except ReferenceUnusableError:
+            # The single place in this module that converts the loud failure into a
+            # declared state, and the only legitimate thing to do with it is report
+            # it. The *trimmed* form is kept rather than the partially shifted one:
+            # an allele abandoned half way through a repeat tract sits at neither
+            # the input position nor the left-most one, so it would join against
+            # neither the source nor another run of this pipeline over the same
+            # input. Trim-only is at least a defined, reproducible representation.
+            status = ReferenceStatus.UNUSABLE
+        else:
+            shifted = (shift_position, shift_ref, shift_alt) != (
+                trimmed_position,
+                trimmed_ref,
+                trimmed_alt,
+            )
+            # Re-trim: the shift loop grows the alleles leftwards by one anchor base
+            # at a time, and the standard requires the final form to be parsimonious.
+            after = trim_parsimoniously(shift_position, shift_ref, shift_alt)
+            trimmed = trimmed or after != (shift_position, shift_ref, shift_alt)
+            trimmed_position, trimmed_ref, trimmed_alt = after
 
     operations: list[str] = []
     if shifted:
@@ -176,6 +273,7 @@ def canonicalise_allele(
         ref=trimmed_ref,
         alt=trimmed_alt,
         operations=tuple(operations),
+        reference_status=status,
     )
 
 
@@ -212,6 +310,16 @@ def _left_shift(
     preceding reference base to both and step POS back by one. A complex
     substitution — both alleles longer than one base after trimming — is not a
     shiftable indel and is left where it is.
+
+    Every base this loop asks for is one it has already established the shift needs
+    and that lies at ``position - 1`` with ``position > 1``, i.e. inside a contig
+    the record claims to be on. A reference that cannot supply it is broken, not
+    exhausted, so this raises rather than stopping — stopping would be
+    indistinguishable from "already left-most".
+
+    Raises:
+        ReferenceUnusableError: the reference could not supply a base the shift
+            required.
     """
     for _ in range(MAX_SHIFT_BP):
         while len(ref) > 1 and len(alt) > 1 and ref[-1] == alt[-1]:
@@ -221,24 +329,46 @@ def _left_shift(
         if ref[-1] != alt[-1]:
             break  # already left-most
         if position <= 1:
-            break
-        base = _fetch_base(reference, contig, position - 1)
-        if base is None:
-            break
+            break  # nothing exists to the left of the first base of a contig
+        base = _required_base(reference, contig, position - 1)
         ref, alt = base + ref, base + alt
         position -= 1
     return position, ref, alt
 
 
-def rightmost_equivalent_position(
+@dataclass(frozen=True, slots=True)
+class QueryBound:
+    """How far right a region query must reach, and whether that bound was proven.
+
+    The two halves have to travel together. A bound alone cannot distinguish "the
+    reference proved there is no equivalent spelling further right" from "the
+    reference could not be read, so this is merely the furthest point I got to" —
+    and those have opposite consequences for whether an empty query result means
+    the source has no record.
+    """
+
+    position: int
+    reference_status: ReferenceStatus
+
+    @property
+    def proven(self) -> bool:
+        """True when the bound is the reference's answer rather than a stopping point."""
+        return self.reference_status is ReferenceStatus.USABLE
+
+
+def rightmost_equivalent_bound(
     *,
     contig: str,
     position: int,
     ref: str,
     alt: str,
     reference: ReferenceLookup,
-) -> int:
-    """POS of the right-most legal spelling of this same event.
+) -> QueryBound:
+    """POS of the right-most legal spelling of this same event, plus its provenance.
+
+    **This is the form callers should use.** :func:`rightmost_equivalent_position`
+    returns the same number with the provenance discarded, which is the shape that
+    made an unreadable reference indistinguishable from a proven bound.
 
     The mirror of :func:`_left_shift`, and it exists for one job: deciding how far
     to the *right* a region query must reach to be sure it has seen every source
@@ -261,24 +391,72 @@ def rightmost_equivalent_position(
 
     Returns ``position`` for symbolic alleles and for complex substitutions, which
     do not shift.
+
+    Two ways of running out of reference, and they are not the same:
+
+    * **Past the end of the contig.** This loop reads *beyond* the record's own
+      span, so an empty read there is the reference correctly reporting where the
+      chromosome stops. The bound is complete and ``reference_status`` stays
+      ``USABLE``.
+    * **The reference is broken.** It raised, the contig is absent, or it returned
+      something that is not a nucleotide. The loop stops where it is and the bound
+      is reported ``UNUSABLE`` — because a bound that stops early makes the fetch
+      window too small, and a source record lost to the *fetch* is
+      indistinguishable, from outside, from one lost to the key, which is in turn
+      indistinguishable from the source genuinely having nothing.
+
+    An under-reaching bound is not, on its own, a new failure: an unreadable
+    reference has already left the *query key* trimmed-only, so a right-shifted
+    source record would not have joined even if it had been fetched. What matters
+    is that the caller can tell, which is what this return type is for.
     """
     if not is_sequence_allele(ref) or not is_sequence_allele(alt):
-        return position
+        return QueryBound(position=position, reference_status=ReferenceStatus.USABLE)
     position, ref, alt = trim_parsimoniously(position, ref, alt)
     if len(ref) == len(alt):
-        return position  # a substitution occupies fixed bases and cannot shift
+        # A substitution occupies fixed bases and cannot shift.
+        return QueryBound(position=position, reference_status=ReferenceStatus.USABLE)
     for _ in range(MAX_SHIFT_BP):
         if len(ref) > 1 and len(alt) > 1:
             break  # a complex substitution, not a shiftable indel
-        base = _fetch_base(reference, contig, position + len(ref))
+        try:
+            base = _read_one_base(reference, contig, position + len(ref))
+        except ReferenceUnusableError:
+            return QueryBound(position=position, reference_status=ReferenceStatus.UNUSABLE)
         if base is None:
-            break
+            break  # past the end of the contig: absence, not breakage
         grown_ref, grown_alt = ref + base, alt + base
         moved, next_ref, next_alt = _trim_shared_prefix(position, grown_ref, grown_alt)
         if moved == position:
             break  # growing rightwards bought no shift; this is the right-most form
         position, ref, alt = moved, next_ref, next_alt
-    return position
+    return QueryBound(position=position, reference_status=ReferenceStatus.USABLE)
+
+
+def rightmost_equivalent_position(
+    *,
+    contig: str,
+    position: int,
+    ref: str,
+    alt: str,
+    reference: ReferenceLookup,
+) -> int:
+    """The bound from :func:`rightmost_equivalent_bound`, with its provenance dropped.
+
+    **Retained for the two annotation adapters that already call it, and not the
+    form to write new code against.** An ``int`` has nowhere to say "I could not
+    compute this", so a caller of this function cannot tell a proven right-most
+    position from the point at which a broken reference stopped the search — and
+    that is precisely the class of silence ADR 0018 exists to remove.
+
+    Migrating a caller is one line: take :class:`QueryBound` and branch on
+    :attr:`QueryBound.proven` before treating an empty query result as evidence
+    that the source holds no record (GP-14). The exact diff for both adapters is in
+    ``docs/handoff-integrity.md``.
+    """
+    return rightmost_equivalent_bound(
+        contig=contig, position=position, ref=ref, alt=alt, reference=reference
+    ).position
 
 
 def _trim_shared_prefix(position: int, ref: str, alt: str) -> tuple[int, str, str]:
@@ -293,21 +471,89 @@ def _trim_shared_prefix(position: int, ref: str, alt: str) -> tuple[int, str, st
     return position, ref, alt
 
 
-def _fetch_base(reference: ReferenceLookup, contig: str, position: int) -> str | None:
-    """One reference base, or ``None`` when the lookup cannot supply it.
+def _read_one_base(reference: ReferenceLookup, contig: str, position: int) -> str | None:
+    """One reference base; ``None`` when the reference *has* no base there.
 
-    ``None`` stops the shift rather than raising: an unreadable base is absence of
-    information (GP-14), and the un-shifted representation is still a valid one.
-    A caller-supplied lookup may raise anything, so nothing narrower is caught.
+    The whole point of this function is that those two sentences are different
+    things, and that only one of them is a property of the data:
+
+    * ``None`` — the position lies outside the reference. Before the first base of
+      a contig, or past its last. The reference is working and is telling the
+      truth; a caller that reads beyond a record's own span must accept this.
+    * :class:`~mva.errors.ReferenceUnusableError` — the accessor raised, the contig
+      is not in the index, the sequence came back empty where a base must exist, or
+      it came back as something that is not a nucleotide. Nothing is known.
+
+    A caller-supplied lookup may raise anything, so everything is caught — but it
+    is caught in order to be *re-raised as a named condition*, not to be turned
+    into a return value that reads like ordinary absence. The original exception is
+    suppressed with ``from None`` rather than chained: a genomics backend routinely
+    puts the region it was asked for into its own message, and a chained traceback
+    would carry a proband coordinate into every terminal, log and crash report the
+    traceback reaches (PRIV-09). The exception *type* is safe and is kept, because
+    ``OSError`` and ``KeyError`` mean very different things to whoever debugs this.
     """
     if position < 1:
         return None
     try:
         sequence = reference.fetch(contig, position, position)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise ReferenceUnusableError(
+            _unusable_message(contig, position, reason=f"the accessor raised {type(exc).__name__}")
+        ) from None
     base = sequence.strip().upper()
-    return base if len(base) == 1 and base in NUCLEOTIDES else None
+    if not base:
+        return None
+    if len(base) != 1 or base not in NUCLEOTIDES:
+        raise ReferenceUnusableError(
+            _unusable_message(
+                contig,
+                position,
+                reason=(
+                    f"the accessor returned {len(base)} character(s) that are not a single "
+                    f"nucleotide from {''.join(sorted(NUCLEOTIDES))}"
+                ),
+            )
+        )
+    return base
+
+
+def _required_base(reference: ReferenceLookup, contig: str, position: int) -> str:
+    """A base the rule has already established must exist, or the reference is broken.
+
+    Used by the left shift, which only ever reads at ``position - 1`` for a
+    ``position`` greater than 1 on a contig the record claims to sit on. There is
+    no legitimate way for that base to be missing, so an empty read here is
+    breakage — a truncated FASTA, a mis-built ``.fai``, or the wrong assembly —
+    and not the end of the contig.
+    """
+    base = _read_one_base(reference, contig, position)
+    if base is None:
+        raise ReferenceUnusableError(
+            _unusable_message(
+                contig,
+                position,
+                reason=(
+                    "the accessor returned no sequence for a position inside the contig, "
+                    "which usually means a truncated FASTA, a stale .fai index, or a "
+                    "reference shorter than the assembly the records were called against"
+                ),
+            )
+        )
+    return base
+
+
+def _unusable_message(contig: str, position: int, *, reason: str) -> str:
+    """PRIV-09-safe diagnostic: the problem and the field, never the coordinate."""
+    return (
+        "The reference could not supply a base that left-alignment required: "
+        f"{reason}. Locus handle <locus:{error_token((contig, position))}>; the contig "
+        "and position are tokenised rather than echoed (PRIV-09), and the handle is "
+        "stable within this run so repeated failures at one locus correlate. This is a "
+        "broken reference, NOT a position that legitimately has no base — records "
+        "affected by it are trimmed only and must never be reported as left-aligned "
+        "(ADR 0018, GP-14)."
+    )
 
 
 def is_sequence_allele(allele: str) -> bool:

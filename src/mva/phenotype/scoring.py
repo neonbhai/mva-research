@@ -81,7 +81,11 @@ from mva.models.evidence import (
     make_evidence_id,
 )
 from mva.models.phenotype import ObservationStatus, PhenotypeProfile
-from mva.phenotype.hpo import GeneAssociation, GenePhenotypeIndex
+from mva.phenotype.hpo import (
+    UNCURATED_ASSOCIATION_WEIGHT,
+    GeneAssociation,
+    GenePhenotypeIndex,
+)
 from mva.phenotype.propagation import InferenceBasis, PropagatedProfile
 from mva.phenotype.semantics import PhenotypeSemantics
 from mva.phenotype.similarity import AGGREGATION_CITATION, BestMatch
@@ -154,12 +158,40 @@ _STRENGTH_TO_EVIDENCE: Final[dict[str, EvidenceStrength]] = {
     "strong": EvidenceStrength.STRONG,
     "moderate": EvidenceStrength.MODERATE,
     "supporting": EvidenceStrength.SUPPORTING,
+    "limited": EvidenceStrength.WEAK,
+    "disputed": EvidenceStrength.INSUFFICIENT,
+    "refuted": EvidenceStrength.INSUFFICIENT,
+    "no known disease relationship": EvidenceStrength.INSUFFICIENT,
 }
 
+#: What an association carries when NO source classifies the gene's validity.
+#:
+#: ``INSUFFICIENT`` is the honest reading of "nobody has curated this": the evidence
+#: for the gene-disease relationship is not weak, it is unstated. It is deliberately
+#: not ``SUPPORTING``, which would assert a curation nobody made (ADR 0021).
+_UNCURATED_EVIDENCE_STRENGTH: Final[EvidenceStrength] = EvidenceStrength.INSUFFICIENT
+
+
+def _evidence_strength(assoc: GeneAssociation) -> EvidenceStrength:
+    """Evidence strength for one association, absence included (ADR 0021)."""
+    if assoc.association_strength is None:
+        return _UNCURATED_EVIDENCE_STRENGTH
+    return _STRENGTH_TO_EVIDENCE[assoc.association_strength]
+
+
+def _strength_phrase(assoc: GeneAssociation) -> str:
+    """``"a definitive"`` / ``"an uncurated"`` — the article travels with the word."""
+    if assoc.association_strength is None:
+        return "an uncurated (no source classifies this gene's disease validity)"
+    return f"a {assoc.association_strength}"
+
+
 _CURATION_LIMITATION: Final[str] = (
-    "HPO gene-phenotype association strength is a human curation judgement, not a "
+    "Gene-phenotype association strength is a human curation judgement, not a "
     "measurement: it reflects how much has been published about a gene, which "
-    "correlates with study effort as much as with biology."
+    "correlates with study effort as much as with biology. It is also a GENE-level "
+    "clinical-validity classification, so it does not vary between the terms of one "
+    "gene and cannot discriminate within it (ADR 0021)."
 )
 
 _EXACT_MODE_LIMITATION: Final[str] = (
@@ -575,8 +607,15 @@ def _compute_breakdown_exact(
     that "should" produce the same values is exactly how a silent re-baseline
     happens.
     """
-    matched_weight = sum(assoc.weight for assoc in partition.matched)
-    contradicted_weight = sum(assoc.weight for assoc in partition.contradicted)
+    # UNCURATED_ASSOCIATION_WEIGHT is named here, not defaulted inside the property:
+    # what an unclassified gene-disease relationship contributes is a scientific
+    # choice and stays visible at the call site (ADR 0021).
+    matched_weight = sum(
+        assoc.weight_or(UNCURATED_ASSOCIATION_WEIGHT) for assoc in partition.matched
+    )
+    contradicted_weight = sum(
+        assoc.weight_or(UNCURATED_ASSOCIATION_WEIGHT) for assoc in partition.contradicted
+    )
     informative_weight = matched_weight + contradicted_weight
     observed_count = len(profile.observed_terms)
 
@@ -664,11 +703,13 @@ def _compute_breakdown_ontology(
         count is reported so the reader knows the scaling did not apply.
         """
         nonlocal ic_missing
+        # See _compute_breakdown_exact: the uncurated weight is named, never defaulted.
+        curated = assoc.weight_or(UNCURATED_ASSOCIATION_WEIGHT)
         scale = information_content.normalised_ic(assoc.hpo_id)
         if scale is None:
             ic_missing += 1
-            return assoc.weight
-        return assoc.weight * scale
+            return curated
+        return curated * scale
 
     matched_weight = sum(scaled(assoc) for assoc in partition.matched)
     contradicted_weight = sum(scaled(assoc) for assoc in partition.contradicted)
@@ -1138,11 +1179,11 @@ def _observation_items(
                         if via_graph
                         else "OBSERVED in this subject"
                     )
-                    + f" and is a {assoc.association_strength} phenotype association of "
+                    + f" and is {_strength_phrase(assoc)} phenotype association of "
                     f"{gene_symbol}."
                 ),
                 direction=EvidenceDirection.SUPPORTS,
-                strength=_STRENGTH_TO_EVIDENCE[assoc.association_strength],
+                strength=_evidence_strength(assoc),
                 evidence_type=(
                     EvidenceType.PIPELINE_INFERENCE
                     if via_graph
@@ -1174,11 +1215,15 @@ def _observation_items(
                 ),
                 citation=citation,
                 clock=clock,
-                numeric_value=assoc.weight,
+                numeric_value=assoc.weight_or(UNCURATED_ASSOCIATION_WEIGHT),
                 payload={
                     "hpo_id": assoc.hpo_id,
                     "status": ObservationStatus.OBSERVED.value,
-                    "association_strength": assoc.association_strength,
+                    "association_strength": assoc.association_strength or "",
+                    "association_strength_source": assoc.association_strength_source or "",
+                    "hpo_frequency": (
+                        assoc.hpo_frequency.raw if assoc.hpo_frequency is not None else ""
+                    ),
                     "entailed": via_graph,
                 },
             )
@@ -1196,11 +1241,11 @@ def _observation_items(
                         if via_graph
                         else "assessed and EXCLUDED in this subject"
                     )
-                    + f", yet is a {assoc.association_strength} phenotype association of "
+                    + f", yet is {_strength_phrase(assoc)} phenotype association of "
                     f"{gene_symbol}; this argues against {gene_symbol}."
                 ),
                 direction=EvidenceDirection.CONTRADICTS,
-                strength=_STRENGTH_TO_EVIDENCE[assoc.association_strength],
+                strength=_evidence_strength(assoc),
                 evidence_type=(
                     EvidenceType.PIPELINE_INFERENCE
                     if via_graph
@@ -1234,11 +1279,15 @@ def _observation_items(
                 ),
                 citation=citation,
                 clock=clock,
-                numeric_value=assoc.weight,
+                numeric_value=assoc.weight_or(UNCURATED_ASSOCIATION_WEIGHT),
                 payload={
                     "hpo_id": assoc.hpo_id,
                     "status": ObservationStatus.EXCLUDED.value,
-                    "association_strength": assoc.association_strength,
+                    "association_strength": assoc.association_strength or "",
+                    "association_strength_source": assoc.association_strength_source or "",
+                    "hpo_frequency": (
+                        assoc.hpo_frequency.raw if assoc.hpo_frequency is not None else ""
+                    ),
                     "entailed": via_graph,
                 },
             )
@@ -1266,7 +1315,7 @@ def _information_gap_items(
             _make_item(
                 gene_symbol=gene_symbol,
                 claim=(
-                    f"{assoc.hpo_id} ({assoc.label}) is a {assoc.association_strength} "
+                    f"{assoc.hpo_id} ({assoc.label}) is {_strength_phrase(assoc)} "
                     f"phenotype association of {gene_symbol} but was NOT ASSESSED in this "
                     "subject; it contributes zero to the score in either direction."
                 ),
@@ -1291,7 +1340,11 @@ def _information_gap_items(
                 payload={
                     "hpo_id": assoc.hpo_id,
                     "status": ObservationStatus.NOT_ASSESSED.value,
-                    "association_strength": assoc.association_strength,
+                    "association_strength": assoc.association_strength or "",
+                    "association_strength_source": assoc.association_strength_source or "",
+                    "hpo_frequency": (
+                        assoc.hpo_frequency.raw if assoc.hpo_frequency is not None else ""
+                    ),
                 },
             )
         )
@@ -1300,7 +1353,7 @@ def _information_gap_items(
             _make_item(
                 gene_symbol=gene_symbol,
                 claim=(
-                    f"{assoc.hpo_id} ({assoc.label}) is a {assoc.association_strength} "
+                    f"{assoc.hpo_id} ({assoc.label}) is {_strength_phrase(assoc)} "
                     f"phenotype association of {gene_symbol} but was recorded as UNCERTAIN "
                     "in this subject; it contributes zero to the score in either direction."
                 ),
@@ -1327,7 +1380,11 @@ def _information_gap_items(
                 payload={
                     "hpo_id": assoc.hpo_id,
                     "status": ObservationStatus.UNCERTAIN.value,
-                    "association_strength": assoc.association_strength,
+                    "association_strength": assoc.association_strength or "",
+                    "association_strength_source": assoc.association_strength_source or "",
+                    "hpo_frequency": (
+                        assoc.hpo_frequency.raw if assoc.hpo_frequency is not None else ""
+                    ),
                 },
             )
         )

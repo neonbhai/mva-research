@@ -42,7 +42,10 @@ from tools.build_knowledge.gene_disease import (  # noqa: E402
     try_parse_ddg2p,
 )
 from tools.build_knowledge.gene_phenotype import (  # noqa: E402
+    CURATED_VALIDITY_RANK,
+    EXCLUDED_FREQUENCY_TERM,
     GENE_PHENOTYPE_COLUMNS,
+    curated_strength_by_gene,
     parse_gene_to_phenotype,
     read_hpo_release,
 )
@@ -404,10 +407,18 @@ def _write_hpo_fixtures(hpoa_path: Path, genes_to_phenotype_path: Path) -> None:
         "1\tGENE_A\tHP:0000001\tTerm One\t-\tOMIM:111\n",
         "1\tGENE_A\tHP:0000001\tTerm One\t3/5\tOMIM:222\n",
         "1\tGENE_A\tHP:0000002\tTerm Two\tHP:0040281\tOMIM:111\n",
+        # A NEGATED annotation (Excluded, 0% of cases): dropped and counted, never
+        # rendered as an association with an empty frequency.
+        f"1\tGENE_A\tHP:0000003\tTerm Three\t{EXCLUDED_FREQUENCY_TERM}\tOMIM:111\n",
         # Not in the restriction set -- must be excluded entirely.
         "2\tGENE_NOT_RESTRICTED\tHP:0000009\tTerm Nine\t-\tOMIM:999\n",
     ]
     genes_to_phenotype_path.write_text("".join(lines), encoding="utf-8")
+
+
+#: Curated clinical validity for the HPO fixture's genes, shaped like
+#: :func:`curated_strength_by_gene`'s output: (classification, source panel).
+_FIXTURE_STRENGTHS: dict[str, tuple[str, str]] = {"GENE_A": ("definitive", "ClinGen")}
 
 
 def test_hpo_release_is_read_from_phenotype_hpoa_header(tmp_path: Path) -> None:
@@ -422,19 +433,126 @@ def test_gene_phenotype_dash_becomes_none_not_a_fabricated_value(tmp_path: Path)
     _write_hpo_fixtures(hpoa, genes_to_phenotype)
 
     result = parse_gene_to_phenotype(
-        genes_to_phenotype, restrict_to_genes={"GENE_A", "GENE_Z"}, version="2099-09-09"
+        genes_to_phenotype,
+        restrict_to_genes={"GENE_A", "GENE_Z"},
+        version="2099-09-09",
+        curated_strengths=_FIXTURE_STRENGTHS,
     )
     by_pair = {(row.gene_symbol, row.hpo_id): row for row in result.rows}
 
     # The pair with one real and one unstated frequency keeps the REAL one, even
     # though the unstated ('-') row appeared first in the source file.
-    assert by_pair[("GENE_A", "HP:0000001")].association_strength == "3/5"
-    assert by_pair[("GENE_A", "HP:0000002")].association_strength == "HP:0040281"
+    assert by_pair[("GENE_A", "HP:0000001")].hpo_frequency == "3/5"
+    assert by_pair[("GENE_A", "HP:0000002")].hpo_frequency == "HP:0040281"
 
     # A restricted-in gene with zero matching rows is reported, not silently absent.
     assert "GENE_Z" in result.genes_unmatched
     # A gene outside the restriction set never appears.
     assert "GENE_NOT_RESTRICTED" not in {r.gene_symbol for r in result.rows}
+
+
+def test_gene_phenotype_frequency_never_lands_in_the_strength_column(tmp_path: Path) -> None:
+    """ADR 0021's mutation guard, at the generator end.
+
+    HPO frequency and curated clinical validity are different quantities. This asserts
+    the generator writes each into its own column: reintroducing the conflation (a
+    frequency token emitted as ``association_strength``) fails here, and would also
+    fail ``test_real_gene_phenotype_association_strength_is_curated_validity`` and the
+    reader's ``test_hpo_frequency_token_is_refused_as_an_association_strength``.
+    """
+    hpoa = tmp_path / "phenotype.hpoa"
+    genes_to_phenotype = tmp_path / "genes_to_phenotype.txt"
+    _write_hpo_fixtures(hpoa, genes_to_phenotype)
+
+    result = parse_gene_to_phenotype(
+        genes_to_phenotype,
+        restrict_to_genes={"GENE_A"},
+        version="2099-09-09",
+        curated_strengths=_FIXTURE_STRENGTHS,
+    )
+    assert result.rows
+    for row in result.rows:
+        # Validity comes from the curation panels, verbatim, with its provenance.
+        assert row.association_strength == "definitive"
+        assert row.association_strength_source == "ClinGen"
+        # ...and never carries a frequency spelling.
+        assert not (row.association_strength or "").startswith("HP:")
+        assert "/" not in (row.association_strength or "")
+        assert "%" not in (row.association_strength or "")
+
+
+def test_gene_phenotype_strength_is_absent_when_no_source_curates_the_gene(
+    tmp_path: Path,
+) -> None:
+    """A gene with no curated clinical-validity record gets an EMPTY strength and is
+    counted, not a default. GP-14: nobody classified this gene is not 'weak'.
+    """
+    hpoa = tmp_path / "phenotype.hpoa"
+    genes_to_phenotype = tmp_path / "genes_to_phenotype.txt"
+    _write_hpo_fixtures(hpoa, genes_to_phenotype)
+
+    result = parse_gene_to_phenotype(
+        genes_to_phenotype,
+        restrict_to_genes={"GENE_A"},
+        version="2099-09-09",
+        curated_strengths={},  # nothing curated at all
+    )
+    assert result.rows
+    assert all(row.association_strength is None for row in result.rows)
+    assert all(row.association_strength_source is None for row in result.rows)
+    assert all(format_cell(row.association_strength) == "" for row in result.rows)
+    assert result.genes_without_curated_strength == ("GENE_A",)
+    assert result.rows_without_curated_strength == len(result.rows)
+
+
+def test_gene_phenotype_drops_negated_hp0040285_rows_and_counts_them(tmp_path: Path) -> None:
+    """HP:0040285 (Excluded, 0% of cases) says the feature is NOT part of the disease.
+    Emitting it with an empty frequency would make it indistinguishable from 'not
+    stated', so it is dropped and the count is reported for the table's header.
+    """
+    hpoa = tmp_path / "phenotype.hpoa"
+    genes_to_phenotype = tmp_path / "genes_to_phenotype.txt"
+    _write_hpo_fixtures(hpoa, genes_to_phenotype)
+
+    result = parse_gene_to_phenotype(
+        genes_to_phenotype,
+        restrict_to_genes={"GENE_A"},
+        version="2099-09-09",
+        curated_strengths=_FIXTURE_STRENGTHS,
+    )
+    assert result.excluded_frequency_rows == 1
+    assert "HP:0000003" not in {row.hpo_id for row in result.rows}
+
+
+def test_curated_strength_by_gene_takes_the_strongest_across_both_panels() -> None:
+    strengths = curated_strength_by_gene(
+        [
+            ("GENE_A", "Disputed", "ClinGen"),
+            ("GENE_A", "definitive", "DDG2P"),
+            ("GENE_D", "Refuted", "ClinGen"),
+            ("GENE_E", "Limited", "ClinGen"),
+            ("GENE_E", "moderate", "DDG2P"),
+        ]
+    )
+    # Case is folded (ClinGen 'Definitive' == DDG2P 'definitive'); the strongest wins,
+    # and the panel that made the winning call is recorded with it.
+    assert strengths["GENE_A"] == ("definitive", "DDG2P")
+    assert strengths["GENE_D"] == ("refuted", "ClinGen")
+    assert strengths["GENE_E"] == ("moderate", "DDG2P")
+
+
+def test_curated_strength_by_gene_refuses_an_unrecognised_curation_tier() -> None:
+    """A new ClinGen/DDG2P tier is a change in the source's curation model. Ranking it
+    silently to the bottom would quietly down-weight every gene carrying it.
+    """
+    with pytest.raises(ValueError, match="Unknown gene-disease validity classification"):
+        curated_strength_by_gene([("GENE_A", "probably fine", "ClinGen")])
+    # ...and the message names the vocabulary the caller must extend.
+    try:
+        curated_strength_by_gene([("GENE_A", "probably fine", "ClinGen")])
+    except ValueError as exc:
+        for tier in CURATED_VALIDITY_RANK:
+            assert tier in str(exc)
 
 
 def test_gene_phenotype_no_source_row_ever_becomes_a_zero_or_empty_string_association(
@@ -452,11 +570,14 @@ def test_gene_phenotype_no_source_row_ever_becomes_a_zero_or_empty_string_associ
     )
     hpoa.write_text(_HPOA_FIXTURE, encoding="utf-8")
     result = parse_gene_to_phenotype(
-        genes_to_phenotype, restrict_to_genes={"GENE_A"}, version="2099-09-09"
+        genes_to_phenotype,
+        restrict_to_genes={"GENE_A"},
+        version="2099-09-09",
+        curated_strengths=_FIXTURE_STRENGTHS,
     )
     (row,) = result.rows
-    assert row.association_strength is None
-    assert format_cell(row.association_strength) == ""
+    assert row.hpo_frequency is None
+    assert format_cell(row.hpo_frequency) == ""
 
 
 # --------------------------------------------------------------------------- sanity checks
@@ -492,7 +613,12 @@ def test_every_source_reader_rejects_html_garbage_instead_of_silently_succeeding
     genes_to_phenotype_path = tmp_path / "genes_to_phenotype.txt"
     genes_to_phenotype_path.write_bytes(_HTML_GARBAGE)
     with pytest.raises(ValueError, match="missing column"):
-        parse_gene_to_phenotype(genes_to_phenotype_path, restrict_to_genes={"X"}, version="v1")
+        parse_gene_to_phenotype(
+            genes_to_phenotype_path,
+            restrict_to_genes={"X"},
+            version="v1",
+            curated_strengths={},
+        )
 
     ddg2p_path = tmp_path / "DDG2P.csv"
     ddg2p_path.write_bytes(_HTML_GARBAGE)
@@ -688,14 +814,23 @@ def test_real_gene_disease_some_ddg2p_rows_have_no_disease_id_and_that_is_visibl
     assert f"{len(missing_disease_id)} of {len(ddg2p_rows)} rows" in comments
 
 
-def test_real_gene_phenotype_matches_synthetic_table_columns() -> None:
-    """Requirement: the real table's columns match the shipped synthetic demo table's
-    columns, so a future integration only has to change *values*, not column names.
+def test_real_gene_phenotype_is_a_superset_of_the_readers_required_columns() -> None:
+    """ADR 0021 replaced "the two tables have identical headers" with the property that
+    actually matters: ONE reader loads both. The real table carries two extra columns
+    the synthetic demo table has no use for (``hpo_frequency``,
+    ``association_strength_source``); both are optional to the reader, so a demo file
+    without them is not a file whose phenotypes never occur.
     """
+    from mva.phenotype import GENE_PHENOTYPE_COLUMNS as READER_REQUIRED_COLUMNS
+    from mva.phenotype import OPTIONAL_GENE_PHENOTYPE_COLUMNS
+
     synthetic_header, _ = _read_tsv_rows(KNOWLEDGE_PUBLIC / "gene_phenotype.tsv")
     real_header, real_rows = _read_tsv_rows(KNOWLEDGE_REAL / "gene_phenotype.tsv")
-    assert real_header == synthetic_header == list(GENE_PHENOTYPE_COLUMNS)
+    assert real_header == list(GENE_PHENOTYPE_COLUMNS)
     assert real_rows
+    assert set(READER_REQUIRED_COLUMNS) <= set(real_header)
+    assert set(READER_REQUIRED_COLUMNS) <= set(synthetic_header)
+    assert set(real_header) - set(synthetic_header) == set(OPTIONAL_GENE_PHENOTYPE_COLUMNS)
 
 
 def test_real_gene_phenotype_never_carries_hpos_own_missing_sentinel() -> None:
@@ -703,9 +838,57 @@ def test_real_gene_phenotype_never_carries_hpos_own_missing_sentinel() -> None:
     string '-' -- otherwise a naive downstream reader could mistake it for data.
     """
     _, rows = _read_tsv_rows(KNOWLEDGE_REAL / "gene_phenotype.tsv")
+    frequencies = {row["hpo_frequency"] for row in rows}
+    assert "-" not in frequencies
+    assert "" in frequencies  # unstated frequency does appear, just as an empty cell
+
+
+def test_real_gene_phenotype_association_strength_is_curated_validity() -> None:
+    """TD-17 / ADR 0021 regression lock, on the committed bytes.
+
+    Every non-empty ``association_strength`` must be a curated clinical-validity
+    classification that the reader's weight table knows, and NONE of them may be HPO
+    frequency vocabulary. Reintroducing the conflation -- pointing this column back at
+    the HPO frequency field -- fails this test by name.
+    """
+    from mva.phenotype import STRENGTH_WEIGHTS, looks_like_hpo_frequency
+
+    _, rows = _read_tsv_rows(KNOWLEDGE_REAL / "gene_phenotype.tsv")
     strengths = {row["association_strength"] for row in rows}
-    assert "-" not in strengths
-    assert "" in strengths  # unstated frequency does appear, just as an empty cell
+    offending = sorted(value for value in strengths if value and looks_like_hpo_frequency(value))
+    assert not offending, (
+        f"association_strength carries HPO FREQUENCY vocabulary {offending}. That column "
+        "holds curated gene-disease clinical validity; frequency belongs in "
+        "hpo_frequency (ADR 0021)."
+    )
+    unknown = sorted(value for value in strengths if value and value not in STRENGTH_WEIGHTS)
+    assert not unknown, f"unweightable association_strength values: {unknown}"
+    # The real curation vocabulary is genuinely exercised, not just one tier.
+    assert {"definitive", "strong", "moderate", "limited"} <= strengths
+    # ...and every classified row names the panel that classified it (GP-31).
+    for row in rows:
+        assert bool(row["association_strength"]) == bool(row["association_strength_source"])
+    assert {row["association_strength_source"] for row in rows} <= {"", "ClinGen", "DDG2P"}
+
+
+def test_real_gene_phenotype_frequency_column_carries_the_hpo_vocabulary() -> None:
+    """The frequency data was not lost in the rename: every non-empty cell parses
+    through the reader's own frequency parser, and all three spellings are present.
+    """
+    from mva.phenotype import HPO_FREQUENCY_TERMS, HpoFrequencyKind, parse_hpo_frequency
+
+    _, rows = _read_tsv_rows(KNOWLEDGE_REAL / "gene_phenotype.tsv")
+    kinds: set[HpoFrequencyKind] = set()
+    terms_seen: set[str] = set()
+    for value in {row["hpo_frequency"] for row in rows}:
+        parsed = parse_hpo_frequency(value, context="knowledge/real/gene_phenotype.tsv")
+        if parsed is None:
+            continue
+        kinds.add(parsed.kind)
+        if parsed.kind is HpoFrequencyKind.TERM:
+            terms_seen.add(parsed.raw)
+    assert kinds == set(HpoFrequencyKind)
+    assert terms_seen == set(HPO_FREQUENCY_TERMS)
 
 
 def test_real_tables_carry_true_provenance_not_the_synthetic_labels() -> None:
@@ -741,3 +924,25 @@ def test_real_tables_are_reproducible_from_the_committed_generator(tmp_path: Pat
     build_all(resources_root, out_b)
     for name in ("gene_panel.tsv", "gene_disease.tsv", "gene_phenotype.tsv"):
         assert (out_a / name).read_bytes() == (out_b / name).read_bytes()
+
+
+# --------------------------------------------------------------- TD-17 reproduction
+
+
+def test_real_gene_phenotype_table_loads_through_the_reader() -> None:
+    """TD-17 reproduction, now the acceptance test (ADR 0021).
+
+    Before the fix this raised ``IngestionError: Unknown association_strength '' for
+    A2ML1`` on the very first data row, and no code path could use the table at all.
+    """
+    from mva.phenotype import UNCURATED_ASSOCIATION_WEIGHT, GenePhenotypeIndex
+
+    index = GenePhenotypeIndex.from_tsv(KNOWLEDGE_REAL / "gene_phenotype.tsv", version="2026-06-23")
+    assert len(index) == 221_789
+    assert len(index.gene_symbols) == 3_634
+
+    # A real gene resolves, carries both qualifiers, and is weightable.
+    associations = index.terms_for_gene("BUB1B")
+    assert len(associations) == 112
+    assert all(assoc.weight_or(UNCURATED_ASSOCIATION_WEIGHT) > 0.0 for assoc in associations)
+    assert any(assoc.hpo_frequency is not None for assoc in associations)

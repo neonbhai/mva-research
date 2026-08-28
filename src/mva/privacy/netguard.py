@@ -14,10 +14,20 @@ run stops loudly instead of shipping a proband's coordinates to a third party.
   ``connect(2)``, ``getaddrinfo(3)`` and libcurl from C. No Python audit event is
   emitted, so nothing here fires. This is not a corner case — it is the primary
   genomics I/O path in this project.
-* **Subprocesses are unpoliced.** Audit hooks are per-interpreter. Once
-  ``bcftools``/``samtools``/``git`` is spawned it has an unrestricted network.
+* **Subprocesses are unpoliced, and one of them holds patient coordinates.**
+  Audit hooks are per-interpreter. Once a child is spawned it has an unrestricted
+  network for its whole lifetime, and this is not hypothetical here:
+  :mod:`mva.annotation.snpeff_local` starts a JVM and writes a VCF of the
+  proband's coordinates to its stdin. ``-nodownload``/``-noStats``/``-noLog``
+  constrain what SnpEff is *expected* to do — they are flags to a cooperative
+  program, not a boundary around an uncooperative one — and the hand-built
+  6-key child environment removes proxy variables but grants no isolation.
   ``strict=True`` blocks the *spawn*, which is a different and much blunter
-  control.
+  control, and it is not used: ``mva.orchestrator.execute_pipeline`` enters this
+  profile non-strict because strict would also block the ``git`` calls the
+  provenance manifest needs. So nothing in this process stops that child, and
+  nothing in this process can observe it either. See TD-06 and
+  ``docs/handoff-integrity.md`` §3.
 * **``ctypes`` bypasses everything.** ``ctypes.CDLL("libc").connect(...)`` reaches
   the kernel without touching the socket module.
 * **Audit hooks cannot be removed.** ``sys.addaudithook`` is append-only by design
@@ -37,11 +47,31 @@ run stops loudly instead of shipping a proband's coordinates to a third party.
   gets started from Python, which is where a mistake shows up; they are not a
   proof that nothing left.
 
+There is also a structural half, and it has its own limit. The import lint in
+``tests/unit/test_architecture.py`` forbids network clients, ``socket``/``ssl``/
+``asyncio`` and the bypass routes (``ctypes``, ``cffi``, ``subprocess``,
+``importlib``) anywhere on the patient-data path, with a named exemption list. It
+catches the realistic accident. It is an AST lint over import statements, so it
+sees neither a child process nor a C extension nor a run — its docstring says so
+at length, deliberately, because a test whose name implies a guarantee it cannot
+deliver stops people looking.
+
 The real boundary is at the OS: ``sandbox-exec``/Seatbelt with a no-network
 profile, a ``pf`` deny rule for the run user, a network namespace on Linux, or —
-the control that never has a bug — the Wi-Fi switch. ``NetworkProfile.OFFLINE_ENFORCED``
-in :mod:`mva.config` means "this hook is armed **and** an OS control is asserted";
-``OFFLINE_BEST_EFFORT`` means only this hook, and the run manifest records which.
+the control that never has a bug — the Wi-Fi switch. On macOS it must wrap the
+*whole* invocation rather than being applied from inside Python, because that is
+the only way the SnpEff JVM inherits it; a child cannot escape its parent's
+Seatbelt profile, and a wrapper the program applies to itself is a wrapper the
+program can fail to apply::
+
+    sandbox-exec -p '(version 1)(allow default)(deny network-outbound)' \\
+      uv run mva run all --config <case>.yaml
+
+``NetworkProfile.OFFLINE_ENFORCED`` in :mod:`mva.config` means "this hook is armed
+**and** an OS control is asserted"; ``OFFLINE_BEST_EFFORT`` means only this hook,
+and the run manifest records which. Neither is verified: nothing in this process
+can observe an OS control, so ``OFFLINE_ENFORCED`` is the operator's claim and the
+CLI prints it as one.
 
 Who arms it
 -----------

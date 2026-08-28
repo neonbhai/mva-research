@@ -54,3 +54,18 @@ quality:
   # rather than 'low_allele_balance'. In a mosaic aneuploidy disorder, skewed
   # allele balance may be signal rather than artifact.
   mosaic_allele_balance_floor: 0.10
+
+# Candidate selection (ADR 0019). The ONE stage entitled to delete a valid
+# record, so its cut-points are stated apart from the ranking cut-points above:
+# `max_population_frequency` is deliberately LOOSER than
+# `frequency.max_plausible_recessive`, so nothing deleted here was still rankable
+# above zero on rarity (GP-13). Every `retain_*` default is True because absence
+# of information is not negative information (GP-14).
+selection:
+  enabled: true
+  max_population_frequency: 0.02
+  retain_unknown_frequency: true
+  retain_unassessed_impact: true
+  retain_pathogenic_clinical: true
+  drop_without_gene_assignment: true
+  min_splice_ai_delta: 0.2

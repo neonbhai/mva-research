@@ -16,7 +16,6 @@ Two safety properties matter more here than anywhere else in this tool:
 
 from __future__ import annotations
 
-import os
 import time
 import urllib.request
 from collections.abc import Callable
@@ -26,18 +25,28 @@ from typing import Final
 
 from mva.config import find_repo_root, path_is_within
 from mva.determinism import hash_file
+from mva.resources import (
+    SPOT_PLAN,
+    IntegrityRecord,
+    ResourceStatus,
+    spot_digest,
+)
+from mva.resources import ResourceRootError as MvaResourceRootError
+from mva.resources import (
+    resolve_resource_root as resolve_root,
+)
 from tools.acquire.errors import ResourceFetchError, ResourceRootError
+from tools.acquire.formats import probe_format
 from tools.acquire.hosts import assert_allowed_host
-from tools.acquire.models import ResourceEntry, ResourceStatus
+from tools.acquire.models import ResourceEntry
 
 #: Streamed in fixed-size chunks, matching mva.determinism.hash_file's own chunk size,
 #: so neither hashing nor downloading ever holds a whole multi-GB file in memory.
 _CHUNK: Final = 1 << 20
 
-#: $MVA_RESOURCES falls back to this. Chosen to match where this project's own
-#: reference downloads actually live for the hackathon; override with $MVA_RESOURCES
-#: for any other layout.
-DEFAULT_RESOURCE_ROOT: Final[Path] = Path("~/Contri/bio-hackathon/mva-resources").expanduser()
+#: The environment variable that names the external resource root. There is
+#: deliberately NO default path: see :func:`resolve_resource_root`.
+RESOURCE_ROOT_ENV_VAR: Final = "MVA_RESOURCES"
 
 #: Magic bytes for a gzip/BGZF member (BGZF is gzip with a required extra field --
 #: every BGZF stream is also a valid gzip stream and starts with the same two bytes).
@@ -59,19 +68,28 @@ def resolve_resource_root(
     env: dict[str, str] | None = None,
     repo_root: Path | None = None,
 ) -> Path:
-    """Resolve the external resource root, refusing one that resolves inside the repo.
+    """Resolve the external resource root: ``explicit``, else ``$MVA_RESOURCES``.
 
-    Order: ``explicit`` argument, then ``$MVA_RESOURCES``, then
-    :data:`DEFAULT_RESOURCE_ROOT`. ``env`` is injectable (defaults to
-    ``os.environ``-like access via the caller) purely so tests never depend on the
-    real process environment.
+    Delegates to :func:`mva.resources.resolve_resource_root` so the acquisition
+    tool and the pipeline resolve the same root by the same rules — there is no
+    version of this that is safe to have two answers to.
+
+    **There is no default.** An earlier version fell back to a hard-coded
+    ``~/Contri/bio-hackathon/mva-resources``, which is one contributor's layout. On
+    any other machine that resolved to a directory which did not exist, and
+    "resource missing" is indistinguishable from "resource not registered" by the
+    time it reaches an adapter. A guessed path that is wrong is worse than no path,
+    because it fails somewhere less obvious.
+
+    ``must_exist=False``: this is the tool that *creates* the root, so being asked
+    to fetch into a directory that does not exist yet is normal here (it is not, at
+    run time). ``env`` and ``repo_root`` stay injectable so tests never depend on
+    the real process environment or on where the repo happens to live.
     """
-    variables = env if env is not None else os.environ
-    raw = explicit if explicit is not None else variables.get("MVA_RESOURCES")
-    root = Path(raw).expanduser() if raw else DEFAULT_RESOURCE_ROOT
-    repo = (repo_root or find_repo_root()).resolve()
-    _assert_outside_repo(root, repo)
-    return root
+    try:
+        return resolve_root(explicit, repo_root=repo_root, env=env, must_exist=False).root
+    except MvaResourceRootError as exc:
+        raise ResourceRootError(str(exc)) from exc
 
 
 def _assert_outside_repo(path: Path, repo_root: Path) -> None:
@@ -215,18 +233,47 @@ def fetch_resource(
                 "sha256": None,
                 "size_bytes": None,
                 "retrieved": None,
+                "integrity": None,
                 "notes": (
                     f"fetch completed but the local file failed a content sanity check: {mismatch}"
                 ),
             }
         )
 
+    # Deep format probe: the magic-number sniff above catches an HTML error page,
+    # but only opening the file as the format its name claims catches a file that
+    # is the right TYPE and the wrong THING -- a BGZF stream with no EOF block, a
+    # .fai indexing a different FASTA. A hash of either is a valid hash of the
+    # wrong bytes.
+    probe = probe_format(dest, entry.kind)
+    if not probe.ok:
+        return entry.model_copy(
+            update={
+                "status": ResourceStatus.NOT_FETCHED,
+                "sha256": None,
+                "size_bytes": None,
+                "retrieved": None,
+                "integrity": None,
+                "notes": f"fetch completed but the file failed its format check: {probe.problem}",
+            }
+        )
+
+    today = _today_iso()
     return entry.model_copy(
         update={
             "status": ResourceStatus.FETCHED,
             "sha256": hash_file(dest),
             "size_bytes": dest.stat().st_size,
-            "retrieved": _today_iso(),
+            "retrieved": today,
+            "integrity": IntegrityRecord(
+                verified_at=today,
+                spot_plan=SPOT_PLAN,
+                spot_sha256=spot_digest(dest),
+                format_check=probe.check,
+                format_detail=probe.detail,
+                index_check=probe.index_check,
+                index_detail=probe.index_detail,
+            ),
             "notes": "",
         }
     )

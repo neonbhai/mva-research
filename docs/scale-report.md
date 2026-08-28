@@ -483,7 +483,7 @@ full 4,492,805-line phantom (4,556,006 records out):
 | through QC, wall | not run at full scale ‡ | 93.83 s / 48,557 rec/s | — |
 | swap growth | 3.1 GB -> 33.0 GB | **0 swaps, 0 page faults** (`/usr/bin/time -l`) | — |
 
-**The 4 GB target is met with 15x of headroom: 261.9 MB through QC.** Record
+**The 4 GB target is met with 15x headroom: 261.9 MB through QC.** Record
 count, warnings and skips are unchanged at full scale —
 `no_call_genotype (n=13553)`, 0 skipped — matching §1 exactly.
 
@@ -582,7 +582,13 @@ agree on malformed input — a line with no FORMAT/sample column is a warned-abo
 record to the text parser and an unreadable file to htslib, which is a fact a run
 must be able to state rather than a detail to discover later.
 
-### 8.5 Determinism (GP-30), proved not asserted
+### 8.5 Determinism (GP-30), proved not asserted — under a fixed clock
+
+The proof below is real and reproducible, and its scope is the ingestion stream
+under the clock `config.synthetic` selects, which is `demo_clock()`. It is not
+evidence that a real run's artifact tree is byte-identical: that run takes
+`SystemClock`, and 11 of its artifacts differ in recorded time (none in scientific
+content). See `docs/handoff-integrity.md` §4 and TD-21.
 
 The full 4,556,006-record stream — read, normalise, QC — was digested end to end
 (sha256 over `canonical_json` of every record *and* every evidence item, in
@@ -682,3 +688,130 @@ Run as one child process per configuration
 (`--stages read` / `read,normalise,qc` / `read,normalise,qc,artifact`), because
 `ru_maxrss` is a high-water mark and a shared process reports one run's peak as
 the next one's.
+
+---
+
+## 9. After: annotation, the evidence ledger and selection, measured
+
+**Appended, not substituted.** Sections 1-8 are the ingest measurement and stand
+as written. This section covers three things the ingest measurement left open: annotation
+materialising the callset (§7 lists its throughput as unmeasured; it is not one
+of §8.7's four bullets), the ledger unable to hold the evidence it is handed
+(§8.7), and no selection in front of pairing (§8.7).
+
+Reproduce with `tools/scale/stage_harness.py` (`sweep`, `annotate`, `ledger`,
+`select`, `pipeline`, `digest`). It measures against fabricated `VariantRecord`
+objects built in memory rather than parsed from a VCF, because the question here
+is what one annotated record plus its evidence costs and whether a stage holds
+all of them at once; a parser in front of that adds noise and 40 seconds per run.
+Peak RSS is `ru_maxrss`, taken in a child process per configuration, exactly as
+in §1. A watchdog thread kills a child at 12 GiB, so a configuration that cannot
+fit is reported as killed rather than allowed to take the machine into swap —
+that is a measurement, not a failure to measure.
+
+The phantom's rates are matched to the ones measured earlier on real data: 44.9%
+of records genic (§6), 38% with no frequency data at all, 1.2% of genic records
+coding or splice-relevant, 8% carrying an impact of `None` — NOT ASSESSED, the
+shape a MANE interval join produces (ADR 0016).
+
+> **Not biologically valid.** Every coordinate, allele, gene symbol, consequence
+> term and allele frequency in the phantom is a seeded hash. Nothing in this
+> section is evidence about variants, genes or disease (GP-20).
+
+**Load caveat, stated because it matters.** These runs shared a 24 GB machine
+with several concurrent agents; load average sat between 6 and 9 throughout, and
+one full `pytest` run overlapped part of the sweep. **Wall times are therefore an
+upper bound** and are not comparable with §1's, which were taken on a quieter
+machine. Peak RSS is unaffected by CPU contention and is what this section is
+about.
+
+### 9.1 The sweep
+
+Each row is one child process. `KILLED` means the 12 GiB watchdog fired.
+
+| stage | mode | records | wall | peak RSS | |
+|---|---|---:|---:|---:|---|
+| annotate | batch | 100,000 | 7.4s | 1.046 GiB | ok |
+| annotate | stream | 100,000 | 4.6s | 0.080 GiB | ok |
+| ledger | memory | 100,000 | 7.3s | 0.652 GiB | ok |
+| ledger | spill | 100,000 | 20.9s | 0.337 GiB | ok |
+| select | enabled | 100,000 | 4.2s | 0.088 GiB | ok |
+| pipeline | stream | 100,000 | 16.4s | 0.411 GiB | ok |
+| annotate | batch | 500,000 | 28.6s | 5.592 GiB | ok |
+| annotate | stream | 500,000 | 22.8s | 0.080 GiB | ok |
+| ledger | memory | 500,000 | 43.1s | 3.124 GiB | ok |
+| ledger | spill | 500,000 | 87.3s | 0.351 GiB | ok |
+| select | enabled | 500,000 | 24.6s | 0.125 GiB | ok |
+| pipeline | stream | 500,000 | 86.1s | 0.413 GiB | ok |
+| annotate | batch | 1,000,000 | 94.0s | 7.787 GiB | ok |
+| annotate | stream | 1,000,000 | 44.9s | 0.080 GiB | ok |
+| ledger | memory | 1,000,000 | 75.3s | 5.807 GiB | ok |
+| ledger | spill | 1,000,000 | 246.8s | 0.353 GiB | ok |
+| select | enabled | 1,000,000 | 112.9s | 0.165 GiB | ok |
+| pipeline | stream | 1,000,000 | 248.8s | 0.359 GiB | ok |
+| annotate | batch | 4,500,000 | — | — | **KILLED** |
+
+**What the sweep settles.** Batch annotation is the stage that cannot reach WGS
+scale: peak memory grows with input across the measured range (1.05 → 5.59 →
+7.79 GiB) and the 4.5 M configuration hit the watchdog. The growth is **not**
+proportional — per record it is 11.0, then 11.7, then 8.2 KiB, so the 1 M run
+cost less per record than the 500 K one. It does not flatten either: holding the
+best of those three rates, 4.5 M is `projected` to need roughly 35 GiB, against a
+12 GiB watchdog and 24 GB of machine. Streaming annotation is **flat at 0.080 GiB
+across a 10x range of input** — it holds a batch, not a callset. The in-memory
+ledger has the same defect as batch annotation (0.65 → 3.12 → 5.81 GiB); the
+spilled ledger is likewise flat, at ~0.35 GiB, and buys that with wall time
+(20.9s → 246.8s, roughly 3-4x the in-memory ledger).
+
+That trade is the intended one: **the spilled ledger is slower and finishes;
+the in-memory ledger is faster and dies.**
+
+### 9.2 At 4.5 M
+
+Two stages were then run at the full target scale.
+
+| stage | mode | records | wall | throughput | peak RSS |
+|---|---|---:|---:|---:|---:|
+| annotate | stream | 4,500,000 | 316.1s | 14,238 rec/s | 0.080 GiB |
+| select | enabled | 4,500,000 | 363.0s | 12,397 rec/s | 0.476 GiB |
+
+Streaming annotation held 0.080 GiB at 4.5 M, the **same** figure as at 100,000:
+peak memory is now a function of batch size, not of callset size.
+
+Selection at full scale, with the thresholds in `config/default.yaml`:
+
+| | count | share |
+|---|---:|---:|
+| in | 4,500,000 | |
+| **retained** | **80,250** | **1.78%** |
+| dropped, common in population | 2,733,944 | 60.8% |
+| dropped, no gene assignment | 999,764 | 22.2% |
+| dropped, not coding or splice | 686,042 | 15.2% |
+| dropped, frequency unknown | 0 | 0% |
+| dropped, impact NOT ASSESSED | 0 | 0% |
+
+Retained breaks down as 63,867 NOT-ASSESSED-impact, 15,513 coding-or-splice, and
+870 on a pathogenic clinical assertion.
+
+**The two zeroes are the point.** `dropped_frequency_unknown = 0` and
+`dropped_impact_not_assessed = 0` are GP-14 and ADR 0016 holding under load:
+**1,709,554 variants reached selection with no usable frequency observation and
+every one was retained.** Absence of a frequency record is not evidence of
+rarity, so it cannot be scored as AF 0 and cannot be used to drop. Had those
+been treated as common, selection would have discarded 38% of the callset on
+missing data alone.
+
+Selection emits both facts as warnings on its own report rather than leaving
+them to be discovered — including that it deleted 4,419,750 valid records, which
+it is the only stage entitled to do (GP-13, ADR 0019).
+
+### 9.3 What was not measured
+
+**The spilled ledger was never run at 4.5 M.** The run was started and stopped
+before it completed; no number was recorded and none is estimated here. What
+stands is the flat ~0.35 GiB across 100 K–1 M in §9.1, which is evidence that it
+does not grow with input, but it is **not** a 4.5 M measurement and must not be
+cited as one.
+
+Also still unmeasured: the real (non-phantom) adapters at scale, and the pairing
+stage downstream of selection.

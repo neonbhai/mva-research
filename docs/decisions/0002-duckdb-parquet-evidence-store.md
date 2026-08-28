@@ -37,5 +37,9 @@ shape to load into a graph engine.
 
 ## Consequences
 - Byte-identical Parquet requires care: sort by primary key, pin compression and
-  row-group size, embed no timestamps. This is asserted in a test.
+  row-group size, and let the *writer* embed no timestamp of its own. That much is
+  asserted in a test. It is not a claim about the data: `evidence_items.parquet`
+  carries `timestamp`/`timestamp_iso` columns and three more tables carry a
+  rendered timestamp inside a rationale string, so those four differ between real
+  runs — in recorded time only, never in content (`docs/handoff-integrity.md` §4).
 - Analysts get SQL over the evidence store without a migration or a server.

@@ -305,10 +305,20 @@ def build_submission_rows(
        *higher*-ranked one — it can contribute no variant the F-max union does not
        already hold, and rank points go to the first full match.
     2. :func:`_promote_pairs_above_subsets` handles the mirror case, where the
-       subset outranks its own superset, by reordering rather than deleting.
+       subset outranks its own superset. Inside the submitted window it reorders;
+       a superset ranked *below* the window is exchanged with its own subset. It
+       runs over the WHOLE ranked list, **before** truncation (ADR 0023).
     3. :func:`_enforce_epcr_separation` renders that settled order as strictly
        decreasing EPCRs. It runs LAST on purpose: it is order-preserving by
        construction, so it must be handed the order we mean to submit.
+
+    **Truncation happens between (2) and (3), and the order of (2) and truncation
+    is worth 50 rank points.** Slicing to ``max_rows`` first deletes any pair that
+    happens to rank below the cut — including the pair whose own subset is sitting
+    at rank 1, which is precisely the pair promotion exists to rescue. The scorer
+    then sees a partial match where a full match was available (100 -> 50), and if
+    the pair carried the only copy of the second causal allele, F-max is capped
+    below 1.0 as well. See ADR 0023.
     """
     if not 1 <= max_rows <= MAX_SUBMISSION_ROWS:
         msg = (
@@ -346,22 +356,33 @@ def build_submission_rows(
             max_rows,
             len(rows) - max_rows,
         )
-    # Truncate, then compose, then render. Separation is applied AFTER truncation
-    # because only the submitted rows are scored, and reserving range for rows
-    # that will be dropped would push the kept ones needlessly close to the floor.
-    submitted, promoted = _promote_pairs_above_subsets(rows[:max_rows])
+    # Compose, THEN truncate, THEN render (ADR 0023). Promotion is what decides
+    # which rows belong in the window, so it cannot be handed a window that has
+    # already been cut. Separation is still applied after truncation, because only
+    # the submitted rows are scored and reserving range for rows that will be
+    # dropped would push the kept ones needlessly close to the floor.
+    composed, promoted, exchanged = _promote_pairs_above_subsets(rows, window=max_rows)
     if promoted:
         # Counts only, never coordinates (GP-41).
         _LOG.info(
             "Promoted %d pair row(s) above a single-variant row whose variant they already carry.",
             promoted,
         )
-    return _enforce_epcr_separation(submitted)
+    if exchanged:
+        _LOG.info(
+            "Exchanged %d single-variant row(s) for a candidate pair that carries the same "
+            "variant and had ranked below the %d-row limit. A one-variant row cannot equal a "
+            "two-variant answer as a frozenset, so the pair is the only one of the two that "
+            "can score a full match (ADR 0023).",
+            exchanged,
+            max_rows,
+        )
+    return _enforce_epcr_separation(composed[:max_rows])
 
 
 def _promote_pairs_above_subsets(
-    rows: Sequence[SubmissionRow],
-) -> tuple[tuple[SubmissionRow, ...], int]:
+    rows: Sequence[SubmissionRow], *, window: int = MAX_SUBMISSION_ROWS
+) -> tuple[tuple[SubmissionRow, ...], int, int]:
     """Move a pair row above any earlier row whose variants it already carries.
 
     :func:`_drop_subsumed` removes a single-variant candidate that falls *below*
@@ -382,31 +403,73 @@ def _promote_pairs_above_subsets(
     branch on it, and the repository's local fallback ground truth holds two
     variants.
 
-    **The single is kept, immediately below.** A row ranked below the answer
-    costs nothing — verified by executing the scorer — so dropping it would
-    forfeit a full match in the unlikely world where the truth is a single
-    variant and gain exactly nothing in the likely one.
+    **The single is kept, immediately below — while keeping it is free.** A row
+    ranked below the answer costs nothing (verified by executing the scorer), so
+    dropping it would forfeit a full match in the unlikely world where the truth is
+    a single variant and gain exactly nothing in the likely one. That argument
+    holds only inside the ten-row window; see the exchange rule below for what
+    happens when keeping it would cost another row its slot.
 
     This is composition, not scoring. Nothing here touches a composite score: the
     ranking is a scientific judgement and this is a statement about how to lay
     that judgement out in a twelve-column CSV. Implementing it as a score
     adjustment would disguise a scoring change as a rendering fix.
 
-    Terminates and is deterministic: a row carries at most two variants, so a
-    promoted pair can have no superset of its own, and each promotion removes one
-    subset-above-superset inversion without creating another.
+    **``window`` is the row limit the caller will truncate to, and this pass runs
+    BEFORE that truncation (ADR 0023).** It used to be handed ``rows[:max_rows]``,
+    so a pair ranked below the cut had already been deleted by the time promotion
+    looked for it — and the pair most likely to sit below the cut is exactly the
+    one this pass exists to rescue, because the compound-het hypothesis carries a
+    phase penalty its own halves do not (GP-15). A single at rank 1 with its parent
+    pair at rank 11 scored a partial match: 50 rank points instead of 100, plus an
+    F-max capped below 1.0 whenever the pair held the only copy of the second
+    causal allele.
+
+    Reaching past the cut changes what promotion *costs*, so the pass is in two
+    parts and they are justified differently:
+
+    1. **Reordering inside the window is free.** No row enters or leaves, so every
+       superset already submitted is lifted above every subset it covers — the
+       original ADR 0015 rule, unchanged, including the case of several pairs
+       carrying the same variant.
+    2. **Crossing the cut costs a row, so it is rationed.** A subset row with no
+       superset inside the window at all is **exchanged** with the highest-ranked
+       superset outside it. The pair takes the subset's slot and the subset takes
+       the pair's; exactly one row enters the submission and exactly one leaves,
+       and the row that leaves is the subset itself. No unrelated row moves by a
+       single position.
+
+    The exchange is the part that needed a decision, and it inverts one sentence of
+    ADR 0015. That ADR keeps the outranked single *because keeping it is free* — a
+    row below the answer cannot lower either metric. Here it is not free: the only
+    way to keep it is to evict something else. And a single-variant row is worth
+    nothing in the world we are betting on, since ``row.variants == true_variants``
+    cannot hold for a one-variant row against a two-variant answer, while the row
+    it would displace is another pair that can. Its variant is not lost either —
+    the promoted pair re-emits it, so the F-max union at that threshold is
+    unchanged. Keep the single when it is free; drop it when it costs a slot.
+
+    Sliding the pair up and letting the last row fall off the end was the other
+    candidate rule and is worse: it spends a submitted pair to keep a single that
+    can never full-match. Promoting *every* out-of-window superset is worse still —
+    it demotes higher-scoring unrelated hypotheses on the strength of a
+    subset relation, which is a re-ranking, and re-ranking is a scientific
+    judgement that does not belong in a rendering pass.
+
+    Terminates and is deterministic: pass 1 strictly decreases the number of
+    subset-above-superset inversions inside a fixed window, and pass 2 is a single
+    forward scan in which each step swaps one in-window index with one out-of-window
+    index and never revisits either.
     """
     result = list(rows)
+    limit = min(window, len(result))
+
     promoted = 0
     index = 0
-    while index < len(result):
+    while index < limit:
         variants = result[index].variant_keys()
         superset = next(
-            (
-                later
-                for later in range(index + 1, len(result))
-                if variants < result[later].variant_keys()
-            ),
+            (later for later in range(index + 1, limit) if variants < result[later].variant_keys()),
             None,
         )
         if superset is None:
@@ -414,7 +477,27 @@ def _promote_pairs_above_subsets(
             continue
         result.insert(index, result.pop(superset))
         promoted += 1
-    return tuple(result), promoted
+
+    exchanged = 0
+    for index in range(limit):
+        variants = result[index].variant_keys()
+        if any(variants < result[other].variant_keys() for other in range(limit) if other != index):
+            # Already covered by a pair inside the window; pass 1 put it above.
+            continue
+        outside = next(
+            (
+                later
+                for later in range(limit, len(result))
+                if variants < result[later].variant_keys()
+            ),
+            None,
+        )
+        if outside is None:
+            continue
+        result[index], result[outside] = result[outside], result[index]
+        exchanged += 1
+
+    return tuple(result), promoted, exchanged
 
 
 def _epcr_units(value: float) -> int:
@@ -513,8 +596,8 @@ def _drop_subsumed(
     return kept, dropped
 
 
-def render_submission_csv(rows: Sequence[SubmissionRow]) -> str:
-    """Render rows to the exact CSV the challenge expects, header included."""
+def _write_rows(rows: Sequence[SubmissionRow]) -> str:
+    """Serialise rows to the exact 12 columns. No checking of any kind."""
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(
         buffer,
@@ -528,6 +611,72 @@ def render_submission_csv(rows: Sequence[SubmissionRow]) -> str:
     return buffer.getvalue()
 
 
+def render_submission_csv(rows: Sequence[SubmissionRow]) -> str:
+    """Render rows to the exact CSV the challenge expects, header included.
+
+    **This function validates. That is a deliberate public-API decision, taken
+    because the alternative was an exported validation bypass.**
+
+    ``SubmissionRow`` is a plain dataclass with no invariants of its own: it will
+    hold a bare contig, a proband ID the scorer hard-fails on, an EPCR outside
+    ``(0, 1]``, or a variant repeated across two rows, and a caller can hand
+    eleven of them to a serialiser. Every one of those states is silent at upload
+    time and fatal at scoring time. While the raw serialiser was the module's
+    public renderer, `validate_submission` was reachable only by callers who
+    remembered to call it, which is the same as saying the contract was optional.
+
+    Three shapes were considered:
+
+    * *Stop exporting the raw renderer.* Rejected: `validate_submission` has to be
+      testable against deliberately-invalid bytes, and a test that reaches in for a
+      private name is a bypass with extra steps.
+    * *Rename it to something frightening and leave it public.* Rejected on its
+      own, because the frightening name is still the shortest path from
+      ``SubmissionRow`` to a file.
+    * *Make the safe spelling the obvious one.* Adopted. The plain name validates
+      and raises; :func:`render_submission_csv_unvalidated` keeps the raw path for
+      the tests that need it, is named for what it does not do, and is excluded
+      from ``mva.reporting``'s package-level exports so it cannot be reached by
+      ``from mva.reporting import ...``.
+
+    Raises:
+        ValueError: listing every failing check. Errors are collected rather than
+            raised one at a time so a caller sees the whole problem at once, which
+            is also why :func:`validate_submission` returns a tuple rather than
+            raising.
+    """
+    text = _write_rows(rows)
+    ok, errors = validate_submission(text)
+    if not ok:
+        msg = (
+            "Refusing to render a Track 1 submission that fails its own contract check "
+            f"({len(errors)} problem(s)): " + "; ".join(errors)
+        )
+        raise ValueError(msg)
+    return text
+
+
+def render_submission_csv_unvalidated(rows: Sequence[SubmissionRow]) -> str:
+    """Serialise rows with **no contract check whatsoever**. Not a submission path.
+
+    The name is the warning, and it is the whole point of this function existing
+    separately: anything produced here may be rejected outright by the scorer, or
+    accepted and scored zero, and nothing in this module will have objected.
+
+    It exists for exactly two callers:
+
+    * tests that must feed :func:`validate_submission` bytes it is supposed to
+      reject — a validator can only be shown to work on input that fails it;
+    * tests that price a *hypothetical* submission shape against the scorer replica
+      (a split pair, a tie, a bare contig) to record what that shape costs.
+
+    Anything that writes a file uses :func:`write_submission`. Anything that
+    produces text for a caller uses :func:`render_submission_csv`. This function is
+    absent from ``mva.reporting``'s package exports on purpose.
+    """
+    return _write_rows(rows)
+
+
 def write_submission(rows: Sequence[SubmissionRow], path: Path) -> Path:
     """Render, self-validate, write, and gate the submission as a public export.
 
@@ -537,7 +686,7 @@ def write_submission(rows: Sequence[SubmissionRow], path: Path) -> Path:
     the re-scan is the verification — and a blocked file is removed rather than
     left for someone to find and submit.
     """
-    text = render_submission_csv(rows)
+    text = _write_rows(rows)
     ok, errors = validate_submission(text)
     if not ok:
         msg = (
@@ -768,6 +917,7 @@ def validate_submission(csv_text: str) -> tuple[bool, tuple[str, ...]]:
     probands: list[str] = []
     epcrs: list[float] = []
     seen_keys: dict[frozenset[tuple[str, int, str, str]], int] = {}
+    singles: list[_SingleRow] = []
     for index, row in enumerate(rows, start=1):
         _validate_row(index, row, errors)
         probands.append((row.get("proband_id") or "").strip())
@@ -783,6 +933,12 @@ def validate_submission(csv_text: str) -> tuple[bool, tuple[str, ...]]:
                     f"row {index}: duplicates the variant set already proposed in row "
                     f"{first_seen}; a repeated row wastes one of the ten slots."
                 )
+            if len(key) == 1:
+                gene = _note_gene(row.get("notes") or "")
+                finding = (row.get("finding_type") or "").strip()
+                if gene and finding != "secondary":
+                    singles.append(_SingleRow(index=index, variant=next(iter(key)), gene=gene))
+    _validate_split_pairs(singles, frozenset(seen_keys), errors)
 
     distinct = sorted(set(probands))
     if len(distinct) > 1:
@@ -826,6 +982,91 @@ def _validate_epcr_ties(epcrs: Sequence[float], errors: list[str]) -> None:
             )
 
 
+@dataclass(frozen=True)
+class _SingleRow:
+    """A parsed single-variant row, with the gene the pipeline attributed it to."""
+
+    index: int
+    variant: tuple[str, int, str, str]
+    gene: str
+
+
+def _note_gene(note: str) -> str:
+    """The gene symbol :func:`_safe_note` writes first, or ``""`` if there is none.
+
+    ``notes`` is the only place a rendered row carries gene identity: the twelve
+    columns the challenge specifies have no gene field, so a validator working on
+    CSV text has nothing else to key on. :func:`_safe_note` always writes
+    ``"<gene>; <inheritance>; phase=<status>"``, so the first ``;``-separated token
+    is the symbol.
+
+    Deliberately conservative. A token containing ``=`` is one of the later fields
+    arriving first, and an empty ``notes`` (a hand-built row) yields ``""``. Both
+    mean "no attribution", and a row with no attribution is skipped by the
+    split-pair check rather than guessed at — the check is best-effort on an
+    optional field, and a false positive there would refuse a legitimate
+    submission.
+    """
+    token = note.split(";", 1)[0].strip()
+    return "" if "=" in token else token
+
+
+def _validate_split_pairs(
+    singles: Sequence[_SingleRow],
+    proposed: frozenset[frozenset[tuple[str, int, str, str]]],
+    errors: list[str],
+) -> None:
+    """Reject one compound-het hypothesis taken apart into two single-variant rows.
+
+    **The gap this closes.** The other cross-row checks look for rows that are too
+    similar: the same variant set twice, the same EPCR twice. This one looks for
+    the opposite failure — two rows that are each individually perfect and are
+    jointly a downgrade. Right proband, ``chr``-prefixed contigs, in-range and
+    untied EPCRs, distinct variant sets: nothing per-row is wrong, and the
+    submission still cannot score what it should.
+
+    **What it costs, verified.** The scorer matches with
+    ``row.variants == true_variants`` — frozenset equality. A one-variant row can
+    never equal a two-variant answer, so once the pair is split there is no full
+    match to be had anywhere in the file and the best remaining outcome is the
+    partial-credit branch: **100 -> 50 rank points**. F-max is untouched (it unions
+    variants across rows, so both alleles are still predicted), which is precisely
+    what makes the defect invisible without this check — the submission looks right
+    on one metric while silently halving the other. Contract, "Never split a
+    candidate pair across two rows".
+
+    **Why the gene and not the coordinates.** Two variants are a compound
+    heterozygote when they sit in the *same gene*; the check therefore fires on two
+    single-variant rows the pipeline attributed to one gene and no row proposing
+    them together. Requiring every unordered pair of single-variant rows to be
+    joined would demand 45 pair rows for ten singles, which is neither possible nor
+    a claim we would want to make. Gene identity is read from ``notes`` (see
+    :func:`_note_gene`), the only column that carries it; rows with no attribution
+    are skipped rather than guessed at.
+
+    **Secondary findings are exempt.** ``finding_type=secondary`` states that the
+    row is an incidental finding *unrelated to the primary phenotype*. Joining it
+    to a primary hypothesis in the same gene would assert a compound heterozygote
+    the pipeline explicitly did not claim.
+    """
+    for position, left in enumerate(singles):
+        for right in singles[position + 1 :]:
+            if left.gene != right.gene:
+                continue
+            if frozenset({left.variant, right.variant}) in proposed:
+                continue
+            errors.append(
+                f"rows {left.index} and {right.index}: two single-variant rows in "
+                f"{left.gene} are one compound-heterozygous hypothesis split across two "
+                "rows, and no row proposes the two variants together. The scorer matches "
+                "by frozenset equality, so neither row can equal a two-variant answer and "
+                "no full match exists anywhere in the file: the best available outcome "
+                "drops to partial credit, 100 -> 50 rank points, for a prediction that is "
+                "otherwise exactly right (F-max is unaffected, which is why this is "
+                "silent). A compound-het pair is ONE row, using the _2 columns."
+            )
+
+
 def _row_key(row: dict[str, str | None]) -> frozenset[tuple[str, int, str, str]] | None:
     """The scorer's variant-key set for a parsed row, or ``None`` if unparseable."""
     try:
@@ -862,6 +1103,9 @@ __all__ = [
     "build_submission_rows",
     "composite_to_epcr",
     "render_submission_csv",
+    # Deliberately module-level only: `mva.reporting` does not re-export it, so the
+    # unvalidated path cannot be reached by `from mva.reporting import ...`.
+    "render_submission_csv_unvalidated",
     "truncation_notice",
     "validate_submission",
     "write_submission",

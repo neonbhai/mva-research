@@ -273,6 +273,22 @@ desktop.ini
 !knowledge/public/**/*.csv
 !knowledge/manifests/**/*.tsv
 
+# Literature-derived tables (ADR 0022): rows cited to a PMID, no patient content.
+# These carry the Track 2 scientific case and tests/unit/test_track2_bub1b.py reads
+# them directly, so a clone without them is a clone whose test suite fails. They get
+# NO content-scan softening -- knowledge/literature/ is deliberately absent from
+# CONTENT_ALLOWLIST_PREFIXES, so the audit reads every byte of them on its own terms.
+!knowledge/literature/**/*.tsv
+!knowledge/literature/**/*.csv
+
+# Real public-database derivatives (gnomAD constraint, ClinGen validity, HPO
+# gene-to-phenotype) and the MVA disease panel. Public sources, no patient
+# content, every file carrying its provenance header. tests/unit/test_knowledge_tables.py
+# asserts against these as COMMITTED files, so a clone without them is a clone
+# with 14 failing tests and a sources doc pointing at a panel that isn't there.
+!knowledge/real/**/*.tsv
+!knowledge/disease/**/*.tsv
+
 # Configuration and report templates.
 !config/**/*.csv
 !config/**/*.tsv
@@ -286,3 +302,15 @@ demo-workspace/
 !tests/golden/**/*.csv
 !tests/golden/**/*.tsv
 !tests/golden/**/*.txt
+
+# Local-only teaching artifact. Not part of the deliverable.
+explainer/
+
+# Agent/skill tooling. Local authoring aids, not part of the deliverable.
+.agents/
+.claude/
+skills-lock.json
+
+# Production notes for the Track 2 video. The submitted artifact is the video
+# itself; the script that produced it is working material, not a deliverable.
+docs/track2-video-script.md

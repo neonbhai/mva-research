@@ -6,9 +6,10 @@ package is where they become durable, queryable and exportable, and where GP-10
 
 Two halves:
 
-* :class:`EvidenceLedger` / :class:`AssertionResolver` — in-memory, no I/O. Stages
-  accumulate evidence as they work; reporting resolves citations through the
-  resolver, which refuses unsourced claims.
+* :class:`EvidenceLedger` / :class:`AssertionResolver` — the run's write buffer
+  and the GP-10 gate. In memory by default; a ledger handed a ``spill_dir``
+  overflows into :class:`SqliteEvidenceSpill` so that a whole-genome run's tens
+  of millions of items do not have to be resident at once.
 * :class:`EvidenceStore` — the DuckDB file, its schema, idempotent writers for
   every domain model, and a byte-reproducible Parquet export (GP-30).
 
@@ -18,8 +19,14 @@ does not adopt a graph database. See ``schema.sql`` for the reasoning.
 
 from __future__ import annotations
 
-from mva.evidence.ledger import AssertionResolver, EvidenceLedger
+from mva.evidence.ledger import (
+    DEFAULT_SPILL_THRESHOLD,
+    AssertionResolver,
+    EvidenceLedger,
+)
+from mva.evidence.spill import DEFAULT_FLUSH_BATCH, SqliteEvidenceSpill
 from mva.evidence.store import (
+    EVIDENCE_WRITE_BATCH,
     PARQUET_COMPRESSION,
     PARQUET_COMPRESSION_LEVEL,
     PARQUET_ROW_GROUP_SIZE,
@@ -31,6 +38,9 @@ from mva.evidence.store import (
 )
 
 __all__ = [
+    "DEFAULT_FLUSH_BATCH",
+    "DEFAULT_SPILL_THRESHOLD",
+    "EVIDENCE_WRITE_BATCH",
     "PARQUET_COMPRESSION",
     "PARQUET_COMPRESSION_LEVEL",
     "PARQUET_ROW_GROUP_SIZE",
@@ -41,4 +51,5 @@ __all__ = [
     "EvidenceLedger",
     "EvidenceStore",
     "GraphEdge",
+    "SqliteEvidenceSpill",
 ]

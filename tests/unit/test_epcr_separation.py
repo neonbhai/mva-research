@@ -57,6 +57,7 @@ from mva.reporting.track1 import (
     build_submission_rows,
     composite_to_epcr,
     render_submission_csv,
+    render_submission_csv_unvalidated,
     validate_submission,
 )
 
@@ -313,12 +314,30 @@ def test_rendered_csv_carries_ten_distinct_epcr_strings() -> None:
 
 
 def test_validate_submission_rejects_a_repeated_epcr() -> None:
-    """The contract self-check must catch a tie even if it arrives from elsewhere."""
+    """The contract self-check must catch a tie even if it arrives from elsewhere.
+
+    Rendered through :func:`render_submission_csv_unvalidated` on purpose: the
+    plain renderer now refuses invalid rows outright (ADR 0023), and a validator
+    can only be shown to work on bytes that fail it. The next test asserts that
+    refusal directly, so the bypass used here is itself under test.
+    """
     rows = build_submission_rows(_colliding_pairs(), proband_id=ACCEPTED_PROBAND_ID)
     tied = (*rows[:5], replace(rows[5], epcr=rows[4].epcr), *rows[6:])
-    ok, errors = validate_submission(render_submission_csv(tied))
+    ok, errors = validate_submission(render_submission_csv_unvalidated(tied))
     assert not ok
     assert any("repeats the value" in error for error in errors), errors
+
+
+def test_the_plain_renderer_refuses_the_same_tie() -> None:
+    """The tie cannot reach a file through the renderer either.
+
+    `render_submission_csv` was an exported serialiser with no checks at all, so
+    every state the validator rejects had a public one-call path around it.
+    """
+    rows = build_submission_rows(_colliding_pairs(), proband_id=ACCEPTED_PROBAND_ID)
+    tied = (*rows[:5], replace(rows[5], epcr=rows[4].epcr), *rows[6:])
+    with pytest.raises(ValueError, match="repeats the value"):
+        render_submission_csv(tied)
 
 
 def test_separation_is_deterministic(  # GP-30
