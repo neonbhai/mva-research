@@ -22,7 +22,12 @@ are:
   the ADR 0010 population maximum silently collapse to the global figure;
 * an indel representation that disagrees with ``mva.ingestion.normalise``, which
   does not raise — it just fails to join, and a variant with no frequency record
-  looks exactly like a rare one.
+  looks exactly like a rare one. This adapter shipped that defect: a private
+  ``minimal_representation`` that trimmed but could not left-align, so a
+  left-aligned proband indel and the gnomAD record for the same event were
+  looked up under two different keys. ADR 0018 puts the rule in
+  ``mva.alleles`` once; the tests under "normalisation / join" below are what
+  keep it there.
 
 Each of those has a test below. Tests that need the full 2 GB release are
 skipped unless it is present; everything load-bearing runs off the committed
@@ -45,6 +50,7 @@ from typing import Protocol, cast
 import pysam
 import pytest
 
+from mva.alleles import LeftAlignmentStatus, canonicalise_allele
 from mva.annotation import (
     SYNTHETIC_STANDIN_LIMITATION,
     AdapterRole,
@@ -67,12 +73,11 @@ from mva.annotation.gnomad_sites import (
     has_bgzf_eof,
     index_path_for,
     merge_query_regions,
-    minimal_representation,
 )
 from mva.clock import FixedClock
 from mva.determinism import stable_hash
 from mva.errors import AdapterUnavailableError, GenomeBuildMismatchError, NetworkDeniedError
-from mva.ingestion.normalise import _parsimony_trim, normalise_variants
+from mva.ingestion.normalise import normalise_variants, trim_and_left_align
 from mva.models.base import AssertionTier
 from mva.models.genome import GenomeBuild, GenomicCoordinate
 from mva.models.variant import (
@@ -116,6 +121,28 @@ requires_full_release = pytest.mark.skipif(
 #: hard-coding a v4 group list copied from the genomes release would emit a
 #: population this file has no numbers for.
 EXOME_ANCESTRY_GROUPS = ("afr", "amr", "asj", "eas", "fin", "mid", "nfe", "remaining", "sas")
+
+#: Names a re-introduced private canonicalisation rule would plausibly be given.
+#: ``minimal_representation`` is the one that actually shipped here; the rest are
+#: the spellings the same mistake wears elsewhere. The repo-wide version of this
+#: lint, over every adapter, lives in ``tests/unit/test_normalise_representation.py``.
+TRIMMING_FUNCTION_NAMES = frozenset(
+    {
+        "minimal_representation",
+        "_minimal_representation",
+        "parsimony_trim",
+        "_parsimony_trim",
+        "trim_alleles",
+        "_trim_alleles",
+        "normalise_allele",
+        "_normalise_allele",
+        "left_align",
+        "_left_align",
+        "left_shift",
+        "_left_shift",
+        "canonicalise_allele",
+    }
+)
 
 # --------------------------------------------------------------------------- anchors
 #
@@ -166,7 +193,8 @@ DELETION_AT_5031991 = "GRCh38:chr21:5031991:GA:G"
 REPEAT_INSERTION = "GRCh38:chr21:5033364:A:AC"
 
 #: The same single-``C`` insertion written one and two bases to the right. Neither
-#: is a key gnomAD holds.
+#: is a key gnomAD holds, so both join only once the adapter can left-align them
+#: back onto ``REPEAT_INSERTION`` — which is the whole of ADR 0018 in two strings.
 REPEAT_INSERTION_SHIFTED_ONE = "GRCh38:chr21:5033365:C:CC"
 REPEAT_INSERTION_SHIFTED_TWO = "GRCh38:chr21:5033366:C:CC"
 
@@ -265,6 +293,19 @@ def open_adapter(path: Path, **kwargs: object) -> GnomadSitesFrequencyAdapter:
 @pytest.fixture(scope="module")
 def adapter() -> Iterator[GnomadSitesFrequencyAdapter]:
     instance = open_adapter(FIXTURE)
+    yield instance
+    instance.close()
+
+
+@pytest.fixture(scope="module")
+def aligning_adapter() -> Iterator[GnomadSitesFrequencyAdapter]:
+    """The same slice, with the reference the adapter needs to left-align.
+
+    Kept as a second fixture rather than replacing the first: the two states are
+    both real deployments — a run configured with ``inputs.reference_fasta`` and
+    one without — and the difference between them is the thing under test.
+    """
+    instance = open_adapter(FIXTURE, reference=_SliceReference.from_fixture())
     yield instance
     instance.close()
 
@@ -374,6 +415,48 @@ class _ConstantReference:
         if low < 0 or high > len(self._sequence):
             raise IndexError(start)
         return self._sequence[low:high]
+
+
+class _SliceReference:
+    """A ``ReferenceLookup`` whose bases are the slice's own REF columns.
+
+    A real GRCh38 FASTA is 3 GB and absent from CI, and a synthetic one covering
+    chr21 out to 9.8 Mb would be a 10 MB test artifact. Every base this adapter's
+    left-alignment can need, though, is already in the fixture: a gnomAD record
+    states the reference bases under its own REF span, so the 154 committed
+    records supply the true GRCh38 base at every position they cover, from the
+    release itself rather than from something written to make a test pass.
+
+    Positions outside those spans raise, which is the honest answer and the one
+    :func:`mva.alleles.canonicalise_allele` is built for — an unreadable base
+    stops the shift rather than inventing one (GP-14). It therefore never claims
+    a left-most position it could not prove.
+    """
+
+    def __init__(self, contig: str, bases: Mapping[int, str]) -> None:
+        self._contig = contig
+        self._bases = dict(bases)
+
+    @classmethod
+    def from_fixture(cls, contig: str = "chr21") -> _SliceReference:
+        bases: dict[int, str] = {}
+        for row in fixture_rows():
+            start = int(row[1])
+            for offset, base in enumerate(row[3]):
+                bases[start + offset] = base
+        return cls(contig, bases)
+
+    @property
+    def known_positions(self) -> int:
+        return len(self._bases)
+
+    def fetch(self, contig: str, start: int, end: int) -> str:
+        if contig != self._contig:
+            raise KeyError(contig)
+        try:
+            return "".join(self._bases[position] for position in range(start, end + 1))
+        except KeyError as exc:
+            raise IndexError(start) from exc
 
 
 # --------------------------------------------------------------------------- premise
@@ -940,36 +1023,82 @@ def test_an_unfiltered_record_is_not_reported_as_pass(tmp_path: Path) -> None:
 # ------------------------------------------------------------- normalisation / join
 
 
-def test_minimal_representation_matches_ingestion() -> None:
-    """Pin the annotation-side trim to the ingestion-side trim (GP-03 forces two copies).
+def test_the_adapter_owns_no_canonicalisation_of_its_own() -> None:
+    """ADR 0018, asserted against the module rather than trusted (GP-03 does not force a copy).
 
-    A divergence between these two functions does not raise. It makes indels stop
-    joining, and a variant with no frequency record looks exactly like a rare one
-    — the most dangerous bug this adapter could ship.
+    This adapter used to define ``minimal_representation``: a private trim that,
+    unlike the shared rule, could not left-align. The two agreed on every allele
+    they were ever tested with and disagreed on the one class that matters — an
+    indel inside a repeat tract — so the join failed silently and the variant was
+    scored as novel and ultra-rare. The defect was not the algorithm; it was the
+    second copy.
+
+    ``mva.alleles`` sits at layer 1, below both ``ingestion`` and ``annotation``,
+    so sharing it costs no GP-03 violation and there is nothing left to justify a
+    duplicate.
     """
-    cases = [
-        (100, "A", "G"),
-        (100, "AAT", "A"),
-        (100, "A", "AAT"),
-        (100, "AAT", "AAG"),
-        (100, "GCGGAG", "G"),
-        (100, "CA", "C"),
-        (100, "TTTT", "TT"),
-        (100, "ACCT", "ACCG"),
-        (100, "AC", "AC"[:1] + "T"),
-        (5_031_991, "GA", "G"),
-        (5_031_991, "G", "GA"),
-        (9_810_835, "GAC", "G"),
-    ]
-    for position, ref, alt in cases:
-        assert minimal_representation(position, ref, alt) == _parsimony_trim(position, ref, alt)
+    import mva.annotation.gnomad_sites as module
+
+    assert not hasattr(module, "minimal_representation")
+    assert module.canonicalise_allele is canonicalise_allele
+
+    tree = ast.parse(ADAPTER_SOURCE.read_text(encoding="utf-8"), filename=str(ADAPTER_SOURCE))
+    local_functions = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert not local_functions & TRIMMING_FUNCTION_NAMES, (
+        "gnomad_sites.py defines its own trimming/canonicalisation function: "
+        f"{sorted(local_functions & TRIMMING_FUNCTION_NAMES)}. Call "
+        "mva.alleles.canonicalise_allele instead."
+    )
 
 
-def test_minimal_representation_matches_ingestion_on_every_fixture_allele() -> None:
-    """The same pin, over the real alleles the adapter will actually see."""
-    for row in fixture_rows():
-        position, ref, alt = int(row[1]), row[3], row[4]
-        assert minimal_representation(position, ref, alt) == _parsimony_trim(position, ref, alt)
+def test_the_adapter_and_ingestion_agree_on_every_real_fixture_allele() -> None:
+    """The shared rule, exercised over the 154 alleles this adapter will actually see.
+
+    Both sides are asked in both reference states, because the two callers can
+    only disagree in the state where one of them can move a coordinate. Comparing
+    functions rather than comparing a join result is deliberate: a passing join is
+    exactly the evidence that was available while the two implementations
+    disagreed.
+    """
+    reference = _SliceReference.from_fixture()
+    with open_adapter(FIXTURE) as plain, open_adapter(FIXTURE, reference=reference) as aligning:
+        for lookup, instance in ((None, plain), (reference, aligning)):
+            for row in fixture_rows():
+                position, ref, alt = int(row[1]), row[3], row[4]
+                from_adapter = instance.canonicalise("chr21", position, ref, alt)
+                from_ingestion = trim_and_left_align(
+                    make_record(f"GRCh38:chr21:{position}:{ref}:{alt}"), lookup
+                ).coordinate
+                assert (from_adapter.position, from_adapter.ref, from_adapter.alt) == (
+                    from_ingestion.position,
+                    from_ingestion.ref,
+                    from_ingestion.alt,
+                )
+
+
+def test_representation_status_is_typed_and_names_its_own_limitation(
+    adapter: GnomadSitesFrequencyAdapter,
+    aligning_adapter: GnomadSitesFrequencyAdapter,
+) -> None:
+    """GP-14: "we could not left-align" is a state a caller receives, not a silent skip.
+
+    Without it, the repeat-tract miss below is indistinguishable from "gnomAD has
+    no record", and a report has nothing to put in its footer.
+    """
+    assert adapter.representation_status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+    assert aligning_adapter.representation_status is LeftAlignmentStatus.APPLIED
+    assert aligning_adapter.representation_limitation is None
+
+    limitation = adapter.representation_limitation
+    assert limitation is not None
+    assert "not evidence of rarity" in limitation
+    # PRIV-09: the sentence reaches a report footer, a log and an agent's context.
+    for forbidden in ("chr21", "5033364", "GRCh38", "A:AC", "0/1"):
+        assert forbidden not in limitation
 
 
 def test_real_indels_join_after_the_ingestion_normaliser_has_run(
@@ -1025,28 +1154,25 @@ def test_an_untrimmed_representation_of_the_same_indel_still_joins(
     assert result[padded] == result[DELETION_AT_5031991]
 
 
-def test_a_right_shifted_indel_does_not_join(adapter: GnomadSitesFrequencyAdapter) -> None:
-    """The one join this adapter cannot make, written down rather than papered over.
+def test_a_right_shifted_indel_joins_when_a_reference_is_supplied(
+    aligning_adapter: GnomadSitesFrequencyAdapter,
+) -> None:
+    """**The join this adapter used to lose.** Same event, three spellings, one answer.
 
-    **This is the finding to read.** gnomAD's alleles are left-aligned. Trimming
-    alone cannot undo a right-shifted representation of the same event — undoing it
-    needs the reference bases to the *left*, which the annotation stage does not
-    have and may not fetch (GP-03: the FASTA belongs to ingestion). The real bases
-    at chr21:5033364-5033366 are ``A``, ``C``, ``C``, so the single-``C``
-    insertion gnomAD stores as ``5033364 A>AC`` (AF 0.337, one in three
-    chromosomes) has two other legal spellings, and neither joins. The miss is
-    silent and reads downstream as "novel variant" — for a variant a third of the
-    population carries.
+    The real bases at chr21:5033364-5033366 are ``A``, ``C``, ``C``, so the
+    single-``C`` insertion gnomAD stores as ``5033364 A>AC`` — AF 0.337, one
+    chromosome in three — has two other legal spellings. Under the adapter's old
+    private ``minimal_representation`` neither of them joined: trimming cannot undo
+    a right shift, undoing it needs the reference bases to the *left*, and the
+    result was that a variant a third of the population carries came back with no
+    frequency data and was scored as novel and ultra-rare.
 
-    The mitigation is upstream and is already in place: ``normalise_variants``
-    left-aligns whenever it is given a ``ReferenceLookup``, and emits
-    ``no_reference_lookup_left_alignment_skipped`` when it is not — so a run whose
-    indels may not join says so in its warnings rather than silently.
+    Given the same ``ReferenceLookup`` ingestion and the ClinVar adapter already
+    take, all three spellings canonicalise to the key gnomAD holds and all three
+    get the same frequency. The assertion is on the value, not merely on
+    membership: a join that returned *a* record would be just as wrong as no join
+    if it returned the neighbouring allele's.
     """
-    joined = adapter.frequencies([REPEAT_INSERTION])
-    assert REPEAT_INSERTION in joined
-    assert joined[REPEAT_INSERTION][0].allele_frequency == pytest.approx(0.337086, rel=1e-6)
-
     bases = {
         int(row[1]): row[3][0]
         for row in fixture_rows()
@@ -1054,8 +1180,83 @@ def test_a_right_shifted_indel_does_not_join(adapter: GnomadSitesFrequencyAdapte
     }
     assert bases == {5_033_364: "A", 5_033_365: "C", 5_033_366: "C"}, "the repeat context"
 
+    spellings = [REPEAT_INSERTION, REPEAT_INSERTION_SHIFTED_ONE, REPEAT_INSERTION_SHIFTED_TWO]
+    result = aligning_adapter.frequencies(spellings)
+
+    assert set(result) == set(spellings), "every legal spelling of one event must be answered"
+    for spelling in spellings:
+        assert by_population(result[spelling])[GLOBAL_POPULATION].allele_frequency == pytest.approx(
+            0.337086, rel=1e-6
+        )
+    # Keyed by what the caller passed, not by what canonicalisation turned it into.
+    assert result[REPEAT_INSERTION_SHIFTED_TWO] == result[REPEAT_INSERTION]
+
+
+def test_without_a_reference_the_same_indel_is_an_honest_miss(
+    adapter: GnomadSitesFrequencyAdapter,
+) -> None:
+    """The degraded state, kept explicit rather than quietly fixed away.
+
+    Left-alignment is impossible without the reference genome, and an adapter that
+    pretended otherwise would be moving a coordinate on a guess. What must not
+    happen is for the resulting miss to look like a clean answer: the variant is
+    omitted (never ``allele_frequency=0.0``), and ``representation_status`` says
+    the omission may be representational rather than biological.
+
+    This is the half of the old ``test_a_right_shifted_indel_does_not_join`` worth
+    keeping. The other half — that a supplied reference could not fix it — was not
+    a property of the problem, only of the missing parameter.
+    """
+    assert adapter.representation_status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+
+    # The left-most spelling still joins: trimming is unconditional.
+    joined = adapter.frequencies([REPEAT_INSERTION])
+    assert joined[REPEAT_INSERTION][0].allele_frequency == pytest.approx(0.337086, rel=1e-6)
+
     shifted = [REPEAT_INSERTION_SHIFTED_ONE, REPEAT_INSERTION_SHIFTED_TWO]
-    assert adapter.frequencies(shifted) == {}
+    assert adapter.frequencies(shifted) == {}, "omitted, not zero-filled (GP-14)"
+
+
+def test_the_region_window_reaches_a_record_the_release_spells_further_right(
+    tmp_path: Path,
+) -> None:
+    """Fixing the key is half the fix; the fetch window has to cover both spellings.
+
+    gnomAD's own release is left-aligned, so this shape is built rather than found
+    — but the failure it guards against is not hypothetical, it is the same
+    silent miss one layer down. A query left-aligned to POS 300 and a record
+    spelled at POS 302 occupy disjoint spans, so a window of ``[300, 300]`` never
+    fetches the record, never canonicalises it, and reports "gnomAD has no record"
+    with a join key that was by then perfectly correct.
+
+    The window runs from the left-most position out to
+    ``rightmost_equivalent_position``, which is read from the reference rather than
+    guessed as a padding constant. Asserted with ``merge_window_bp=0`` so the
+    coalescing cannot supply the coverage by accident and hide a broken bound.
+    """
+    # chr21:296-308 = T G A T A C C C G T T A G, so position 300 is an ``A``
+    # followed by a three-base ``C`` run: a single-``C`` insertion after it is
+    # legal at 300, 301, 302 and 303 and every spelling is the same event.
+    reference = _ConstantReference("chr21", 296, "TGATACCCGTTAG")
+    body = "chr21\t302\t.\tC\tCC\t.\tPASS\tAC=10;AN=1000;AF=0.01;AC_afr=10;AN_afr=500;AF_afr=0.02\n"
+    path = write_sites_vcf(tmp_path, body)
+
+    left_aligned_query = "GRCh38:chr21:300:A:AC"
+    with open_adapter(path, reference=reference, merge_window_bp=0) as instance:
+        # The record's own spelling and the left-aligned one are the same event.
+        record_side = instance.canonicalise("chr21", 302, "C", "CC")
+        assert (record_side.position, record_side.ref, record_side.alt) == (300, "A", "AC")
+
+        result = instance.frequencies([left_aligned_query])
+        assert left_aligned_query in result, (
+            "the record is spelled two bases right of the query key; a window that "
+            "stops at the query position loses it to the fetch, not to the key"
+        )
+        assert by_population(result[left_aligned_query])["afr"].allele_count == 10
+
+    # Without the reference neither side moves, so the miss is honest and omitted.
+    with open_adapter(path, merge_window_bp=0) as plain:
+        assert plain.frequencies([left_aligned_query]) == {}
 
 
 def test_left_alignment_against_a_reference_restores_the_join(
@@ -1078,6 +1279,101 @@ def test_left_alignment_against_a_reference_restores_the_join(
     ids = {record.coordinate.variant_id for record in normalised.variants}
     assert ids == {REPEAT_INSERTION}
     assert REPEAT_INSERTION in adapter.frequencies(sorted(ids))
+
+
+def test_a_reference_only_ever_adds_joins_and_never_moves_one(
+    adapter: GnomadSitesFrequencyAdapter,
+    aligning_adapter: GnomadSitesFrequencyAdapter,
+) -> None:
+    """Configuring a reference must be safe, not merely useful.
+
+    Left-alignment now runs on the *record* side too, and a record whose key moved
+    when it should not have would silently detach an answer that used to join —
+    trading one silent miss for another. Asserted over the whole slice: the
+    aligning adapter answers every variant the plain one does, with byte-identical
+    frequencies, and the aligning adapter's extra answers are additional spellings
+    rather than different numbers.
+    """
+    ids = [row_variant_id(row) for row in fixture_rows()]
+    plain = adapter.frequencies(ids)
+    aligned = aligning_adapter.frequencies(ids)
+    assert set(plain) <= set(aligned)
+    assert dump(plain) == dump({key: aligned[key] for key in plain})
+
+
+def test_absence_is_still_absence_once_a_reference_is_configured(
+    aligning_adapter: GnomadSitesFrequencyAdapter,
+) -> None:
+    """GP-14 survives the change that made more things join.
+
+    Two ways this could have been blurred, both checked. A widened fetch window
+    reads neighbouring records, and a variant gnomAD has never seen must not
+    collect one of them; and nothing anywhere may turn a missing record into
+    ``allele_frequency=0.0``, which would convert "no evidence" into the strongest
+    rarity evidence the dataset can give.
+    """
+    absent = [NOT_IN_GNOMAD, ANOTHER_ABSENT, UNLISTED_ALT_AT_A_KNOWN_SITE]
+    assert aligning_adapter.frequencies(absent) == {}
+
+    mixed = aligning_adapter.frequencies([*absent, TRUE_ZERO])
+    assert set(mixed) == {TRUE_ZERO}
+    assert by_population(mixed[TRUE_ZERO])[GLOBAL_POPULATION].allele_frequency == 0.0
+    assert by_population(mixed[TRUE_ZERO])[GLOBAL_POPULATION].allele_number == 403_848
+
+    # The three ``AN=0`` records stay omitted: observed, but with no frequency to
+    # report, which is not the same fact as a genuine zero.
+    assert NO_CALLED_ALLELES not in aligning_adapter.frequencies([NO_CALLED_ALLELES])
+
+
+def test_the_left_aligning_lookup_is_byte_identical_across_runs_and_windows(
+    aligning_adapter: GnomadSitesFrequencyAdapter,
+) -> None:
+    """GP-30, over the path that now reads a reference.
+
+    The merge window is still a query-count knob and not a correctness one, and the
+    reference reads it triggers must not make the result depend on how the batch
+    happened to be coalesced.
+    """
+    ids = [REPEAT_INSERTION, REPEAT_INSERTION_SHIFTED_TWO, DELETION, TRUE_ZERO, NOT_IN_GNOMAD]
+    reference = _SliceReference.from_fixture()
+    digests = {dump(aligning_adapter.frequencies(ids)) for _ in range(2)}
+    for window in (0, 1, 250, 10_000):
+        with open_adapter(FIXTURE, reference=reference, merge_window_bp=window) as instance:
+            digests.add(dump(instance.frequencies(ids)))
+    assert len(digests) == 1
+
+
+def test_a_reference_that_raises_cannot_leak_a_coordinate_or_break_the_lookup(
+    adapter: GnomadSitesFrequencyAdapter,
+) -> None:
+    """PRIV-09 and GP-14 over the surface left-alignment newly added.
+
+    A ``ReferenceLookup`` is caller-supplied and may raise anything — pysam puts
+    the region it failed on into its own messages, exactly as cyvcf2 does. The
+    shift must therefore treat an unreadable base as absence of information and
+    stop where it is, never propagate the exception, and never let its text out.
+    The un-shifted representation is still a valid one; a crash, or a coordinate in
+    a traceback, is not.
+    """
+
+    class _Leaky:
+        def fetch(self, contig: str, start: int, end: int) -> str:
+            raise RuntimeError(f"{contig}:{start}-{end}")
+
+    with open_adapter(FIXTURE, reference=_Leaky()) as instance:
+        try:
+            result = instance.frequencies([REPEAT_INSERTION, REPEAT_INSERTION_SHIFTED_ONE])
+        except Exception as exc:  # pragma: no cover - the assertion is the message
+            rendered = "".join(traceback.format_exception(exc))
+            pytest.fail(f"an unreadable reference must not raise:\n{rendered}")
+
+    # Degraded exactly as far as the reference failed: the left-most spelling still
+    # joins on the unconditional trim, the shifted one is omitted rather than
+    # zero-filled, and neither answer was invented.
+    assert set(result) == {REPEAT_INSERTION}
+    assert by_population(result[REPEAT_INSERTION])[GLOBAL_POPULATION].allele_frequency == (
+        pytest.approx(0.337086, rel=1e-6)
+    )
 
 
 def test_several_indels_at_one_position_stay_apart(

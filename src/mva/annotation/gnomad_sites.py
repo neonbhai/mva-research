@@ -6,7 +6,7 @@ VCFs that the offline acquisition step downloaded. It is the highest-value half 
 TD-01: allele frequency is the strongest rarity signal the ranking has, and until
 now it was fabricated.
 
-Six things here are load-bearing, and each exists because the obvious shortcut is
+Seven things here are load-bearing, and each exists because the obvious shortcut is
 a silent, plausible-looking wrong answer.
 
 **Absence stays absent (GP-14).** A variant with no gnomAD record is *omitted* from
@@ -68,6 +68,22 @@ set of genetic ancestry groups is read out of the VCF header
 (``##INFO=<ID=AF_afr,...``), not hard-coded, so a release that adds or renames a
 group is followed rather than silently truncated.
 
+**One canonicalisation rule, never a second copy (ADR 0018).** Both sides of the
+join — the caller's variant IDs and every ALT read out of the release — are put
+through :func:`mva.alleles.canonicalise_allele`, the same function
+:mod:`mva.ingestion.normalise` and
+:class:`~mva.annotation.clinvar_vcf.ClinvarVcfAdapter` call. This module keeps no
+trimming or shifting logic of its own. It used to: a private
+``minimal_representation`` that trimmed but could not left-align, which meant a
+left-aligned query key and a gnomAD record spelled elsewhere in the same repeat
+tract simply did not join — and a variant with no frequency record is scored as
+novel and ultra-rare, the strongest promoting signal the ranker has. Two
+implementations of one rule was the defect; deleting the second one is the fix.
+The adapter therefore accepts an optional :class:`~mva.alleles.ReferenceLookup`,
+left-aligns when it has one, and says so through
+:attr:`~GnomadSitesFrequencyAdapter.representation_status` when it does not
+(GP-14) rather than letting the miss read as "gnomAD has no record".
+
 **Never the network (PRIV-05).** Both cyvcf2 and pysam will happily open an
 ``https://`` tabix URL and range-request a remote index. That capability is not
 used and must not be: a proband coordinate in an outbound request is an
@@ -97,6 +113,13 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Protocol, cast
 
+from mva.alleles import (
+    CanonicalAllele,
+    LeftAlignmentStatus,
+    ReferenceLookup,
+    canonicalise_allele,
+    rightmost_equivalent_position,
+)
 from mva.errors import AdapterUnavailableError, GenomeBuildMismatchError, NetworkDeniedError
 from mva.models.base import error_token
 from mva.models.genome import GenomeBuild, contig_sort_key, normalise_contig
@@ -557,41 +580,7 @@ def _parse_header_facts(raw_header: str, *, path: Path) -> GnomadHeaderFacts:
     )
 
 
-# ------------------------------------------------------------------- normalisation
-
-
-def minimal_representation(position: int, ref: str, alt: str) -> tuple[int, str, str]:
-    """Parsimony-trim an allele pair: shared suffix, then shared prefix, keeping >= 1 base.
-
-    This is a deliberate, documented duplicate of ``mva.ingestion.normalise._parsimony_trim``.
-    GP-03 forbids ``annotation`` importing ``ingestion``, and the alternative — joining
-    gnomAD's alleles against proband alleles trimmed by a *different* rule — is the
-    single most dangerous bug this adapter could ship: a mismatched indel
-    representation does not raise, it just fails to join, and a variant with no
-    frequency record looks exactly like a rare one.
-
-    ``tests/unit/test_gnomad_adapter.py::test_minimal_representation_matches_ingestion``
-    pins the two implementations to each other so they cannot drift apart in silence.
-
-    What this does **not** do is left-align, because that needs a reference FASTA
-    that the annotation stage does not have. gnomAD's own alleles are left-aligned
-    and minimal, so the join holds for any proband VCF that was also left-aligned —
-    which is every caller in common use, and is what ``normalise_variants`` does
-    when it is given a reference. A proband indel in a repeat that was *not*
-    left-aligned will not join, and will look like a novel variant. See
-    ``test_a_right_shifted_indel_does_not_join`` for that failure written down.
-    """
-    while len(ref) > 1 and len(alt) > 1 and ref[-1] == alt[-1]:
-        ref, alt = ref[:-1], alt[:-1]
-
-    limit = min(len(ref), len(alt)) - 1
-    shared = 0
-    while shared < limit and ref[shared] == alt[shared]:
-        shared += 1
-    if shared:
-        ref, alt = ref[shared:], alt[shared:]
-        position += shared
-    return position, ref, alt
+# --------------------------------------------------------------- query planning
 
 
 def merge_query_regions(
@@ -624,7 +613,14 @@ def merge_query_regions(
 
 @dataclass(frozen=True, slots=True)
 class _Query:
-    """One parsed variant ID, ready to be looked up."""
+    """One caller-supplied variant ID, decomposed into a joinable coordinate.
+
+    ``position``/``ref``/``alt`` are the **canonical** form, not the raw text of
+    the ID: they have been through :func:`mva.alleles.canonicalise_allele`, which
+    is the same function every gnomAD record read out of the release is reduced
+    by. Both sides of the join therefore agree by construction rather than by the
+    caller having happened to normalise first.
+    """
 
     variant_id: str
     contig: str
@@ -632,19 +628,68 @@ class _Query:
     ref: str
     alt: str
 
+    search_end: int
+    """Right-most POS at which an equivalent spelling of this event could sit.
+
+    Equal to ``position`` unless a reference is configured and the variant sits
+    in a repeat tract. See :func:`mva.alleles.rightmost_equivalent_position` and
+    :attr:`span`, which is where it is actually spent."""
+
     @property
     def span(self) -> tuple[int, int]:
-        """1-based inclusive REF span, which is what the region query must cover."""
-        return (self.position, self.position + len(self.ref) - 1)
+        """The 1-based inclusive window a region query must cover to be complete.
+
+        Fixing the join key is only half the fix. An index query finds records by
+        the bases they occupy, so a key that is now correct still loses its record
+        if the fetch window never reaches the place the release spells it — and
+        that miss is indistinguishable from "gnomAD has no record", which is the
+        exact failure this adapter exists to not have.
+
+        The window is ``[canonical POS, max(end of the canonical REF span,
+        right-most equivalent POS)]``, and it is complete in both directions:
+
+        * **Nothing is missed to the left.** With a reference, ``position`` is the
+          *left-most* legal spelling of the event, so no record of it can sit
+          further left. Without one, both sides are trimmed only and the window is
+          byte-for-byte the one this adapter used before ADR 0018 — the degraded
+          state is unchanged, not newly degraded.
+        * **Non-minimal records to the left are already caught.** Trimming moves a
+          POS rightwards but never outside the raw REF span, so a record whose
+          canonical POS lands in this window necessarily *overlaps* this window
+          with its raw span, and htslib returns every overlapping record.
+          ``chr21:100 AT>AG`` is fetched by a query at 101.
+        * **Right-shifted records need the right edge.** Left-alignment moves a
+          record's POS leftwards, out of its raw span, so a release record
+          spelling this insertion further along the tract occupies a span disjoint
+          from ``position`` and would never be fetched at all.
+          ``rightmost_equivalent_position`` bounds that from the reference instead
+          of from a guessed padding constant, and the bound is provably sufficient:
+          a record's raw POS is never greater than its own trimmed POS, which is
+          never greater than the right-most legal spelling of the event.
+
+        The REF-span end is retained in the ``max`` because a deletion's REF covers
+        several bases and, with no reference configured, ``search_end`` is just
+        ``position``. Over-reaching costs bases of index query that are already
+        inside a merged span; under-reaching re-opens the silent miss.
+        """
+        return (self.position, max(self.position + len(self.ref) - 1, self.search_end))
 
 
-def _parse_variant_id(variant_id: str, *, build: GenomeBuild) -> _Query:
+def _parse_variant_id(
+    variant_id: str, *, build: GenomeBuild, reference: ReferenceLookup | None
+) -> _Query:
     """Split a canonical variant ID, refusing anything from another assembly (GP-11).
 
     A GRCh37 coordinate looked up in a GRCh38 dataset does not return nothing — it
     returns whatever unrelated variant happens to sit at that offset, or nothing,
     and both answers are confidently wrong. Cross-build lookup raises rather than
     guessing, exactly as ``GenomicCoordinate.assert_same_build`` does.
+
+    The caller's ID is canonicalised here rather than trusted. Ingestion already
+    normalises proband records, so inside the pipeline this is usually a no-op —
+    but the adapter is also called with hand-written and third-party IDs, and an
+    adapter that joins correctly only when its caller happened to normalise first
+    is an adapter whose correctness lives somewhere else.
     """
     parts = variant_id.split(":")
     if len(parts) != 5:
@@ -677,15 +722,33 @@ def _parse_variant_id(variant_id: str, *, build: GenomeBuild) -> _Query:
     except ValueError as exc:
         msg = f"Variant ID <variant:{error_token(variant_id)}> has a non-integer position."
         raise ValueError(msg) from exc
-    trimmed_position, trimmed_ref, trimmed_alt = minimal_representation(
-        position, ref.upper(), alt.upper()
+    canonical_contig = normalise_contig(contig)
+    canonical = canonicalise_allele(
+        contig=canonical_contig,
+        position=position,
+        ref=ref.strip().upper(),
+        alt=alt.strip().upper(),
+        reference=reference,
     )
+    search_end = canonical.position
+    if reference is not None:
+        search_end = max(
+            search_end,
+            rightmost_equivalent_position(
+                contig=canonical_contig,
+                position=canonical.position,
+                ref=canonical.ref,
+                alt=canonical.alt,
+                reference=reference,
+            ),
+        )
     return _Query(
         variant_id=variant_id,
-        contig=normalise_contig(contig),
-        position=trimmed_position,
-        ref=trimmed_ref,
-        alt=trimmed_alt,
+        contig=canonical_contig,
+        position=canonical.position,
+        ref=canonical.ref,
+        alt=canonical.alt,
+        search_end=search_end,
     )
 
 
@@ -857,6 +920,7 @@ class GnomadSitesFrequencyAdapter:
         subset: str = "exomes",
         require_contigs: Sequence[str] | None = None,
         merge_window_bp: int = DEFAULT_MERGE_WINDOW_BP,
+        reference: ReferenceLookup | None = None,
         stability_probe_seconds: float = 0.0,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -877,6 +941,17 @@ class GnomadSitesFrequencyAdapter:
                 coverage hole either way; this makes the failure happen before a
                 run has done any work.
             merge_window_bp: query-coalescing window; see :func:`merge_query_regions`.
+            reference: optional 1-based inclusive reference accessor, the same
+                :class:`~mva.alleles.ReferenceLookup` ingestion and the ClinVar
+                adapter take. Trimming to a minimal representation never needs one
+                and is always applied, so ``5031991 GAA>GA`` versus ``GA>G`` joins
+                with or without it. Left-alignment does need one: gnomAD stores
+                left-aligned alleles, so without a reference an indel spelled
+                anywhere else in the same repeat tract cannot be reconciled, is
+                reported as having no frequency record, and is then scored as
+                novel and ultra-rare. :attr:`representation_status` states which
+                of the two this adapter is in rather than leaving a reader to
+                infer it from an absent frequency (GP-14).
             stability_probe_seconds: when > 0, re-stat each file after this delay and
                 reject it if the size changed. Off by default so construction does
                 not sleep.
@@ -895,6 +970,7 @@ class GnomadSitesFrequencyAdapter:
         self._release = release.strip()
         self._subset = subset.strip()
         self._merge_window_bp = merge_window_bp
+        self._reference = reference
         if not self._release or not self._subset:
             msg = "gnomAD adapter requires a non-empty 'release' and 'subset' (GP-18)."
             raise AdapterUnavailableError(msg)
@@ -1156,12 +1232,68 @@ class GnomadSitesFrequencyAdapter:
         """Shards excluded as still-arriving, truncated or unreadable, with the reason."""
         return self._incomplete_sources
 
+    @property
+    def representation_status(self) -> LeftAlignmentStatus:
+        """Whether this adapter can reconcile a *shifted* indel spelling, typed.
+
+        ``APPLIED`` when a reference was supplied, ``UNAVAILABLE_NO_REFERENCE``
+        otherwise. Trimming is unconditional either way, so the non-minimal class
+        of mismatch joins in both states; what the degraded state costs is the
+        repeat-tract class, where gnomAD and the caller place one insertion at
+        different positions. Typed rather than logged so a report can state the
+        limitation instead of a reader having to infer it from a missing key —
+        which is precisely the inference GP-14 forbids.
+        """
+        if self._reference is None:
+            return LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+        return LeftAlignmentStatus.APPLIED
+
+    @property
+    def representation_limitation(self) -> str | None:
+        """One sentence for a report footer, or ``None`` when nothing is degraded."""
+        if self._reference is not None:
+            return None
+        return (
+            "gnomAD lookups were canonicalised by trimming only: no reference FASTA "
+            "was supplied to the adapter, so an indel that gnomAD places at a "
+            "different position within the same repeat tract could not be matched. "
+            "Such a variant is reported as having no frequency data, which is absence "
+            "of information and not evidence of rarity."
+        )
+
     def close(self) -> None:
         """Release every open shard handle. Idempotent."""
         for reader in self._readers.values():
             reader.close()
         self._readers = {}
         self._closed = True
+
+    # ------------------------------------------------------------ canonicalisation
+
+    def canonicalise(self, contig: str, position: int, ref: str, alt: str) -> CanonicalAllele:
+        """The single entry point both sides of the join go through.
+
+        Delegates to :func:`mva.alleles.canonicalise_allele` — the same function
+        :mod:`mva.ingestion.normalise` and
+        :class:`~mva.annotation.clinvar_vcf.ClinvarVcfAdapter` call. There is
+        deliberately no trimming or shifting logic in this module: a second
+        implementation of the rule is what made a left-aligned proband indel and
+        the gnomAD record for the same event fail to join, silently, in the
+        highest-weight signal the ranker has (ADR 0018).
+
+        Public so that a test can compare this adapter's representation against
+        ingestion's and ClinVar's *directly*, rather than inferring that all three
+        agree from a join that happened to succeed. Agreement inferred from a
+        passing join is exactly the evidence that was available while they
+        disagreed.
+        """
+        return canonicalise_allele(
+            contig=contig,
+            position=position,
+            ref=ref,
+            alt=alt,
+            reference=self._reference,
+        )
 
     # --------------------------------------------------------------------- lookup
 
@@ -1232,7 +1364,7 @@ class GnomadSitesFrequencyAdapter:
             raise AdapterUnavailableError(msg)
 
         queries = [
-            _parse_variant_id(variant_id, build=self.build)
+            _parse_variant_id(variant_id, build=self.build, reference=self._reference)
             for variant_id in dict.fromkeys(variant_ids)
         ]
         by_contig: dict[str, list[_Query]] = {}
@@ -1276,11 +1408,19 @@ class GnomadSitesFrequencyAdapter:
         # this one.
         #
         # A *list* of variant IDs per key, not one: two different caller spellings
-        # of the same event trim to the same key (``chr21:5031991 GAA>GA`` and
-        # ``GA>G`` are one deletion), and a plain dict would let the second silently
-        # evict the first, so one of the two callers would be told gnomAD has no
-        # record. Assignment into ``found`` rather than accumulation, so a record
-        # returned by two overlapping regions cannot be counted twice.
+        # of the same event canonicalise to the same key (``chr21:5031991 GAA>GA``
+        # and ``GA>G`` are one deletion; with a reference configured, so are two
+        # spellings from opposite ends of one repeat tract), and a plain dict would
+        # let the second silently evict the first, so one of the two callers would
+        # be told gnomAD has no record. Assignment into ``found`` rather than
+        # accumulation, so a record returned by two overlapping regions cannot be
+        # counted twice.
+        #
+        # Records are matched on the canonical key, never on their raw POS. The
+        # spans below no longer partition the queried positions — a query that was
+        # left-aligned reaches out to the right-most spelling of its own event — so
+        # one release record can be handed back by two fetches, and a record whose
+        # raw POS falls outside the span it answers is the very case being fixed.
         wanted: dict[tuple[int, str, str], list[str]] = {}
         for query in queries:
             wanted.setdefault((query.position, query.ref, query.alt), []).append(query.variant_id)
@@ -1294,7 +1434,9 @@ class GnomadSitesFrequencyAdapter:
             # terminals, log files, crash reports and agent context (PRIV-09).
             try:
                 for record in reader(f"{source.raw}:{start}-{end}"):
-                    for allele_key, frequencies in self._record_frequencies(record):
+                    for allele_key, frequencies in self._record_frequencies(
+                        record, contig=source.canonical
+                    ):
                         if not frequencies:
                             continue
                         for variant_id in wanted.get(allele_key, ()):
@@ -1326,14 +1468,23 @@ class GnomadSitesFrequencyAdapter:
                 raise AdapterUnavailableError(msg) from None
 
     def _record_frequencies(
-        self, record: _SitesRecord
+        self, record: _SitesRecord, *, contig: str
     ) -> Iterable[tuple[tuple[int, str, str], tuple[PopulationFrequency, ...]]]:
         """Yield ``((pos, ref, alt), frequencies)`` for each ALT of one gnomAD record.
 
         Emitted per ALT rather than per record so that an un-split source would still
         attribute ``Number=A`` values to the right allele instead of to the first one.
-        Both sides of the join are put through :func:`minimal_representation`, so the
-        key is computed by one rule rather than two.
+
+        The key is built from the **canonicalised** allele, through
+        :meth:`canonicalise`, which is the same call the caller's variant ID went
+        through — one rule, not two (ADR 0018). ``contig`` is threaded in only so
+        the reference can be read; it is not part of the key, which is scoped to
+        one contig's shard by construction.
+
+        On a release that is already left-aligned and minimal — which gnomAD's is —
+        this costs nothing: :func:`~mva.alleles.canonicalise_allele` exits its shift
+        loop on the first comparison for an allele that cannot move, so no
+        reference base is fetched for the overwhelming majority of records.
         """
         position = record.POS
         ref = record.REF.upper()
@@ -1341,9 +1492,9 @@ class GnomadSitesFrequencyAdapter:
         info = record.INFO
 
         for index, raw_alt in enumerate(record.ALT):
-            trimmed = minimal_representation(position, ref, str(raw_alt).upper())
+            canonical = self.canonicalise(contig, position, ref, str(raw_alt).upper())
             yield (
-                trimmed,
+                (canonical.position, canonical.ref, canonical.alt),
                 self._build_frequencies(info, index=index, filter_status=filter_status),
             )
 

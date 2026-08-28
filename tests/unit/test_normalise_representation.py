@@ -8,23 +8,31 @@ scored as novel and ultra-rare: the strongest promoting signal the ranker has. T
 same bug therefore manufactures false positives and deletes true pathogenic
 assertions at once.
 
-Three things are pinned here:
+Four things are pinned here:
 
-1. **The rule is shared.** :mod:`mva.alleles` holds it; ingestion and the ClinVar
-   adapter both call that one function. The property test below generates allele
-   pairs and asserts the two callers can never disagree, because two
-   implementations that agree today is exactly the state the repository was in
-   when the defect was introduced.
+1. **The rule is shared.** :mod:`mva.alleles` holds it; ingestion, the ClinVar
+   adapter and the gnomAD adapter all call that one function. The property test
+   below generates allele pairs and asserts the three callers can never disagree,
+   because two implementations that agree today is exactly the state the
+   repository was in when the defect was introduced — twice. gnomAD was the second
+   time: it kept a private ``minimal_representation`` that trimmed but could not
+   left-align, in the highest-weight signal the ranker has, on a callset that is
+   a substantial fraction indel-bearing (ADR 0018).
 2. **Left-alignment against a real indexed FASTA works**, including the boundary
    translations that are easy to get silently wrong: 1-based inclusive versus
    pysam's 0-based half-open, and a ``chr``-prefixed FASTA against a bare-contig
    VCF.
 3. **The absence of a reference is a typed, surfaced state** (GP-14), not a skipped
    step. A run that could not left-align its indels has to say so.
+4. **No adapter may grow its own copy of the rule.** A structural lint over
+   ``src/mva/annotation`` fails on allele string surgery outside
+   :mod:`mva.alleles`, so the next adapter cannot reintroduce the defect by
+   writing a private trim that looks obviously correct.
 """
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -40,6 +48,7 @@ from mva.alleles import (
     trim_parsimoniously,
 )
 from mva.annotation.clinvar_vcf import ClinvarVcfAdapter
+from mva.annotation.gnomad_sites import GnomadSitesFrequencyAdapter
 from mva.determinism import hash_file, stable_hash
 from mva.errors import AdapterUnavailableError
 from mva.ingestion.normalise import (
@@ -448,7 +457,7 @@ def test_repeat_runs_are_byte_identical(fasta_reference: FastaReference) -> None
 
 
 # ---------------------------------------------------------------------------
-# 4. One rule, two callers
+# 4. One rule, three callers
 # ---------------------------------------------------------------------------
 
 MINIMAL_CLINVAR_VCF = (
@@ -459,6 +468,29 @@ MINIMAL_CLINVAR_VCF = (
     "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
     "21\t21\t1\tA\tAC\t.\t.\tCLNSIG=Pathogenic;CLNREVSTAT=reviewed_by_expert_panel\n"
 )
+
+#: The same insertion, in a gnomAD-shaped sites VCF over the same tiny contig. The
+#: adapter reads its dataset and build from ``##contig ... assembly=`` and its
+#: ancestry groups from the ``AF_<grp>`` INFO IDs, so both have to be here; the
+#: release string is not in the header at all and is supplied to the constructor.
+MINIMAL_GNOMAD_VCF = (
+    "##fileformat=VCFv4.2\n"
+    "##hailversion=0.2.123-12ebb27db620\n"
+    "##contig=<ID=chr21,length=46,assembly=gnomAD_GRCh38>\n"
+    '##FILTER=<ID=PASS,Description="Passed all variant filters">\n'
+    '##INFO=<ID=AC,Number=A,Type=Integer,Description="x">\n'
+    '##INFO=<ID=AN,Number=1,Type=Integer,Description="x">\n'
+    '##INFO=<ID=AF,Number=A,Type=Float,Description="x">\n'
+    '##INFO=<ID=AC_nfe,Number=A,Type=Integer,Description="x">\n'
+    '##INFO=<ID=AN_nfe,Number=1,Type=Integer,Description="x">\n'
+    '##INFO=<ID=AF_nfe,Number=A,Type=Float,Description="x">\n'
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+    "chr21\t21\t.\tA\tAC\t.\tPASS\tAC=1;AN=100;AF=0.01;AC_nfe=1;AN_nfe=50;AF_nfe=0.02\n"
+)
+
+#: Filename the gnomAD adapter will accept: it cross-checks the declared release
+#: and subset against the name because the header carries neither.
+GNOMAD_FILENAME = "gnomad.exomes.v4.1.sites.chr21.mini.vcf"
 
 
 def _indexed_vcf(directory: Path, text: str, *, name: str = "mini.vcf") -> Path:
@@ -486,6 +518,25 @@ def paired_adapters(
     with_reference.close()
 
 
+@pytest.fixture(scope="module")
+def paired_gnomad_adapters(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[GnomadSitesFrequencyAdapter, GnomadSitesFrequencyAdapter]]:
+    """The gnomAD adapter with and without the same reference the ClinVar pair uses."""
+    directory = tmp_path_factory.mktemp("paired-gnomad")
+    path = _indexed_vcf(directory, MINIMAL_GNOMAD_VCF, name=GNOMAD_FILENAME)
+    without = GnomadSitesFrequencyAdapter(path, release="v4.1", subset="exomes")
+    with_reference = GnomadSitesFrequencyAdapter(
+        path,
+        release="v4.1",
+        subset="exomes",
+        reference=InMemoryReference("chr21", CHR21_SEQ),
+    )
+    yield without, with_reference
+    without.close()
+    with_reference.close()
+
+
 @given(
     ref=st.text(alphabet="ACGT", min_size=1, max_size=8),
     alt=st.text(alphabet="ACGT", min_size=1, max_size=8),
@@ -494,33 +545,46 @@ def paired_adapters(
 @settings(
     max_examples=400, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
 )
-def test_adapter_and_ingestion_canonicalisation_can_never_disagree(
+def test_gnomad_and_ingestion_canonicalisation_can_never_disagree(
     paired_adapters: tuple[ClinvarVcfAdapter, ClinvarVcfAdapter, InMemoryReference],
+    paired_gnomad_adapters: tuple[GnomadSitesFrequencyAdapter, GnomadSitesFrequencyAdapter],
     ref: str,
     alt: str,
     position: int,
 ) -> None:
-    """The property the whole refactor exists to guarantee.
+    """The property the whole refactor exists to guarantee, across all three callers.
 
-    Before this change the two sides were separate implementations: ingestion
-    trimmed, the adapter did not, and the disagreement surfaced only as a missing
-    clinical assertion. A single shared function makes agreement structural, and
-    this test is what stops a future edit from quietly re-introducing a second
-    copy — including in the harder direction, where a reference is available and
-    both sides must also left-align identically.
+    Before ADR 0018 the sides were separate implementations: ingestion trimmed, the
+    ClinVar adapter did not, and the disagreement surfaced only as a missing
+    clinical assertion. That was fixed for ClinVar and **left in place for gnomAD**,
+    which kept a private ``minimal_representation`` — so the highest-weight signal
+    the ranker has went on failing to join right-shifted indels, on a callset that
+    is a substantial fraction indel-bearing, while a test asserting agreement between the other two
+    passed. Comparing only two of three callers is exactly how that survived.
+
+    So all three are compared here, in both reference states, at every generated
+    allele pair. The no-reference state catches a divergent trim; the with-reference
+    state catches a divergent left shift, which is the one gnomAD was getting wrong
+    and the one no amount of trimming agreement can detect.
     """
     assume(ref != alt)
-    without_reference, with_reference, reference = paired_adapters
+    clinvar_plain, clinvar_aligning, reference = paired_adapters
+    gnomad_plain, gnomad_aligning = paired_gnomad_adapters
     record = make_record(position, ref, alt)
 
-    for adapter, lookup in ((without_reference, None), (with_reference, reference)):
-        from_adapter = adapter.canonicalise("chr21", position, ref, alt)
+    for clinvar, gnomad, lookup in (
+        (clinvar_plain, gnomad_plain, None),
+        (clinvar_aligning, gnomad_aligning, reference),
+    ):
         from_ingestion = trim_and_left_align(record, lookup).coordinate
-        assert (from_adapter.position, from_adapter.ref, from_adapter.alt) == (
-            from_ingestion.position,
-            from_ingestion.ref,
-            from_ingestion.alt,
-        )
+        expected = (from_ingestion.position, from_ingestion.ref, from_ingestion.alt)
+        for name, canonical in (
+            ("clinvar", clinvar.canonicalise("chr21", position, ref, alt)),
+            ("gnomad", gnomad.canonicalise("chr21", position, ref, alt)),
+        ):
+            assert (canonical.position, canonical.ref, canonical.alt) == expected, (
+                f"{name} disagrees with ingestion (reference {'supplied' if lookup else 'absent'})"
+            )
 
 
 @given(
@@ -572,3 +636,100 @@ def test_symbolic_and_missing_alleles_are_returned_untouched() -> None:
         result = canonicalise_allele(contig="chr21", position=100, ref="A", alt=allele)
         assert (result.position, result.ref, result.alt) == (100, "A", allele)
         assert result.operations == ()
+
+
+# ---------------------------------------------------------------------------
+# 5. The structural lint: no adapter may grow a second copy of the rule
+# ---------------------------------------------------------------------------
+
+SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "mva"
+
+#: The one module entitled to take an allele apart. Everything else calls it.
+CANONICALISATION_OWNER = SRC_ROOT / "alleles.py"
+
+#: Local names that, when subscripted or sliced, mean somebody is doing allele
+#: string surgery. Trimming *is* subscripting: Tan et al. Algorithm 1 is
+#: ``ref[-1] == alt[-1]``, ``ref[:-1]``, ``ref[shared:]`` and nothing else, so a
+#: reintroduced private trim cannot avoid these no matter what it is called.
+#: Matching on the shape rather than on a function name is deliberate — a name
+#: list only catches the copy that happens to be spelled the way the last one was.
+ALLELE_LOCAL_NAMES: frozenset[str] = frozenset(
+    {
+        "ref",
+        "alt",
+        "ref_allele",
+        "alt_allele",
+        "reference_allele",
+        "alternate_allele",
+        "trimmed_ref",
+        "trimmed_alt",
+        "allele",
+    }
+)
+
+CANONICALISATION_REMEDIATION = (
+    "\n\nRemediation: call `mva.alleles.canonicalise_allele` (and, for a region "
+    "bound, `rightmost_equivalent_position`). Do not write a local trim, however "
+    "small. `annotation` sits at layer 4 and `alleles` at layer 1, so importing it "
+    "costs no GP-03 violation and there is nothing left to justify a copy.\n\n"
+    "This lint exists because the copy has been written twice. The gnomAD adapter "
+    "kept a private `minimal_representation` that trimmed correctly and could not "
+    "left-align, so a proband indel that ingestion had left-aligned was looked up "
+    "under a key gnomAD does not hold. That does not raise. It returns no frequency "
+    "record, which this pipeline scores as novel and ultra-rare — the strongest "
+    "promoting signal it has — for a variant gnomAD may know to be common (ADR "
+    "0018, GP-14).\n\n"
+    "If an adapter genuinely needs a new representation operation, add it to "
+    "`mva.alleles` where all three callers get it at once."
+)
+
+
+def test_no_annotation_adapter_defines_its_own_canonicalisation() -> None:
+    """ADR 0018 as an enforced rule rather than a sentence in a decision record.
+
+    The property test above proves the three callers agree *today*. It cannot stop
+    a fourth adapter from arriving next week with its own five-line trim that also
+    agrees today and stops agreeing the first time someone touches it — which is
+    the exact history of this defect. This lint is the part that scales: it fails
+    on the shape of the code, in a package where that shape has no legitimate use,
+    and it names the consequence in the failure message because for an agent that
+    string is the only view of the rule there is (CLAUDE.md).
+    """
+    violations: list[str] = []
+    for source in sorted((SRC_ROOT / "annotation").glob("*.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Subscript) or not isinstance(node.value, ast.Name):
+                continue
+            if node.value.id in ALLELE_LOCAL_NAMES:
+                violations.append(
+                    f"  src/mva/annotation/{source.name}:{node.lineno} — `{ast.unparse(node)}`"
+                )
+
+    assert not violations, (
+        "Allele string surgery outside mva.alleles:\n"
+        + "\n".join(violations)
+        + CANONICALISATION_REMEDIATION
+    )
+
+
+def test_the_lint_actually_fires_on_the_shape_it_claims_to_catch() -> None:
+    """A lint nobody has seen fail is a lint nobody knows works.
+
+    ``trim_parsimoniously`` in the owning module is the exact code the deleted
+    ``gnomad_sites.minimal_representation`` was a copy of, so running the detector
+    over :data:`CANONICALISATION_OWNER` proves the rule would have caught it rather
+    than merely passing over a package that happens to be clean.
+    """
+    tree = ast.parse(CANONICALISATION_OWNER.read_text(encoding="utf-8"))
+    caught = [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in ALLELE_LOCAL_NAMES
+    ]
+    assert {"ref[-1]", "alt[-1]", "ref[:-1]"} <= set(caught), (
+        "the detector no longer recognises the shape of a parsimony trim; "
+        "mva.alleles may have been rewritten, and the lint must be updated with it"
+    )
