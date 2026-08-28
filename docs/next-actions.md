@@ -33,7 +33,7 @@ In order. Nothing downstream is meaningful until (1) holds.
 
 | # | Change | File | Blocked by |
 |---|---|---|---|
-| 1 | Bind ClinVar / gnomAD / SnpEff / MANE adapters into `AdapterSet` | `orchestrator.py`, `annotation/__init__.py` | adapter agents in flight |
+| 1 | Bind ClinVar / gnomAD / SnpEff / MANE adapters into `AdapterSet` — **and pass `reference=` to ClinVar and gnomAD** (see below) | `orchestrator.py`, `annotation/__init__.py` | adapter agents in flight |
 | 2 | Bind `HpoResourceSet` and pass `semantics=` to `score_all_genes`; thread the real `hpo_version` into `load_phenotype_profile` | `orchestrator.py` | HPO agent in flight |
 | 3 | Load `config.inputs.reference_fasta` and pass the lookup into `normalise_variants` | `orchestrator.py`, `config.py` | reference FASTA download; join agent in flight |
 | 4 | A resource-root setting for out-of-repo releases, with digests | `config.py`, `config/` | — |
@@ -45,6 +45,18 @@ In order. Nothing downstream is meaningful until (1) holds.
 
 Item 6 is the one most likely to be skipped and most costly to skip — see the
 enforcement-gap section of ADR 0014.
+
+**Item 1 has a trap.** Both the ClinVar and gnomAD adapters take an optional
+`reference=`. Constructed without one they still work, still pass their tests,
+and silently run in their degraded state — which is the *default*. Measured on
+the real gnomAD chr21 shard: of 1,382 indel records in a 520 kb exonic window,
+1,029 sit in repeat tracts, and **0 of their right-shifted spellings join without
+a reference against 989 with one**. Thirty of those are variants gnomAD calls
+common. Wiring the adapters without `reference=` therefore leaves the exact
+defect ADR 0018 was written to close, while looking fully wired.
+
+Surface `representation_limitation` into the run warnings at the same time, so a
+run that *is* degraded says so.
 
 ## Open review findings not yet closed
 
