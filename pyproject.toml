@@ -58,7 +58,11 @@ packages = ["src/mva"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
-extend-exclude = [".venv", "workflow/containers"]
+# tests/fixtures/scorer/ holds a byte-for-byte copy of the challenge's own
+# scorer, used as a differential oracle. Linting or formatting it would make
+# it no longer a copy, and the digest test that proves it is unmodified would
+# fail. It is never imported by src/.
+extend-exclude = [".venv", "workflow/containers", "tests/fixtures/scorer"]
 
 [tool.ruff.lint]
 select = [
