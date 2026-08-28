@@ -54,6 +54,7 @@ from mva.models import (
     Zygosity,
 )
 from mva.reporting import (
+    ACCEPTED_PROBAND_ID,
     NOT_MEDICAL_ADVICE,
     TIER_MARKERS,
     Assertion,
@@ -61,6 +62,7 @@ from mva.reporting import (
     build_candidate_dossier,
     build_rejection_record,
     build_track2_report,
+    compose_submission,
     render_template,
 )
 
@@ -255,6 +257,22 @@ def _pair() -> CandidatePair:
         discriminating_experiment="Western blot of the SYNTHKIN1 product in patient fibroblasts.",
         rank_rationale="Highest composite in the synthetic cohort.",
         flags=("phase_unknown",),
+    )
+
+
+def _dossier(pairs: list[CandidatePair], *, top_n: int = 1) -> str:
+    """Render a dossier for ``pairs`` alongside the submission they compose into.
+
+    The composition is built here rather than defaulted inside
+    `build_candidate_dossier` on purpose: the dossier's truncation notice states
+    what the submission actually emitted, so it has to be handed the submission.
+    """
+    return build_candidate_dossier(
+        pairs,
+        submission=compose_submission(pairs, proband_id=ACCEPTED_PROBAND_ID),
+        resolver=_resolver(),
+        clock=_clock(),
+        top_n=top_n,
     )
 
 
@@ -480,7 +498,7 @@ def test_every_tier_has_a_marker() -> None:
 @pytest.mark.unit
 def test_inference_marker_survives_into_the_dossier() -> None:
     """The population evidence in the fixture is INFERENCE tier."""
-    dossier = build_candidate_dossier([_pair()], resolver=_resolver(), clock=_clock(), top_n=1)
+    dossier = _dossier([_pair()])
     assert "[inferred]" in dossier
 
 
@@ -491,7 +509,7 @@ def test_inference_marker_survives_into_the_dossier() -> None:
 
 @pytest.mark.unit
 def test_contradicting_evidence_appears_in_the_dossier() -> None:
-    dossier = build_candidate_dossier([_pair()], resolver=_resolver(), clock=_clock(), top_n=1)
+    dossier = _dossier([_pair()])
     assert CONTRADICTION_CLAIM in dossier
     assert "EV-CONT-0001" in dossier
     assert "GP-19" in dossier
@@ -499,7 +517,7 @@ def test_contradicting_evidence_appears_in_the_dossier() -> None:
 
 @pytest.mark.unit
 def test_dossier_shows_the_component_vector_not_only_the_composite() -> None:
-    dossier = build_candidate_dossier([_pair()], resolver=_resolver(), clock=_clock(), top_n=1)
+    dossier = _dossier([_pair()])
     for component in _scores().as_dict():
         assert component.replace("_", " ") in dossier
     assert "phase is UNKNOWN" in dossier or "Phase is UNKNOWN" in dossier
@@ -585,8 +603,8 @@ def test_track2_report_carries_the_mandatory_header_and_caveats() -> None:
 @pytest.mark.unit
 def test_rendering_twice_is_byte_identical() -> None:
     assert _full_track2_report() == _full_track2_report()
-    first = build_candidate_dossier([_pair()], resolver=_resolver(), clock=_clock(), top_n=1)
-    second = build_candidate_dossier([_pair()], resolver=_resolver(), clock=_clock(), top_n=1)
+    first = _dossier([_pair()])
+    second = _dossier([_pair()])
     assert first == second
 
 

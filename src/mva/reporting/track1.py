@@ -265,21 +265,113 @@ def _row_for_pair(pair: CandidatePair, proband_id: str) -> SubmissionRow:
     )
 
 
-def truncation_notice(total_candidates: int, *, max_rows: int = MAX_SUBMISSION_ROWS) -> str | None:
-    """A one-line record of truncation, or ``None`` if nothing was dropped.
+@dataclass(frozen=True)
+class SubmissionComposition:
+    """The rows that were actually emitted, and what composition did to get them.
+
+    :func:`build_submission_rows` returns only the rows, which is all the renderer
+    needs. Everything *else* about the submission — how many candidates went in,
+    how many were dropped and for which of two quite different reasons — used to be
+    visible only in log lines, so the dossier reconstructed it by counting its own
+    ranked list and assuming the difference was the ten-row cap. It is not: rows
+    also leave via :func:`_drop_subsumed` and via the exchange in
+    :func:`_promote_pairs_above_subsets`. Reconstructing a fact you can carry is
+    how a report ends up stating a number and a reason that are both wrong.
+
+    ``subsumed`` and ``omitted - subsumed`` are the two reasons, and they are not
+    interchangeable in a document a reviewer reads: a subsumed candidate was
+    dropped because it *adds nothing the scorer can use*, and a truncated one was
+    dropped because *there was no room*. Only the second is purely a format limit.
+    """
+
+    rows: tuple[SubmissionRow, ...]
+    total_candidates: int
+    subsumed: int
+    promoted: int
+    exchanged: int
+    max_rows: int = MAX_SUBMISSION_ROWS
+
+    @property
+    def submitted(self) -> int:
+        """Rows actually emitted — counted, never inferred."""
+        return len(self.rows)
+
+    @property
+    def omitted(self) -> int:
+        """Ranked candidates that reached no submission row, for any reason."""
+        return self.total_candidates - self.submitted
+
+    @property
+    def truncated(self) -> int:
+        """Candidates that survived composition and still did not fit ``max_rows``."""
+        return self.omitted - self.subsumed
+
+
+def truncation_notice(composition: SubmissionComposition) -> str | None:
+    """A one-line record of what the submission left out, or ``None`` if nothing.
 
     Returned rather than hidden in a log so the dossier can state it: a reader
     comparing the dossier's ranked list against the submission must be able to see
     why the list is shorter, instead of inferring that the missing candidates were
     rejected on their merits.
+
+    **Takes the composition, not a count.** The predecessor took
+    ``total_candidates`` alone and derived everything else from ``max_rows``, so it
+    reported ``max_rows`` as the number submitted — a number it had no way to
+    know — and attributed every omission "solely" to the format limit, which is
+    false whenever :func:`_drop_subsumed` or the exchange removed a row. Both
+    errors are the same error: a notice about a submission was computed without
+    reference to the submission.
+
+    The two reasons are stated separately because they say different things about
+    the omitted candidate. Subsumption is a claim about the candidate — its
+    variants are already carried by a higher-ranked row, so it could add nothing to
+    either metric. Truncation is a claim about the format — nothing is wrong with
+    the candidate at all. Neither is a scientific rejection, and the notice says so.
     """
-    if total_candidates <= max_rows:
+    if composition.omitted <= 0:
         return None
-    return (
-        f"Submission truncated: {total_candidates} ranked candidates, "
-        f"{max_rows} submitted, {total_candidates - max_rows} omitted solely because "
-        f"the challenge format accepts at most {max_rows} rows. Omission here is a "
-        "format limit, not a scientific rejection; the full ranking is in the dossier."
+    if composition.subsumed < 0 or composition.truncated < 0:
+        msg = (
+            f"inconsistent composition: {composition.total_candidates} candidates, "
+            f"{composition.submitted} submitted, {composition.subsumed} subsumed leaves "
+            f"{composition.truncated} truncated, which cannot be negative."
+        )
+        raise ValueError(msg)
+
+    reasons: list[str] = []
+    if composition.subsumed:
+        reasons.append(
+            f"{composition.subsumed} dropped as already fully covered by a higher-ranked "
+            "candidate (a subset row adds no variant the F-max union does not already "
+            "hold, and rank points go to the first full match)"
+        )
+    if composition.truncated:
+        reasons.append(
+            f"{composition.truncated} omitted because the challenge format accepts at "
+            f"most {composition.max_rows} rows"
+        )
+
+    notice = (
+        f"Submission composed from {composition.total_candidates} ranked candidates: "
+        f"{composition.submitted} submitted, {composition.omitted} not submitted — "
+        + "; ".join(reasons)
+        + "."
+    )
+    if composition.exchanged:
+        subject = (
+            "One single-variant row was"
+            if composition.exchanged == 1
+            else f"{composition.exchanged} single-variant rows were"
+        )
+        notice += (
+            f" {subject} exchanged for a candidate pair carrying the same variant from below "
+            f"the {composition.max_rows}-row cut (ADR 0023), so the omitted rows are not "
+            "simply the lowest-ranked ones."
+        )
+    return notice + (
+        " Omission here is a composition or format limit, not a scientific rejection; "
+        "the full ranking is in the dossier."
     )
 
 
@@ -289,6 +381,22 @@ def build_submission_rows(
     proband_id: str,
     max_rows: int = MAX_SUBMISSION_ROWS,
 ) -> tuple[SubmissionRow, ...]:
+    """The submission rows alone — see :func:`compose_submission` for the rest.
+
+    Kept as the name every caller that only needs bytes should use. Anything that
+    *reports* on the submission (the dossier's truncation notice, for one) needs
+    the counts as well and must call :func:`compose_submission`, because counts
+    re-derived from the input list are exactly the counts that go wrong.
+    """
+    return compose_submission(pairs, proband_id=proband_id, max_rows=max_rows).rows
+
+
+def compose_submission(
+    pairs: Sequence[CandidatePair],
+    *,
+    proband_id: str,
+    max_rows: int = MAX_SUBMISSION_ROWS,
+) -> SubmissionComposition:
     """Rank, convert, truncate and compose candidate pairs into submission rows.
 
     Ordering is by EPCR descending. The scorer derives rank exactly this way
@@ -319,6 +427,10 @@ def build_submission_rows(
     then sees a partial match where a full match was available (100 -> 50), and if
     the pair carried the only copy of the second causal allele, F-max is capped
     below 1.0 as well. See ADR 0023.
+
+    Returns the rows together with the counts each pass produced, so a caller that
+    has to *describe* the submission — :func:`truncation_notice` and through it the
+    dossier — reads what happened instead of re-deriving it from the input list.
     """
     if not 1 <= max_rows <= MAX_SUBMISSION_ROWS:
         msg = (
@@ -377,7 +489,14 @@ def build_submission_rows(
             exchanged,
             max_rows,
         )
-    return _enforce_epcr_separation(composed[:max_rows])
+    return SubmissionComposition(
+        rows=_enforce_epcr_separation(composed[:max_rows]),
+        total_candidates=len(pairs),
+        subsumed=subsumed,
+        promoted=promoted,
+        exchanged=exchanged,
+        max_rows=max_rows,
+    )
 
 
 def _promote_pairs_above_subsets(
@@ -425,7 +544,7 @@ def _promote_pairs_above_subsets(
     F-max capped below 1.0 whenever the pair held the only copy of the second
     causal allele.
 
-    Reaching past the cut changes what promotion *costs*, so the pass is in two
+    Reaching past the cut changes what promotion *costs*, so the pass is in three
     parts and they are justified differently:
 
     1. **Reordering inside the window is free.** No row enters or leaves, so every
@@ -438,6 +557,17 @@ def _promote_pairs_above_subsets(
        the pair's; exactly one row enters the submission and exactly one leaves,
        and the row that leaves is the subset itself. No unrelated row moves by a
        single position.
+    3. **The lift is then re-run, because the exchange can re-create the very
+       inversion (1) exists to remove.** An exchanged-in pair lands at the slot of
+       the subset it was fetched for, which can be *below* a **different** subset
+       of that same pair — one that step (2) skipped precisely because it was
+       already covered by another superset inside the window, so step (1) had
+       settled it against that other superset and never saw this pair. Step (1)'s
+       guarantee is a statement about the rows in the window; step (2) changes
+       which rows those are, so the guarantee has to be re-established afterwards.
+       Re-running is free for the same reason (1) is free — nothing enters or
+       leaves — and once is enough: (1) only permutes the window, so it can create
+       no new exchange opportunity and there is nothing to iterate to a fixpoint.
 
     The exchange is the part that needed a decision, and it inverts one sentence of
     ADR 0015. That ADR keeps the outranked single *because keeping it is free* — a
@@ -456,33 +586,28 @@ def _promote_pairs_above_subsets(
     subset relation, which is a re-ranking, and re-ranking is a scientific
     judgement that does not belong in a rendering pass.
 
-    Terminates and is deterministic: pass 1 strictly decreases the number of
-    subset-above-superset inversions inside a fixed window, and pass 2 is a single
-    forward scan in which each step swaps one in-window index with one out-of-window
-    index and never revisits either.
+    Terminates and is deterministic: passes 1 and 3 are the same bounded loop over
+    a fixed window (see :func:`_lift_supersets_above_subsets`), and pass 2 is a
+    single forward scan in which each step swaps one in-window index with one
+    out-of-window index and never revisits either.
+
+    Postcondition, and it is asserted rather than argued: no row in
+    ``result[:window]`` is a strict subset of a row below it. The renderer
+    re-checks the same property on the rendered bytes, because a composition pass
+    that is wrong is exactly the thing that cannot notice it is wrong.
     """
     result = list(rows)
     limit = min(window, len(result))
 
-    promoted = 0
-    index = 0
-    while index < limit:
-        variants = result[index].variant_keys()
-        superset = next(
-            (later for later in range(index + 1, limit) if variants < result[later].variant_keys()),
-            None,
-        )
-        if superset is None:
-            index += 1
-            continue
-        result.insert(index, result.pop(superset))
-        promoted += 1
+    promoted = _lift_supersets_above_subsets(result, limit)
 
     exchanged = 0
     for index in range(limit):
         variants = result[index].variant_keys()
         if any(variants < result[other].variant_keys() for other in range(limit) if other != index):
-            # Already covered by a pair inside the window; pass 1 put it above.
+            # Already covered by a pair inside the window. Pass 1 put that superset
+            # above it — but the pair pass 2 is about to exchange in elsewhere may
+            # cover it too, and would land below it. Pass 3 is what repairs that.
             continue
         outside = next(
             (
@@ -497,7 +622,47 @@ def _promote_pairs_above_subsets(
         result[index], result[outside] = result[outside], result[index]
         exchanged += 1
 
+    if exchanged:
+        promoted += _lift_supersets_above_subsets(result, limit)
+
     return tuple(result), promoted, exchanged
+
+
+def _lift_supersets_above_subsets(result: list[SubmissionRow], limit: int) -> int:
+    """Lift every superset above every subset it covers, inside ``result[:limit]``.
+
+    Reorders ``result`` in place and returns how many rows it moved. Nothing enters
+    or leaves the window, so running it costs nothing at any point in the
+    composition — which is what lets :func:`_promote_pairs_above_subsets` run it
+    both before and after the exchange.
+
+    Terminates. Each move takes the FIRST later superset of ``result[index]`` and
+    puts it at ``index``, which strictly decreases the number of
+    subset-above-superset inversions in the window: it removes the inversion it
+    acted on, and it can create none, because a row the moved superset is itself a
+    strict subset of would have had to sit between ``index`` and the superset —
+    and by transitivity it would then have been the *first* superset of
+    ``result[index]``, so it would have been chosen instead.
+
+    Postcondition: for every ``i < j < limit``, ``result[i]`` is not a strict
+    subset of ``result[j]``. It survives the loop's own moves because a move
+    permutes only positions ``index..superset``, and "has no strict superset below
+    it" depends on the SET of rows below a position, not on their order.
+    """
+    moved = 0
+    index = 0
+    while index < limit:
+        variants = result[index].variant_keys()
+        superset = next(
+            (later for later in range(index + 1, limit) if variants < result[later].variant_keys()),
+            None,
+        )
+        if superset is None:
+            index += 1
+            continue
+        result.insert(index, result.pop(superset))
+        moved += 1
+    return moved
 
 
 def _epcr_units(value: float) -> int:
@@ -917,6 +1082,7 @@ def validate_submission(csv_text: str) -> tuple[bool, tuple[str, ...]]:
     probands: list[str] = []
     epcrs: list[float] = []
     seen_keys: dict[frozenset[tuple[str, int, str, str]], int] = {}
+    keyed: list[tuple[int, frozenset[tuple[str, int, str, str]]]] = []
     singles: list[_SingleRow] = []
     for index, row in enumerate(rows, start=1):
         _validate_row(index, row, errors)
@@ -927,6 +1093,7 @@ def validate_submission(csv_text: str) -> tuple[bool, tuple[str, ...]]:
             epcrs.append(math.nan)
         key = _row_key(row)
         if key is not None:
+            keyed.append((index, key))
             first_seen = seen_keys.setdefault(key, index)
             if first_seen != index:
                 errors.append(
@@ -939,6 +1106,7 @@ def validate_submission(csv_text: str) -> tuple[bool, tuple[str, ...]]:
                 if gene and finding != "secondary":
                     singles.append(_SingleRow(index=index, variant=next(iter(key)), gene=gene))
     _validate_split_pairs(singles, frozenset(seen_keys), errors)
+    _validate_subset_inversions(keyed, errors)
 
     distinct = sorted(set(probands))
     if len(distinct) > 1:
@@ -947,18 +1115,45 @@ def validate_submission(csv_text: str) -> tuple[bool, tuple[str, ...]]:
             "evaluates only the first proband encountered and hard-fails on a stray ID."
         )
 
-    ordered = [value for value in epcrs if not math.isnan(value)]
-    if ordered != sorted(ordered, reverse=True):
-        errors.append(
-            "rows are not sorted by epcr descending. Rank is derived from epcr order with "
-            "ties broken by file order, so ordering is part of the prediction."
-        )
-    _validate_epcr_ties(ordered, errors)
+    # (data row number, epcr) for every row whose epcr parsed. Unparseable rows are
+    # skipped — they already have their own error — but their POSITIONS are not, so
+    # the checks below still number rows the way the file does. Filtering to a bare
+    # list of floats and enumerating that renumbers every row after the first
+    # unparseable one, and a submission diagnostic that names the wrong row costs a
+    # reader more than it saves.
+    parsed_epcrs = [
+        (index, value) for index, value in enumerate(epcrs, start=1) if not math.isnan(value)
+    ]
+    _validate_epcr_order(parsed_epcrs, errors)
+    _validate_epcr_ties(parsed_epcrs, errors)
 
     return (not errors, tuple(errors))
 
 
-def _validate_epcr_ties(epcrs: Sequence[float], errors: list[str]) -> None:
+def _validate_epcr_order(parsed_epcrs: Sequence[tuple[int, float]], errors: list[str]) -> None:
+    """Reject rows that are not in descending EPCR order, naming the two rows.
+
+    Rank is ``sorted(enumerate(rows), key=lambda x: (-x[1][1], x[0]))``, so file
+    order *is* the prediction wherever EPCRs are equal and is overruled by EPCR
+    wherever they are not. A file whose EPCRs rise anywhere is therefore claiming
+    one ranking in its numbers and another in its layout.
+
+    Positions are the data row numbers of the original file (1-based, header
+    excluded), not indices into the parsed subset.
+    """
+    for position in range(1, len(parsed_epcrs)):
+        previous_index, previous = parsed_epcrs[position - 1]
+        index, value = parsed_epcrs[position]
+        if value > previous:
+            errors.append(
+                f"rows {previous_index} and {index}: epcr rises from "
+                f"{previous:.{EPCR_DECIMALS}f} to {value:.{EPCR_DECIMALS}f}, so the rows "
+                "are not sorted by epcr descending. Rank is derived from epcr order with "
+                "ties broken by file order, so ordering is part of the prediction."
+            )
+
+
+def _validate_epcr_ties(parsed_epcrs: Sequence[tuple[int, float]], errors: list[str]) -> None:
     """Reject a repeated EPCR value.
 
     A tie is the one property of the EPCR vector, other than its order, that the
@@ -968,9 +1163,13 @@ def _validate_epcr_ties(epcrs: Sequence[float], errors: list[str]) -> None:
     partner's variants are false positives at the true row's own threshold. If
     file order also puts the wrong row first, the true row is demoted a rank.
     Nothing is bought in exchange, which is why this is an error and not a note.
+
+    Takes ``(data row number, epcr)`` rather than bare floats: the caller has
+    already dropped rows whose epcr would not parse, and numbering the survivors
+    from 1 would report every subsequent row one position too high.
     """
     seen: dict[str, int] = {}
-    for index, value in enumerate(epcrs, start=1):
+    for index, value in parsed_epcrs:
         rendered = f"{value:.{EPCR_DECIMALS}f}"
         first = seen.setdefault(rendered, index)
         if first != index:
@@ -1067,6 +1266,50 @@ def _validate_split_pairs(
             )
 
 
+def _validate_subset_inversions(
+    keyed: Sequence[tuple[int, frozenset[tuple[str, int, str, str]]]],
+    errors: list[str],
+) -> None:
+    """Reject a row that is a strict subset of a row ranked below it.
+
+    **This is the closing assertion on composition, and it exists because the
+    composition passes cannot check themselves.** ``_drop_subsumed`` removes a
+    subset that falls below its superset and ``_promote_pairs_above_subsets``
+    lifts a superset above a subset that outranks it, so on the pipeline's own
+    path this condition is unreachable — which is exactly the argument that was
+    already true when the exchange pass silently re-created the inversion by
+    swapping a pair into the window *below* one of its own subsets. An invariant
+    that only three passes vouch for is an invariant nothing checks. This one is
+    re-derived from the rendered bytes.
+
+    **What it costs.** Rank points go to the best *full* match and a match is
+    frozenset equality, so a one-variant row can never equal a two-variant answer.
+    If the superset is the true compound heterozygote, every subset row above it
+    pushes it down one rank for nothing: the superset re-emits the subset's
+    variant, so the F-max union at that threshold is identical either way, and
+    across a tier boundary in ``[(1, 100), (3, 50), (5, 25), (10, 10)]`` the
+    demotion is a straight loss of rank points. ADR 0015, ADR 0023.
+
+    Only the first offending superset is reported per row: the point is to name
+    the two rows whose order is wrong, not to enumerate the closure.
+    """
+    for position, (index, variants) in enumerate(keyed):
+        below = next(
+            (other for other, other_variants in keyed[position + 1 :] if variants < other_variants),
+            None,
+        )
+        if below is None:
+            continue
+        errors.append(
+            f"row {index} is a strict subset of row {below}, which is ranked below it. "
+            "The scorer matches by frozenset equality, so only the larger row can be a "
+            "full match, and every subset row above it demotes it by one rank for "
+            "nothing — the superset re-emits the subset's variants, so the F-max union "
+            "is identical either way. Emit the superset first (ADR 0015, ADR 0023); a "
+            "subset that falls below its superset is dropped instead."
+        )
+
+
 def _row_key(row: dict[str, str | None]) -> frozenset[tuple[str, int, str, str]] | None:
     """The scorer's variant-key set for a parsed row, or ``None`` if unparseable."""
     try:
@@ -1099,8 +1342,10 @@ __all__ = [
     "MAX_SUBMISSION_ROWS",
     "MIN_EPCR_SEPARATION",
     "TRACK1_COLUMNS",
+    "SubmissionComposition",
     "SubmissionRow",
     "build_submission_rows",
+    "compose_submission",
     "composite_to_epcr",
     "render_submission_csv",
     # Deliberately module-level only: `mva.reporting` does not re-export it, so the

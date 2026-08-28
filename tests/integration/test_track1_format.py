@@ -38,6 +38,7 @@ from mva.reporting.track1 import (
     TRACK1_COLUMNS,
     SubmissionRow,
     build_submission_rows,
+    compose_submission,
     composite_to_epcr,
     render_submission_csv,
     render_submission_csv_unvalidated,
@@ -281,10 +282,74 @@ def test_more_than_ten_candidates_truncate_to_exactly_ten() -> None:
     # The ten kept are the ten highest-scoring, in order.
     assert [row["notes"].split(";")[0] for row in parsed] == [f"GENE{i}" for i in range(10)]
 
-    notice = truncation_notice(len(pairs))
+    composition = compose_submission(pairs, proband_id=ACCEPTED_PROBAND_ID)
+    notice = truncation_notice(composition)
     assert notice is not None
     assert "13" in notice and "10" in notice
-    assert truncation_notice(MAX_SUBMISSION_ROWS) is None
+    assert (
+        truncation_notice(
+            compose_submission(pairs[:MAX_SUBMISSION_ROWS], proband_id=ACCEPTED_PROBAND_ID)
+        )
+        is None
+    ), "nothing was omitted, so there is nothing to notice"
+
+
+@pytest.mark.integration
+def test_the_truncation_notice_counts_the_rows_actually_emitted() -> None:
+    """DEFECT 2. The notice used to be computed from the dossier's own list.
+
+    `truncation_notice(len(ordered))` never saw the submission: it reported
+    `max_rows` as the number submitted — a number it had assumed, not counted —
+    and attributed every omission "solely" to the ten-row format cap. Composition
+    also removes rows on their contents: `_drop_subsumed` deletes a candidate whose
+    variants a higher-ranked candidate already carries. Here 3 of the 13 candidates
+    are subsumed singles, so 10 rows are emitted from 13 candidates with 3 omitted
+    for a reason that has nothing to do with the format limit — and blaming the
+    format for them tells a reviewer the wrong thing about all three.
+    """
+    pairs = [
+        _pair(
+            pair_id=f"P{index}",
+            gene=f"GENE{index}",
+            composite=1.0 - index / 100,
+            contig="chr1",
+            position=1_000 + index * 1_000,
+        )
+        for index in range(13)
+    ]
+    # Three singles carved out of the three top pairs, each ranked BELOW its
+    # parent, so `_drop_subsumed` removes them before the cap is ever consulted.
+    subsumed = [
+        _pair(
+            pair_id=f"S{index}",
+            gene=f"GENE{index}",
+            composite=1.0 - index / 100 - 0.005,
+            contig="chr1",
+            position=1_000 + index * 1_000,
+            second=False,
+        )
+        for index in range(3)
+    ]
+
+    composition = compose_submission(pairs + subsumed, proband_id=ACCEPTED_PROBAND_ID)
+
+    assert composition.total_candidates == 16
+    assert composition.subsumed == 3
+    assert composition.submitted == MAX_SUBMISSION_ROWS == len(composition.rows)
+    assert composition.truncated == 3
+
+    notice = truncation_notice(composition)
+    assert notice is not None
+    assert "16 ranked candidates" in notice, notice
+    assert f"{MAX_SUBMISSION_ROWS} submitted" in notice, notice
+    assert "3 dropped as already fully covered by a higher-ranked candidate" in notice, notice
+    assert (
+        f"3 omitted because the challenge format accepts at most {MAX_SUBMISSION_ROWS} rows"
+        in notice
+    ), notice
+    assert "solely" not in notice, (
+        "the notice still claims a single reason for omissions that had two"
+    )
 
 
 @pytest.mark.integration

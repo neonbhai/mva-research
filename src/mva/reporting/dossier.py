@@ -48,7 +48,7 @@ from mva.models import (
 )
 from mva.reporting.assertions import TIER_MARKERS, Assertion, AssertionChecker, weakest_tier
 from mva.reporting.render import NOT_RECORDED, format_cell, markdown_table, render_template
-from mva.reporting.track1 import composite_to_epcr, truncation_notice
+from mva.reporting.track1 import SubmissionComposition, composite_to_epcr, truncation_notice
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mva.evidence.ledger import AssertionResolver
@@ -98,6 +98,7 @@ _VARIANT_HEADERS = (
 def build_candidate_dossier(
     pairs: Sequence[CandidatePair],
     *,
+    submission: SubmissionComposition,
     resolver: AssertionResolver,
     clock: Clock,
     top_n: int = 5,
@@ -108,6 +109,19 @@ def build_candidate_dossier(
     the ledger cannot resolve. That is the intended failure: a dossier is the
     document a reviewer trusts, and a dangling citation in it is indistinguishable
     from a fabricated one.
+
+    ``submission`` is the composition that produced the submission CSV, and it is
+    required rather than optional. The dossier's job here is to tell a reader why
+    the submission is shorter than the ranked list above it, and the only honest
+    source for that is the submission itself. This function used to derive the
+    notice from ``len(pairs)`` and the format cap, which reported a submitted count
+    it had not seen and blamed the format for rows that composition had dropped on
+    their contents. A parameter that can be omitted is a parameter that will be.
+
+    Raises:
+        ValueError: if ``submission`` was composed from a different number of
+            candidates than ``pairs`` holds — the notice would then describe a
+            submission this dossier is not the ranked list for.
     """
     if top_n < 1:
         msg = f"top_n={top_n} must be at least 1."
@@ -117,12 +131,20 @@ def build_candidate_dossier(
     ordered = sorted(pairs, key=lambda pair: pair.sort_key())
     selected = ordered[:top_n]
 
+    if submission.total_candidates != len(ordered):
+        msg = (
+            f"the submission was composed from {submission.total_candidates} candidates "
+            f"but this dossier ranks {len(ordered)}. The truncation notice would then "
+            "describe a submission that is not the one this ranking produced."
+        )
+        raise ValueError(msg)
+
     context: dict[str, object] = {
         "generated_at": clock.now().isoformat(),
         "total_candidates": len(ordered),
         "shown": len(selected),
         "top_n": top_n,
-        "truncation_notice": truncation_notice(len(ordered)),
+        "truncation_notice": truncation_notice(submission),
         "candidates": [
             _candidate_context(pair, rank=index, resolver=resolver, checker=checker)
             for index, pair in enumerate(selected, start=1)
