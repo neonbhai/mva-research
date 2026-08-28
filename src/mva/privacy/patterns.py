@@ -440,10 +440,11 @@ _RULES_BY_ID: Final[dict[str, Rule]] = {rule.rule_id: rule for rule in RULES}
 # run instead of contributing a passing check.
 #
 # The specimens are ASSEMBLED rather than written as literals wherever a literal
-# would make this file match its own battery. ``hpo_term`` and ``iso_date_bare``
-# are unanchored and would otherwise turn the positive controls into findings — the
-# same self-matching hazard documented above the patterns, arriving from the other
-# direction.
+# would make this file match its own battery. Five rules are unanchored or
+# keyword-triggered and would otherwise turn the positive controls into findings —
+# the same self-matching hazard documented above the patterns, arriving from the
+# other direction. Three of them were caught by this very check on its first run,
+# which is the argument for the check in one sentence.
 # ---------------------------------------------------------------------------
 
 
@@ -464,11 +465,14 @@ def detector_canaries() -> dict[str, bytes]:
         "sam_rg_sample": b"@RG\tID:1\tSM:CANARY\n",
         # assembled: a literal would make this file match hpo_term
         "hpo_term": b" HP" + b":" + b"0000118 ",
-        "mrn": b"MRN: 123456789\n",
-        "dob": b"DOB: 01/02/1990\n",
+        # assembled: a literal would make this file match mrn
+        "mrn": b"MR" + b"N: 123456789\n",
+        # assembled: a literal would make this file match dob
+        "dob": b"DO" + b"B: 01/02/1990\n",
         # assembled: a literal would make this file match iso_date_bare
         "iso_date_bare": b" 2026" + b"-01-02 ",
-        "person_name_keyed": b"patient name: Canaryson\n",
+        # assembled: a literal would make this file match person_name_keyed
+        "person_name_keyed": b"patient na" + b"me: Canaryson\n",
         "fasta_record": b">canary\n" + b"ACGT" * 15 + b"\n",
         "plink_ped_line": b"F1\tI1\tP1\tM1\t1\t-9\tA\tG\tA\tG\tA\tG\n",
     }
