@@ -10,10 +10,12 @@ structure-anchored, which is the property the tests below verify.
 
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import hashlib
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -43,6 +45,8 @@ from mva.privacy.audit import (
     CONTENT_ALLOWLIST_PREFIXES,
     PATH_DOWNGRADABLE_RULES,
     AuditReport,
+    check_content_scan,
+    check_detector_liveness,
     check_git_staged_sensitive,
     check_gitignore_effectiveness,
     check_log_redaction_probe,
@@ -63,7 +67,15 @@ from mva.privacy.export import (
     gate_public_export,
 )
 from mva.privacy.netguard import BLOCKED_EVENTS, OfflineProfile, is_armed
-from mva.privacy.patterns import RULES, decode_scrubbed, rule_by_id, sniff_binary
+from mva.privacy.patterns import (
+    MAX_SCAN_BYTES,
+    RULES,
+    Rule,
+    decode_scrubbed,
+    detector_canaries,
+    rule_by_id,
+    sniff_binary,
+)
 from mva.privacy.redact import install_redaction, redact_text
 
 pytestmark = [pytest.mark.unit, pytest.mark.privacy]
@@ -2322,3 +2334,221 @@ def test_the_synthetic_fixture_cannot_borrow_the_reference_exemption() -> None:
         ).exempt
         is False
     )
+
+
+# ---------------------------------------------------------------------------
+# 30. The battery proves itself live on every run (positive control).
+#
+#     A detector that has silently stopped detecting emits the same report as a
+#     repository that is genuinely clean, and from outside the two are
+#     indistinguishable. This audit has already spent that indistinguishability
+#     once: it passed over an IRB protocol number, a specimen accession, a
+#     sequencing flowcell ID and several derived callset statistics, reported
+#     success, and was believed.
+#
+#     `check_detector_liveness` therefore runs one specimen per rule through the
+#     REAL scan path before any other check is allowed to say "clean". Note that
+#     no canary bytes are written as literals below: they are read from
+#     `detector_canaries()`, which assembles the five that would otherwise turn
+#     their own source file into a finding.
+# ---------------------------------------------------------------------------
+
+
+def _dead_pattern() -> re.Pattern[bytes]:
+    """A regex that cannot match anything: an empty negative lookahead.
+
+    The point of a neutered rule is that it is syntactically a rule and
+    semantically nothing. A typo'd pattern in the real battery behaves exactly
+    like this, and behaves it silently.
+    """
+    return re.compile(rb"(?!)")
+
+
+def _battery_with_one_rule_neutered(rule_id: str) -> tuple[Rule, ...]:
+    """The real battery with one rule's pattern swapped for a dead one."""
+    return tuple(
+        dataclasses.replace(rule, pattern=_dead_pattern()) if rule.rule_id == rule_id else rule
+        for rule in RULES
+    )
+
+
+def test_every_rule_has_a_canary_and_every_canary_names_a_rule() -> None:
+    """Bidirectional coverage is what makes the control self-maintaining.
+
+    A rule added without a specimen shrinks the proven surface without changing
+    a single reported number, so the check fails instead. A specimen left behind
+    by a deleted rule means the ID is stale or misspelled, and the rule it was
+    meant to cover is running unproven.
+    """
+    canaries = detector_canaries()
+    assert {rule.rule_id for rule in RULES} == set(canaries)
+    result = check_detector_liveness()
+    assert result.passed, [f.detail for f in result.findings]
+    assert result.summary.startswith(f"{len(RULES)}/{len(RULES)} ")
+
+
+@pytest.mark.parametrize("rule_id", [rule.rule_id for rule in RULES])
+def test_every_rule_fires_on_its_own_canary_through_the_real_scan_path(rule_id: str) -> None:
+    """Through `scan_bytes`, deliberately not through `rule.pattern.search`.
+
+    `scan_bytes` is the function every check actually calls and the place the
+    whole-file severity refinement for `vcf_data_line` and `hpo_term` lives.
+    Proving the compiled pattern in isolation would leave the entire path between
+    the pattern and the report unproven, and that path is most of the machinery.
+
+    The assertion is on `rule_id`, never on severity: a lone specimen resolves
+    both context-gated rules to `warn` -- no VCF header beside the data line, one
+    distinct term rather than three -- which is the refinement working.
+    """
+    hits = scan_bytes(detector_canaries()[rule_id], check="t", path_label="<canary>")
+    assert rule_id in {f.rule_id for f in hits}
+
+
+@pytest.mark.parametrize("rule_id", [rule.rule_id for rule in RULES])
+def test_a_neutered_rule_is_caught_by_the_positive_control(
+    monkeypatch: pytest.MonkeyPatch, rule_id: str
+) -> None:
+    """Break one rule and the control says which one, at fail severity."""
+    monkeypatch.setattr(audit, "RULES", _battery_with_one_rule_neutered(rule_id))
+    result = check_detector_liveness()
+    assert result.passed is False
+    dead = [f for f in result.findings if f.rule_id == rule_id]
+    assert dead, [f.rule_id for f in result.findings]
+    assert all(f.severity == "fail" for f in dead)
+    assert "did NOT fire on its own specimen" in dead[0].detail
+
+
+def test_a_neutered_rule_fails_the_whole_audit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The headline claim: a dead battery aborts the run rather than passing it.
+
+    The clean baseline is asserted first, so `passed is False` below cannot be
+    satisfied by something incidental about the throwaway repository.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    install_redaction()
+
+    clean = run_audit(repo)
+    assert clean.passed is True, clean.failed_checks
+
+    monkeypatch.setattr(audit, "RULES", _battery_with_one_rule_neutered("vcf_header"))
+    broken = run_audit(repo)
+    assert broken.passed is False
+    assert "detector_liveness" in broken.failed_checks
+    assert run_audit(repo, staged_only=True).passed is False
+
+
+def test_a_rule_with_no_canary_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding a rule without a specimen breaks the build; it does not shrink coverage."""
+    uncovered = RULES[0].rule_id
+    kept = {k: v for k, v in detector_canaries().items() if k != uncovered}
+    monkeypatch.setattr(audit, "detector_canaries", lambda: kept)
+
+    result = check_detector_liveness()
+    assert result.passed is False
+    finding = next(f for f in result.findings if f.rule_id == uncovered)
+    assert finding.severity == "fail"
+    assert "no canary" in finding.detail
+
+
+def test_a_canary_naming_no_rule_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A specimen for a rule that does not exist is a stale or misspelled ID."""
+    orphaned = dict(detector_canaries())
+    orphaned["rule_that_was_deleted"] = b"inert"
+    monkeypatch.setattr(audit, "detector_canaries", lambda: orphaned)
+
+    result = check_detector_liveness()
+    assert result.passed is False
+    finding = next(f for f in result.findings if f.rule_id == "rule_that_was_deleted")
+    assert finding.severity == "fail"
+    assert "not in the battery" in finding.detail
+
+
+def test_the_positive_control_runs_before_every_other_check(tmp_path: Path) -> None:
+    """First, in all three orderings. A broken detector must abort before any
+    check can report "clean" on the strength of a battery that is not firing."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    assert audit.STAGED_CHECKS[0] == "detector_liveness"
+    assert run_audit(repo).results[0].name == "detector_liveness"
+    assert run_audit(repo, staged_only=True).results[0].name == "detector_liveness"
+
+
+def test_the_liveness_findings_carry_no_specimen_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GP-41 applies to the control that proves GP-41's detector.
+
+    A liveness failure is the one moment the audit is holding every specimen at
+    once, and a finding that quoted the specimen it did not match would put a
+    VCF record, a read and a keyed identifier into the same report the rest of
+    the package works to keep them out of.
+    """
+    monkeypatch.setattr(
+        audit,
+        "RULES",
+        tuple(dataclasses.replace(rule, pattern=_dead_pattern()) for rule in RULES),
+    )
+    result = check_detector_liveness()
+    assert result.passed is False
+    assert len(result.findings) == len(RULES)
+
+    text = AuditReport(results=(result,), passed=False, failed_checks=(result.name,)).to_markdown()
+    assert "CANARY" not in text
+    for specimen in detector_canaries().values():
+        for line in specimen.decode("utf-8").splitlines():
+            if len(line.strip()) >= 4:
+                assert line.strip() not in text
+
+
+# ---------------------------------------------------------------------------
+# 31. A truncated scan says how much of the file it never read.
+#
+#     `MAX_SCAN_BYTES` is 8 MiB and `knowledge/real/gene_phenotype.tsv` is
+#     17,324,806 bytes, so 8,936,198 bytes of a TRACKED file are past the cap.
+#     Truncation is the one blind spot a scanner cannot report by finding
+#     something, so it has to be reported by construction: a rule that would have
+#     fired in the unread tail is otherwise indistinguishable from a rule that
+#     looked and found nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_a_truncated_worktree_scan_reports_the_bytes_it_never_read(tmp_path: Path) -> None:
+    """`scan_file` names the file and the shortfall, and stays silent at the cap."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    overshoot = 4242
+    (repo / "over_cap.txt").write_bytes(b"x" * (MAX_SCAN_BYTES + overshoot))
+    (repo / "at_cap.txt").write_bytes(b"x" * MAX_SCAN_BYTES)
+    git(repo, "add", "-f", "over_cap.txt", "at_cap.txt", check=True)
+
+    result = check_content_scan(repo)
+    truncations = [f for f in result.findings if f.rule_id == "scan_truncated"]
+    assert [f.path for f in truncations] == ["over_cap.txt"], (
+        "a file exactly at the cap was fully scanned and must not be reported"
+    )
+    assert truncations[0].severity == "warn"
+    assert f"{overshoot} byte(s) were never seen" in truncations[0].detail
+
+
+def test_a_truncated_staged_blob_reports_the_bytes_it_never_read(tmp_path: Path) -> None:
+    """The pre-commit path truncated with no finding at all.
+
+    `index_loader` caps the blob and returns bytes, so a truncated buffer was
+    indistinguishable from a short one: the first 8 MiB scanned clean, the
+    remainder was never looked at, and the report said "1 staged blob inspected".
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    overshoot = 1234
+    (repo / "over_cap.txt").write_bytes(b"y" * (MAX_SCAN_BYTES + overshoot))
+    (repo / "at_cap.txt").write_bytes(b"y" * MAX_SCAN_BYTES)
+    git(repo, "add", "-f", "over_cap.txt", "at_cap.txt", check=True)
+
+    result = check_git_staged_sensitive(repo)
+    truncations = [f for f in result.findings if f.rule_id == "scan_truncated"]
+    assert [f.path for f in truncations] == ["over_cap.txt"]
+    assert truncations[0].severity == "warn"
+    assert f"{overshoot} byte(s) were never seen" in truncations[0].detail
