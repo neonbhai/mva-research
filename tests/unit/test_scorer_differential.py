@@ -114,7 +114,9 @@ def test_both_metrics_agree_with_the_published_scorer_over_random_submissions() 
     and F-max thresholds that coincide.
     """
     oracle = _load_oracle()
-    rng = random.Random(20260828)
+    # S311: not cryptography. A fixed-seed PRNG is the point -- the same 2,000
+    # cases every run, so a divergence is reproducible rather than flaky.
+    rng = random.Random(20260828)  # noqa: S311
 
     for trial in range(2000):
         rows, truth = _random_case(rng)
