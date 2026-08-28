@@ -60,6 +60,18 @@ class PhaseStatus(StrEnum):
 #: Phase states incompatible with a compound-heterozygous recessive mechanism.
 CIS_STATES: frozenset[PhaseStatus] = frozenset({PhaseStatus.CIS_LIKELY, PhaseStatus.CIS_CONFIRMED})
 
+#: Stand-in coordinate key for the absent second variant of a single-variant
+#: hypothesis, so that :meth:`CandidatePair.sort_key` is defined on both shapes.
+#:
+#: It sorts before every real coordinate and cannot be produced by one:
+#: :func:`~mva.models.genome.contig_sort_key` is non-negative and
+#: ``GenomicCoordinate.position`` is constrained ``> 0``. A single-variant
+#: candidate therefore orders **ahead of** a pair sharing its first variant at an
+#: equal composite score — a documented rule rather than an accident of whichever
+#: one the caller listed first. :class:`mva.prioritization.pairing.PairCandidate`
+#: uses the same sentinel for the same reason.
+NO_SECOND_VARIANT: tuple[int, int, str, str] = (-1, -1, "", "")
+
 
 class PhaseEvidence(FrozenModel):
     """How a phase determination was reached (or why it could not be)."""
@@ -243,13 +255,43 @@ class CandidatePair(FrozenModel):
             raise ValueError(msg)
         return self
 
-    def sort_key(self) -> tuple[float, tuple[int, int, str, str]]:
-        """Deterministic ordering: score desc, then genomic position asc.
+    def sort_key(self) -> tuple[float, tuple[int, int, str, str], tuple[int, int, str, str], str]:
+        """A **total** order over candidates. Four components, in this order:
 
-        The positional tiebreak is what makes repeat runs byte-identical; relying on
-        dict/set iteration order here would break the determinism guarantee.
+        1. ``-composite_score`` — the scientific judgement, descending. This is and
+           stays the primary component; everything below it is a tiebreak, never a
+           re-ranking. Two candidates with different scores are ordered by score
+           alone, exactly as before.
+        2. ``variant_a.coordinate.sort_key()`` — first variant, by karyotype
+           position ascending, so a tied block reads down the chromosome rather
+           than in whatever order it was assembled.
+        3. the second variant's coordinate, or :data:`NO_SECOND_VARIANT` when there
+           is none. **This component is why the key is total.** Without it, two
+           pairs sharing a first variant and a composite score compare *equal*, so
+           every sort over them is merely stable and their order is decided by the
+           caller's input order — which changes the rendered submission CSV, swaps
+           which row receives the higher EPCR, and can cost 50 rank points if the
+           demoted row is the true answer. The sentinel sorts below every real
+           coordinate, so a single-variant candidate deterministically precedes a
+           pair sharing its first variant.
+        4. ``pair_id`` — the terminator. :func:`make_pair_id` derives it from the
+           gene symbol and the sorted variant ids via blake2b, so it is unique per
+           hypothesis and identical across processes; two distinct candidates can
+           never compare equal. It is a content digest, never :func:`hash`, which
+           varies with ``PYTHONHASHSEED`` (GP-30).
+
+        Totality is the requirement, not tidiness. A key that admits ties promotes
+        input order to a scientific decision and breaks the byte-identical
+        repeat-run guarantee (GP-30); relying on dict or set iteration order here
+        would do the same.
         """
-        return (-self.composite_score, self.variant_a.coordinate.sort_key())
+        second = NO_SECOND_VARIANT if self.variant_b is None else self.variant_b.sort_key()
+        return (
+            -self.composite_score,
+            self.variant_a.coordinate.sort_key(),
+            second,
+            self.pair_id,
+        )
 
 
 def make_pair_id(gene_symbol: str, variant_ids: tuple[str, ...]) -> str:

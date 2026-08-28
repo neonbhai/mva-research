@@ -18,7 +18,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from mva.clock import Clock
-from mva.models.pair import CIS_STATES, CandidatePair, InheritanceModel, PhaseStatus
+from mva.models.pair import (
+    CIS_STATES,
+    NO_SECOND_VARIANT,
+    CandidatePair,
+    InheritanceModel,
+    PhaseStatus,
+)
 from mva.models.variant import Zygosity
 from mva.prioritization.filters import (
     FLAG_COMMON_VARIANT,
@@ -30,10 +36,6 @@ from mva.prioritization.scoring import ScoredPair
 
 FLAG_HAS_CONTRADICTIONS = "has_contradictions"
 FLAG_BLOCKING_QUESTIONS = "blocking_questions_open"
-
-#: Sorts before any real coordinate, so a single-variant candidate orders ahead
-#: of a two-variant candidate sharing its first variant at equal composite.
-_NO_SECOND_VARIANT: tuple[int, int, str, str] = (-1, -1, "", "")
 
 #: What a difference in each component would actually take to resolve.
 DISCRIMINATING_EXPERIMENTS: dict[str, str] = {
@@ -78,8 +80,17 @@ _DEFAULT_NEXT_TEST = (
 def _sort_key(
     scored: ScoredPair,
 ) -> tuple[float, tuple[int, int, str, str], tuple[int, int, str, str], str]:
+    """The same total order as :meth:`mva.models.pair.CandidatePair.sort_key`.
+
+    It is spelled separately because ranking runs *before* the ``CandidatePair``
+    exists: the score lives on the :class:`~mva.prioritization.scoring.ScoredPair`
+    wrapper and the candidate is still a
+    :class:`~mva.prioritization.pairing.PairCandidate`. The component order and
+    the :data:`~mva.models.pair.NO_SECOND_VARIANT` sentinel are shared with the
+    model so the two keys cannot disagree about which candidate ranks first.
+    """
     candidate = scored.candidate
-    second = _NO_SECOND_VARIANT if candidate.variant_b is None else candidate.variant_b.sort_key()
+    second = NO_SECOND_VARIANT if candidate.variant_b is None else candidate.variant_b.sort_key()
     return (-scored.composite, candidate.variant_a.sort_key(), second, candidate.pair_id)
 
 

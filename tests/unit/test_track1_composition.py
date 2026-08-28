@@ -24,9 +24,12 @@ beneath it, because a row below the answer costs nothing.
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from mva.models.genome import GenomeBuild, GenomicCoordinate
 from mva.models.pair import (
+    NO_SECOND_VARIANT,
     CandidatePair,
     ComponentScores,
     InheritanceModel,
@@ -274,3 +277,140 @@ def test_composition_is_deterministic_under_input_order() -> None:  # GP-30
         build_submission_rows(list(reversed(candidates)), proband_id=ACCEPTED_PROBAND_ID)
     )
     assert forward == backward
+
+
+# ---------------------------------------------------------------------------
+# The sort key is TOTAL, so input order decides nothing (GP-30).
+#
+# `CandidatePair.sort_key()` used to carry only (-composite, variant_a). Two
+# pairs with the same score and the same FIRST variant therefore compared equal,
+# every sort over them was merely *stable*, and the emitted order was whichever
+# order the caller happened to supply. That is not a tidiness bug: whichever row
+# landed first took the higher EPCR, and rank points go to the best FULL match
+# ordered by EPCR descending — so if the demoted row was the true answer, the
+# submission scored 50 rank points instead of 100 because of list order.
+# ---------------------------------------------------------------------------
+
+
+def test_composition_is_deterministic_for_tied_pairs_sharing_first_variant() -> None:
+    """The exact shape the old two-component key could not separate.
+
+    Same composite, same ``variant_a``, different ``variant_b``. Reversing the
+    input must not change one byte of the CSV, and the tiebreak must fall to the
+    second variant's coordinate — 40210500 before 40211000.
+    """
+    shared = _variant(40_200_000)
+    left = _candidate(shared, _variant(40_210_500, alt="A"), composite=0.80)
+    right = _candidate(shared, _variant(40_211_000, alt="G"), composite=0.80)
+
+    assert left.sort_key() != right.sort_key(), (
+        "two distinct candidates share a sort key; every sort over them is only "
+        "as deterministic as the caller's input order"
+    )
+
+    forward = render_submission_csv(
+        build_submission_rows([left, right], proband_id=ACCEPTED_PROBAND_ID)
+    )
+    reversed_ = render_submission_csv(
+        build_submission_rows([right, left], proband_id=ACCEPTED_PROBAND_ID)
+    )
+
+    assert forward == reversed_, (
+        "reversing two tied candidates changed the rendered submission; the "
+        "second variant is not in the sort key"
+    )
+    rows = build_submission_rows([right, left], proband_id=ACCEPTED_PROBAND_ID)
+    assert [_shape(row) for row in rows] == [
+        (40_200_000, 40_210_500),
+        (40_200_000, 40_211_000),
+    ], "the tie must break on the second variant's coordinate, ascending"
+    assert rows[0].epcr > rows[1].epcr
+
+
+def test_a_single_and_a_pair_sharing_a_first_variant_order_deterministically() -> None:
+    """The sentinel case: one candidate has no second variant at all.
+
+    :data:`NO_SECOND_VARIANT` sorts below every real coordinate, so the single
+    precedes the pair *by construction* rather than by whichever the caller
+    listed first. (Composition then promotes the pair above it — ADR 0015 — which
+    is a separate, deliberate rule; what matters here is that the input order
+    cannot change the outcome.)
+    """
+    shared = _variant(40_200_000)
+    single = _candidate(shared, None, composite=0.80)
+    pair = _candidate(shared, _variant(40_210_500, alt="A"), composite=0.80)
+
+    assert single.sort_key()[2] == NO_SECOND_VARIANT
+    assert sorted([pair, single], key=lambda c: c.sort_key()) == [single, pair]
+    assert sorted([single, pair], key=lambda c: c.sort_key()) == [single, pair]
+
+    forward = render_submission_csv(
+        build_submission_rows([single, pair], proband_id=ACCEPTED_PROBAND_ID)
+    )
+    reversed_ = render_submission_csv(
+        build_submission_rows([pair, single], proband_id=ACCEPTED_PROBAND_ID)
+    )
+    assert forward == reversed_
+
+
+def test_a_genuine_score_difference_still_decides_the_order() -> None:
+    """Requirement: this only breaks ties. Composite remains the primary key.
+
+    Two candidates that already differ on score must keep their existing relative
+    order whatever the appended tiebreakers would have said on their own — here
+    the lower-scoring candidate would win on both coordinate and pair id.
+    """
+    high = _candidate(_variant(40_900_000), _variant(40_901_000, alt="A"), composite=0.90)
+    low = _candidate(_variant(40_100_000), _variant(40_100_500, alt="A"), composite=0.10)
+
+    assert sorted([low, high], key=lambda c: c.sort_key()) == [high, low]
+    assert high.sort_key()[0] < low.sort_key()[0], "composite must lead, descending"
+    # The tiebreakers point the other way; they must not get a vote.
+    assert high.sort_key()[1] > low.sort_key()[1]
+
+
+def _tie_shaped_candidates() -> list[CandidatePair]:
+    """A list containing every ordering hazard at once.
+
+    Three candidates tied at 0.80 sharing a first variant (one of them a single),
+    two more tied at 0.50 sharing a different first variant, and two untied rows
+    on either side of them.
+    """
+    shared = _variant(40_200_000)
+    other = _variant(40_300_000)
+    return [
+        _candidate(_variant(40_100_000), _variant(40_100_500, alt="A"), composite=0.95),
+        _candidate(shared, None, composite=0.80),
+        _candidate(shared, _variant(40_210_500, alt="A"), composite=0.80),
+        _candidate(shared, _variant(40_211_000, alt="G"), composite=0.80),
+        _candidate(other, _variant(40_310_000, alt="A"), composite=0.50),
+        _candidate(other, _variant(40_311_000, alt="G"), composite=0.50),
+        _candidate(_variant(40_900_000), _variant(40_901_000, alt="A"), composite=0.20),
+    ]
+
+
+@given(order=st.permutations(range(7)))
+@settings(max_examples=100, deadline=None)
+def test_any_permutation_of_the_candidate_list_renders_the_same_submission(
+    order: list[int],
+) -> None:
+    """GP-30 as a property: the caller's list order carries no information.
+
+    The candidate list is a *set* of hypotheses that happens to arrive in a list.
+    If any permutation of it renders a different CSV, then some ordering decision
+    is being made by the order of a Python list rather than by the science.
+    """
+    candidates = _tie_shaped_candidates()
+    baseline = render_submission_csv(
+        build_submission_rows(candidates, proband_id=ACCEPTED_PROBAND_ID)
+    )
+    permuted = render_submission_csv(
+        build_submission_rows([candidates[i] for i in order], proband_id=ACCEPTED_PROBAND_ID)
+    )
+    assert permuted == baseline, f"permutation {order} rendered a different submission"
+
+
+def test_every_candidate_in_a_tied_block_has_a_distinct_sort_key() -> None:
+    """Totality, asserted directly rather than inferred from a rendered file."""
+    keys = [candidate.sort_key() for candidate in _tie_shaped_candidates()]
+    assert len(set(keys)) == len(keys), "sort_key() is not injective over these candidates"

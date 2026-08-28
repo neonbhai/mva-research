@@ -12,16 +12,25 @@ each test states the exact genotype it depends on.
 
 from __future__ import annotations
 
+import itertools
 from datetime import UTC, datetime
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from mva.clock import FixedClock
 from mva.config import FrequencyThresholds, PhaseWeights, QualityThresholds, ScoringWeights
 from mva.models.genome import GenomeBuild, GenomicCoordinate
-from mva.models.pair import CandidatePair, ComponentScores, InheritanceModel, PhaseStatus
+from mva.models.pair import (
+    NO_SECOND_VARIANT,
+    CandidatePair,
+    ComponentScores,
+    InheritanceModel,
+    PhaseEvidence,
+    PhaseStatus,
+    make_pair_id,
+)
 from mva.models.variant import (
     FLAG_REF_ALLELE_MISMATCH,
     INGESTION_QC_FLAGS,
@@ -1244,3 +1253,169 @@ def test_a_mitochondrial_call_is_not_described_as_accounting_for_both_gene_copie
     assert "both gene copies" not in scored.rationale
     assert "heteroplasmy" in scored.rationale
     assert scored.scores.inheritance_consistency == pytest.approx(0.50)
+
+
+# ---------------------------------------------------------------------------
+# 12. The ranking key is TOTAL (GP-30)
+#
+# `rank_pairs` orders on (-composite, variant_a, variant_b-or-sentinel, pair_id)
+# and always has. `CandidatePair.sort_key()` — the key every *downstream* sort
+# uses — carried only the first two components, so two candidates with the same
+# score and the same first variant compared equal and their emitted order was
+# decided by the caller's list order. The tests below lock both keys against
+# that shape, and lock the two to agree: a total key that only one of them uses
+# leaves the bug alive at the other site.
+# ---------------------------------------------------------------------------
+
+
+def _tied_scored_pair(
+    variant_a: VariantRecord, variant_b: VariantRecord | None, *, composite: float
+) -> ScoredPair:
+    """A ``ScoredPair`` with a composite chosen by the test, not by the scorer."""
+    variant_ids = (
+        (variant_a.variant_id,)
+        if variant_b is None
+        else (variant_a.variant_id, variant_b.variant_id)
+    )
+    candidate = PairCandidate(
+        pair_id=make_pair_id(GENE, variant_ids),
+        gene_symbol=GENE,
+        variant_a=variant_a,
+        variant_b=variant_b,
+        inheritance_model=(
+            InheritanceModel.COMPOUND_HETEROZYGOUS
+            if variant_b is not None
+            else InheritanceModel.UNKNOWN
+        ),
+        phase=PhaseEvidence(status=PhaseStatus.UNKNOWN, method="none"),
+        flags=(),
+    )
+    return ScoredPair(
+        candidate=candidate,
+        scores=ComponentScores(
+            analytical_validity=0.9,
+            rarity=0.9,
+            molecular_consequence=0.9,
+            inheritance_consistency=0.5,
+            phenotype_similarity=0.8,
+            mechanistic_relevance=0.7,
+            evidence_quality=0.6,
+            contradiction_penalty=0.0,
+        ),
+        composite=composite,
+        supporting_evidence=(),
+        contradicting_evidence=(),
+        open_questions=(),
+        rationale="fixture",
+    )
+
+
+@pytest.mark.unit
+def test_rank_pairs_is_deterministic_for_tied_pairs_sharing_first_variant() -> None:
+    """Equal composite, equal first variant, different second variant.
+
+    The tie must break on the second variant's coordinate, and reversing the
+    input must not change the ranked list.
+    """
+    shared = rare_stop_gained()
+    left = _tied_scored_pair(shared, rare_splice_donor(), composite=0.80)
+    right = _tied_scored_pair(shared, common_synonymous(), composite=0.80)
+
+    forward = rank_pairs([left, right], clock=CLOCK)
+    backward = rank_pairs([right, left], clock=CLOCK)
+
+    assert [pair.pair_id for pair in forward] == [pair.pair_id for pair in backward], (
+        "reversing two tied candidates reordered the ranked list"
+    )
+    # common_synonymous() is at 40205000, rare_splice_donor() at 40210500, so the
+    # coordinate tiebreak puts the former first.
+    assert forward[0].variant_ids[1] == common_synonymous().variant_id
+    assert [pair.rank for pair in forward] == [1, 2]
+
+
+@pytest.mark.unit
+def test_rank_pairs_orders_a_single_before_a_tied_pair_sharing_its_variant() -> None:
+    """``NO_SECOND_VARIANT`` sorts below every real coordinate, by construction."""
+    shared = rare_stop_gained()
+    single = _tied_scored_pair(shared, None, composite=0.80)
+    pair = _tied_scored_pair(shared, rare_splice_donor(), composite=0.80)
+
+    forward = rank_pairs([single, pair], clock=CLOCK)
+    backward = rank_pairs([pair, single], clock=CLOCK)
+
+    assert [p.pair_id for p in forward] == [p.pair_id for p in backward]
+    assert forward[0].variant_b is None, "the single-variant candidate must rank first"
+    assert forward[0].sort_key()[2] == NO_SECOND_VARIANT
+
+
+@pytest.mark.unit
+def test_candidate_pair_sort_key_is_total_over_a_tied_block() -> None:
+    """No two ranked candidates may share a sort key — and this block would.
+
+    ``rank_pairs`` is not the only thing that sorts these objects: reporting and
+    submission shaping sort them again via ``CandidatePair.sort_key()``. If that
+    key admits ties, those later sorts are only as stable as the list handed to
+    them and the rendered submission becomes a function of input order. All three
+    candidates here share a composite *and* a first variant, which is exactly the
+    shape the two-component key could not separate.
+    """
+    shared = rare_stop_gained()
+    ranked = rank_pairs(
+        [
+            _tied_scored_pair(shared, rare_splice_donor(), composite=0.80),
+            _tied_scored_pair(shared, common_synonymous(), composite=0.80),
+            _tied_scored_pair(shared, None, composite=0.80),
+        ],
+        clock=CLOCK,
+    )
+    keys = [pair.sort_key() for pair in ranked]
+
+    assert len(ranked) == 3
+    assert len(set(keys)) == len(keys), "CandidatePair.sort_key() is not injective"
+    assert keys == sorted(keys), (
+        "rank_pairs' ordering and CandidatePair.sort_key() disagree; a downstream "
+        "re-sort would reorder the ranked list"
+    )
+
+
+@pytest.mark.unit
+def test_the_ranked_list_is_already_in_candidate_sort_key_order() -> None:
+    """The two keys agree on real pipeline output, so re-sorting is a no-op."""
+    first, second = cis_pair_variants()
+    ranked = run_pipeline(
+        [rare_splice_donor(), common_synonymous(), second, rare_stop_gained(), first]
+    )
+    keys = [pair.sort_key() for pair in ranked]
+
+    assert len(ranked) > 1
+    assert len(set(keys)) == len(keys), "CandidatePair.sort_key() is not injective"
+    assert keys == sorted(keys), "rank order and sort_key() order disagree"
+
+
+@pytest.mark.unit
+def test_ranking_only_breaks_ties_and_never_reorders_on_score() -> None:
+    """The appended tiebreakers must not outvote a genuine score difference."""
+    first, second = cis_pair_variants()
+    ranked = run_pipeline(
+        [rare_splice_donor(), common_synonymous(), second, rare_stop_gained(), first]
+    )
+    for higher, lower in itertools.pairwise(ranked):
+        assert higher.composite_score >= lower.composite_score, (
+            "a tiebreak component reordered two candidates that differ on composite"
+        )
+
+
+@pytest.mark.unit
+@given(order=st.permutations(range(5)))
+@settings(max_examples=60, deadline=None)
+def test_ranking_is_invariant_under_any_permutation_of_the_input(order: list[int]) -> None:
+    """GP-30 as a property, over the whole score-and-rank stage."""
+    first, second = cis_pair_variants()
+    variants = [rare_splice_donor(), common_synonymous(), second, rare_stop_gained(), first]
+    baseline = run_pipeline(variants)
+    permuted = run_pipeline([variants[i] for i in order])
+
+    assert [pair.pair_id for pair in permuted] == [pair.pair_id for pair in baseline]
+    assert [pair.composite_score for pair in permuted] == [
+        pair.composite_score for pair in baseline
+    ]
