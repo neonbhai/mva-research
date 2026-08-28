@@ -32,7 +32,8 @@ and were not touched.
 suppress them.**
 
 SYNTHMUL4's −0.1997 is the whole purpose of the change. Its only curated term
-(Seizure) is `UNCERTAIN` in the proband, so specificity stays undefined and
+(Seizure) is `UNCERTAIN` in the **synthetic** case's profile
+(`tests/fixtures/synthetic/synthetic_phenotype.tsv`), so specificity stays undefined and
 contributes the neutral 0.5 exactly as before. The entire drop is the new
 coverage component discovering that Seizure is semantically **distant** from all
 four observed features (Lin best-match average 0.1007).

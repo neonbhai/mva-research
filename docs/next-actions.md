@@ -25,8 +25,9 @@ In order. Nothing downstream is meaningful until (1) holds.
    but nothing binds them, so the pipeline still runs on synthetic tables. See
    the integration backlog below.
 3. **Normalise indels against the reference FASTA** before any frequency or
-   clinical join. a substantial fraction of the proband's records are indel-bearing and a failed
-   join is indistinguishable from "novel and ultra-rare".
+   clinical join. The callset is indel-heavy — a large minority of records are
+   indel-bearing — and a failed join is indistinguishable from "novel and
+   ultra-rare".
 4. **Run the real case, then read the run's warnings**, not just its output.
 
 ## Integration backlog — owned by the orchestrator, not by any agent
@@ -92,7 +93,7 @@ challenge requirement.
 ## Deliberately not doing
 
 - Tuning weights against the live leaderboard (ASSUMPTION-SCORING-03).
-- Fetching the 79 GB of FASTQs or realigning (`docs/resource-acquisition-assessment.md`).
+- Fetching the raw FASTQs or realigning (`docs/resource-acquisition-assessment.md`).
 - gnomAD genomes (524 GB — impossible here) or dbSNP (no allele number, so
   ADR 0010's guard is unimplementable against it).
 - A graph database (ADR 0002) or an LLM in the runtime path (ADR 0003).

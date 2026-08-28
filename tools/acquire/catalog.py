@@ -258,8 +258,9 @@ _REFERENCE_LICENSE: Final[str] = (
 #: The reference genome. Required for indel LEFT-ALIGNMENT: without it a
 #: right-shifted proband indel cannot reach the minimal representation that
 #: gnomAD and ClinVar store, so it misses its join -- which is indistinguishable
-#: from "novel and ultra-rare" (ADR 0018). The real callset is a substantial fraction
-#: indel-bearing, so this is a main-path dependency, not an optional extra.
+#: from "novel and ultra-rare" (ADR 0018). The real callset is indel-heavy -- a
+#: large minority of its records are indel-bearing -- so this is a main-path
+#: dependency, not an optional extra.
 _REFERENCE: Final[tuple[ResourceEntry, ...]] = (
     ResourceEntry(
         name="grch38_no_alt_fasta",

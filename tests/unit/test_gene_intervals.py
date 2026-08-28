@@ -1491,8 +1491,9 @@ def test_a_variant_in_two_genes_would_pair_under_each(index: ManeGeneIndex) -> N
 
 # ----------------------------------------------------------------- real proband VCF
 #
-# The proband callset is GATK output with BARE contigs (`15`, not `chr15`), 2,580
-# contigs including decoys and HLA scaffolds, and a substantial fraction indel-bearing records.
+# The proband callset is GATK output with BARE contigs (`15`, not `chr15`), a
+# full decoy-and-HLA contig set in its header, and an indel-heavy record mix — a
+# large minority of records are indel-bearing.
 # These four tests are that shape, not the tidy one.
 
 
@@ -1529,7 +1530,7 @@ def test_the_mitochondrial_contig_resolves_from_both_spellings() -> None:
 def test_a_decoy_or_hla_contig_is_refused_rather_than_silently_missed(
     index: ManeGeneIndex,
 ) -> None:
-    """2,580 contigs in the callset; this pipeline reasons about 25 of them.
+    """Thousands of contigs in the callset header; this pipeline reasons about 25.
 
     Refusing is the right failure: a decoy that silently returned no gene would be
     indistinguishable from a real intergenic call. Ingestion already cannot build a
