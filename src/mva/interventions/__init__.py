@@ -7,6 +7,11 @@ way, on what evidence tier, at a reachable concentration, with what paediatric
 exposure, at what oncogenic risk, and which experiment comes first — and to keep
 the rejections (GP-19).
 
+`canaries` is the positive control for all of that. Every other Track 2 test
+asserts that something is *rejected*, and a stage that rejected everything would
+pass every one of them; `check_triage_liveness` demands that the stage still
+reaches "accept" on a case whose answer is not in question.
+
 Maturity (GP-20): **synthetic-substitute**. The catalogue shipped here describes
 fictional agents; nothing produced by this package is pharmacological fact or
 medical advice.
@@ -14,6 +19,13 @@ medical advice.
 
 from __future__ import annotations
 
+from mva.interventions.canaries import (
+    CANARY_VERSION,
+    PipelineCanary,
+    TriageLiveness,
+    check_triage_liveness,
+    pipeline_canaries,
+)
 from mva.interventions.catalog import CATALOG_COLUMNS, CatalogEntry, DrugCatalog
 from mva.interventions.direction import (
     DirectionVerdict,
@@ -49,6 +61,7 @@ from mva.interventions.safety import (
 __all__ = [
     "APPROVAL_STATUS_WEIGHT",
     "APPROVAL_WEIGHT",
+    "CANARY_VERSION",
     "CATALOG_COLUMNS",
     "DIRECTION_UNKNOWN_CREDIT",
     "DIRECTION_WEIGHT",
@@ -64,14 +77,18 @@ __all__ = [
     "DirectionVerdict",
     "DrugCatalog",
     "DrugTriageResult",
+    "PipelineCanary",
     "SafetyVerdict",
+    "TriageLiveness",
     "assess_evidence_quality",
     "assess_safety",
     "check_direction",
     "check_target_in_mechanism",
+    "check_triage_liveness",
     "corrective_direction",
     "generate_drug_hypotheses",
     "is_chromosomal_instability_context",
     "is_neurological_context",
+    "pipeline_canaries",
     "required_direction_for_node",
 ]

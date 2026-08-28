@@ -94,6 +94,18 @@ workflow-check:
         --configfile config/synthetic-case.yaml > /dev/null
     @echo "  workflow: DAG resolves"
 
+# ---------------------------------------------------------------- controls
+
+# Positive control for the science. The counterpart of `privacy-audit`.
+#
+# Every other Track 2 test asserts a REJECTION, and a triage stage that rejected
+# everything would pass all of them while scoring identically to a careful one.
+# This proves the stage still reaches "accept" on a case whose answer is not in
+# question, and still rejects the inverted, the unmeasured, the off-chain and the
+# sibling-gene cases for the right reasons. Runs inside `just test` as well.
+science-canary:
+    uv run pytest -q tests/unit/test_pipeline_canary.py
+
 # ---------------------------------------------------------------- generated docs
 
 # Regenerate docs/track2-drugs-to-avoid.md from a live triage run.
