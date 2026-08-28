@@ -150,8 +150,12 @@ below row 5 shift downward because `_enforce_epcr_separation` cascades from the
 promoted row's own value — magnitude carries no information to the scorer, only
 order and injectivity do (ADR 0014), and the order is unchanged.
 
-**The causal pair remains row 1 at REDACTED-EPCR.** Ten distinct EPCRs, minimum gap
-0.0100.
+**The top-ranked pair keeps rank 1 and all ten EPCRs stay distinct**, which is
+the invariant this change had to preserve. It is proved on the synthetic case by
+`tests/golden/test_golden_case.py::test_synthetic_causal_pair_ranks_first` and
+`tests/unit/test_track1_composition.py::test_unrelated_rows_keep_their_epcr_order`;
+the real case's own score and rank are patient-derived and stay on the case
+volume.
 
 ## Consequences
 

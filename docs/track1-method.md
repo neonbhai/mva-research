@@ -36,7 +36,7 @@ counts. It never prints a record. Two facts from it shaped everything downstream
 * **Contigs are bare** (`15`, not `chr15`), Ensembl/NCBI style. The scorer compares
   chromosome strings raw, so emitting a correct answer with a bare contig scores
   exactly zero. Conversion happens once, in the renderer, and a test asserts it.
-* **a substantial fraction** of records are indel-bearing, and multi-allelic records are **not**
+* **A large minority** of records are indel-bearing, and multi-allelic records are **not**
   split. Both make allele representation a first-order correctness problem rather
   than a formatting detail.
 
@@ -176,14 +176,16 @@ treating a missing annotation as a negative finding.
 A report naming an aneuploidy syndrome should say whether aneuploidy is visible
 in the data. Two orthogonal tests were run over the whole callset:
 
-* **Allele balance** at millions of heterozygous biallelic PASS SNVs (depth
-  20-100). Every autosome has median allele balance in 0.486-0.500.
-* **Relative depth** per chromosome against the autosomal median. Every autosome
-  falls in 1.000-1.045. The sex chromosomes reproduce their known expected ratios
-  for this proband, which is the positive control that makes the autosomal null
-  meaningful: the method demonstrably resolves a real copy-number difference, so
-  its silence on the autosomes is evidence rather than insensitivity. The values
-  themselves disclose a genetic characteristic and stay on the case volume.
+* **Allele balance** at every heterozygous biallelic PASS SNV in a bounded
+  depth window. Median allele balance sits at the balanced expectation on all
+  autosomes.
+* **Relative depth** per chromosome against the autosomal median, flat across
+  all autosomes. The sex chromosomes act as the positive control that makes the
+  autosomal null meaningful: the method demonstrably resolves a real
+  copy-number difference, so its silence on the autosomes is evidence rather
+  than insensitivity. Both the counts and the per-chromosome values are
+  genetic characteristics of the child and stay on the case volume; only the
+  method and its verdict are reported here.
 
 **Neither test detects whole-chromosome imbalance, and that is the expected
 result.** MVA aneuploidy is *variegated*: different cells carry different wrong
