@@ -75,6 +75,7 @@ __all__ = [
     "WARN_NO_REFERENCE",
     "WARN_REFERENCE_LOOKUP_FAILED",
     "WARN_REF_ALLELE_MISMATCH",
+    "WARN_SHIFT_LIMIT_REACHED",
     "CanonicalAllele",
     "FastaReference",
     "LeftAlignmentReport",
@@ -104,6 +105,12 @@ __all__ = [
 REF_ALLELE_MISMATCH_FLAG: Final = FLAG_REF_ALLELE_MISMATCH
 
 WARN_NO_REFERENCE: Final = "no_reference_lookup_left_alignment_skipped"
+
+#: A shift spent its whole ``MAX_SHIFT_BP`` budget inside one repeat tract and
+#: stopped short of the left-most position. Separate from
+#: ``WARN_REFERENCE_LOOKUP_FAILED`` because the reference is not at fault and
+#: the remedy is a larger budget, not a different FASTA.
+WARN_SHIFT_LIMIT_REACHED: Final = "shift_limit_reached_not_left_most"
 WARN_REF_ALLELE_MISMATCH: Final = "ref_allele_mismatch"
 WARN_REFERENCE_LOOKUP_FAILED: Final = "reference_lookup_failed"
 
@@ -158,6 +165,13 @@ class _Outcome:
     """False when no reference was supplied, when the one supplied could not be
     read or disagreed with this record's REF, or when the REF span read cleanly but
     a base the *shift* needed did not. Such a record was trimmed only."""
+
+    shift_limited: bool = False
+    """True when every base the shift asked for was supplied and the shift still
+    stopped short, having spent its whole ``MAX_SHIFT_BP`` budget inside one repeat
+    tract. Disjoint from ``reference_consulted is False``: the reference worked.
+    Counted separately so the batch report can say so instead of reporting that
+    every indel was placed against the reference."""
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +231,10 @@ def normalise_variants(
             1 for outcome in indels if OP_LEFT_ALIGN in outcome.record.normalisation_ops
         ),
         unaligned_indel_count=len(unaligned),
+        # Counted over records the reference DID answer for, so the two degraded
+        # counts stay disjoint and a reader can tell "fix your FASTA" from "this
+        # tract is longer than the shift budget".
+        shift_limited_count=sum(1 for outcome in indels if outcome.shift_limited),
         reference_available=reference is not None,
     )
     if reference is None and unaligned:
@@ -277,9 +295,15 @@ def _normalise_one(
         # The REF span read cleanly but a base the shift needed did not. Without
         # this the batch reports APPLIED for a record that was trimmed only.
         warnings[WARN_REFERENCE_LOOKUP_FAILED] += 1
+    elif status is ReferenceStatus.SHIFT_LIMIT_REACHED:
+        # The reference answered everything asked of it and the shift still did not
+        # finish. A different operator problem, so a different code: pointing this
+        # at the FASTA would send someone to re-verify a file that is fine.
+        warnings[WARN_SHIFT_LIMIT_REACHED] += 1
     return _Outcome(
         record=normalised,
         reference_consulted=aligner is not None and status is not ReferenceStatus.UNUSABLE,
+        shift_limited=status is ReferenceStatus.SHIFT_LIMIT_REACHED,
     )
 
 

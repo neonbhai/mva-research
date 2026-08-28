@@ -29,7 +29,9 @@ from mva.alleles import LeftAlignmentStatus, canonicalise_allele
 from mva.annotation.local_tables import (
     LocalConsequenceAdapter,
     LocalFrequencyAdapter,
+    _key_is_indel,
 )
+from mva.errors import AdapterUnavailableError
 
 pytestmark = pytest.mark.unit
 
@@ -254,7 +256,7 @@ def test_the_index_is_deterministic_under_table_row_order(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_an_indel_bearing_table_declares_that_it_was_never_left_aligned(
+def test_an_indel_query_declares_that_it_was_never_left_aligned(
     tmp_path: Path,
 ) -> None:
     """Trimming needs no reference; left-alignment does, and a TSV has none.
@@ -263,8 +265,13 @@ def test_an_indel_bearing_table_declares_that_it_was_never_left_aligned(
     statement, carried on the adapter, that every indel join in this run may be
     missing for representational reasons — the same `LeftAlignmentReport` the
     ingestion stage and the real adapters use.
+
+    The report is about the *run*, so it is empty until the run asks something.
     """
     adapter = _frequency_table(tmp_path, "GRCh38:chr1:100:A:AT")
+    assert adapter.left_alignment.status is LeftAlignmentStatus.NOT_REQUIRED
+
+    adapter.frequencies(["GRCh38:chr1:100:A:AT"])
     report = adapter.left_alignment
 
     assert report.status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
@@ -275,16 +282,76 @@ def test_an_indel_bearing_table_declares_that_it_was_never_left_aligned(
     assert "left-align" in report.describe().lower()
 
 
-def test_a_table_of_snvs_only_says_left_alignment_was_not_required(
+def test_a_run_of_snvs_only_says_left_alignment_was_not_required(
     tmp_path: Path,
 ) -> None:
     """ "Could not" and "did not need to" are opposite claims about how much to trust
     the rarity of every indel in the run, so they must not share a value."""
     adapter = _consequence_table(tmp_path, MINIMAL, "GRCh38:chr2:500:G:C")
+    adapter.annotate([MINIMAL, "GRCh38:chr2:500:G:C"])
     report = adapter.left_alignment
 
     assert report.status is LeftAlignmentStatus.NOT_REQUIRED
     assert not report.is_degraded
+
+
+# --------------------------------------------------------------------------- the
+# count is on the query side of the join, not the table side
+
+
+def test_an_snv_only_table_does_not_deny_the_runs_indels(tmp_path: Path) -> None:
+    """The defect, in the direction that hides the damage.
+
+    `_left_alignment_report` counted `sum(1 for key in index if _key_is_indel(key))`
+    — indels in the LOOKUP TABLE. An SNV-only table therefore reported
+    `NOT_REQUIRED`, whose `describe()` states "this run contains no indel records",
+    over a run whose indels are exactly the ones silently returning absence: a
+    trim-only key cannot match a left-aligned source, the miss is read as "no
+    frequency data", and that is scored novel and ultra-rare (GP-14).
+
+    The table's composition is not a fact about the run. The query set is.
+    """
+    adapter = _frequency_table(tmp_path, MINIMAL, "GRCh38:chr2:500:G:C")
+    assert not any(_key_is_indel(key) for key in adapter._index), "premise: no indels in the table"
+
+    # A run made of indels, none of which the table holds.
+    assert adapter.frequencies(["GRCh38:chr1:100:A:AT", "GRCh38:chr3:700:GT:G"]) == {}
+
+    report = adapter.left_alignment
+    assert report.status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE, (
+        "an SNV-only table denied that the run contained any indels, over the very "
+        "indels that had just come back as absent"
+    )
+    assert report.indel_count == 2
+    assert report.is_degraded
+    assert "no indel records" not in report.describe()
+
+
+def test_a_table_full_of_indels_does_not_degrade_an_snv_only_run(tmp_path: Path) -> None:
+    """The mirror. A table's indels say nothing about a run that asked about none.
+
+    Counting the table also over-reported: a run of pure SNVs against an
+    indel-heavy table was told its indel joins might be wrong when it had made no
+    indel joins at all. A warning a reader cannot act on crowds out the ones they can.
+    """
+    adapter = _consequence_table(tmp_path, "GRCh38:chr1:100:A:AT", "GRCh38:chr3:700:GT:G")
+    adapter.annotate([MINIMAL, "GRCh38:chr2:500:G:C"])
+
+    report = adapter.left_alignment
+    assert report.status is LeftAlignmentStatus.NOT_REQUIRED
+    assert report.indel_count == 0
+    assert not report.is_degraded
+
+
+def test_a_missed_indel_query_is_counted_exactly_like_a_hit(tmp_path: Path) -> None:
+    """A miss is the shape a representation mismatch takes, so it must be counted.
+
+    Counting hits only would reproduce the defect one layer down: the indels that
+    fail to join would be invisible to the report that exists to qualify them.
+    """
+    adapter = _frequency_table(tmp_path, "GRCh38:chr1:100:A:AT")
+    adapter.frequencies(["GRCh38:chr1:100:A:AT", "GRCh38:chr9:900:C:CT"])
+    assert adapter.left_alignment.indel_count == 2
 
 
 def test_an_indel_written_at_another_position_in_a_repeat_tract_still_misses(
@@ -303,3 +370,63 @@ def test_an_indel_written_at_another_position_in_a_repeat_tract_still_misses(
     assert adapter.left_alignment.is_degraded, (
         "the miss above is invisible unless the adapter declares the degradation that causes it"
     )
+
+
+# --------------------------------------------------------------------------- an
+# empty table is refused, not hash-verified into uselessness
+
+
+def test_a_header_only_consequence_table_is_refused(tmp_path: Path) -> None:
+    """`_read_rows` refused a missing header and accepted zero data rows.
+
+    A header-only `consequences.tsv` therefore built a hash-verified `AdapterSet`
+    over an empty index. Every lookup missed, and a miss in these adapters is the
+    *correct* answer for a variant the table does not hold -- so nothing anywhere
+    could tell the two apart. Every variant lost its `gene_symbols`, and
+    compound-heterozygous pairing groups by gene, so the run produced zero
+    candidate pairs and reported success.
+
+    Both sibling modules already guarded this: `gene_intervals._read_gtf` refuses a
+    gene model with no rows, and `GnomadSitesFrequencyAdapter` refuses a release
+    with no complete shard, both for the same reason.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "consequences.tsv"
+    path.write_text(f"# SYNTHETIC fixture\n{_CONSEQUENCE_HEADER}\n", encoding="utf-8")
+
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        LocalConsequenceAdapter(path, version="synthetic-v0.0")
+    message = str(excinfo.value)
+    assert "no data rows" in message
+    assert "consequences.tsv" in message
+    # The remediation is in the message: a reader may be an agent whose only view
+    # of the rule is this string.
+    assert "Re-run the knowledge-table build" in message
+
+
+def test_a_header_only_frequency_table_is_refused(tmp_path: Path) -> None:
+    """The same guard on the frequency slot, which feeds the rarity signal."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "frequencies.tsv"
+    path.write_text(f"# SYNTHETIC fixture\n{_FREQUENCY_HEADER}\n", encoding="utf-8")
+
+    with pytest.raises(AdapterUnavailableError, match="no data rows"):
+        LocalFrequencyAdapter(path, version="synthetic-v0.0")
+
+
+def test_a_comments_only_table_is_refused_too(tmp_path: Path) -> None:
+    """Comment lines are skipped before the header, so they must not count as rows."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "consequences.tsv"
+    path.write_text(
+        f"# SYNTHETIC fixture\n{_CONSEQUENCE_HEADER}\n# a trailing note\n\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AdapterUnavailableError, match="no data rows"):
+        LocalConsequenceAdapter(path, version="synthetic-v0.0")
+
+
+def test_a_single_row_table_still_builds(tmp_path: Path) -> None:
+    """The guard is 'no rows', not 'few rows'. One real row is a valid table."""
+    adapter = _consequence_table(tmp_path, MINIMAL)
+    assert adapter.annotate([MINIMAL])

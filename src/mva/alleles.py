@@ -71,7 +71,8 @@ NUCLEOTIDES: Final[frozenset[str]] = frozenset("ACGTN")
 #: :class:`ReferenceLookup` must not be able to spin the loop forever, and 1 kb is
 #: far beyond any indel this pipeline is entitled to reason about. Reaching the
 #: ceiling stops the shift where it is; the representation stays valid, it is just
-#: not proven left-most.
+#: not proven left-most — which is reported as
+#: :attr:`ReferenceStatus.SHIFT_LIMIT_REACHED` rather than passed off as success.
 MAX_SHIFT_BP: Final = 1000
 
 
@@ -119,6 +120,27 @@ class ReferenceStatus(StrEnum):
     reported as reference-backed canonicalisation. This is the state that used to
     be indistinguishable from success, and the one that silently turned a common
     gnomAD allele into "frequency unknown"."""
+
+    SHIFT_LIMIT_REACHED = "shift_limit_reached"
+    """The shift ran for :data:`MAX_SHIFT_BP` iterations and was still moving.
+
+    **Deliberately not** :attr:`UNUSABLE`. Nothing is wrong with the reference —
+    every base it was asked for was supplied — and nothing is wrong with the
+    record. What ran out is this module's own iteration budget, which is a
+    property of the *code*, and an operator who reads "the reference is unusable"
+    will go and check a FASTA that is perfectly healthy.
+
+    The consequence for the join key is nevertheless the same as ``UNUSABLE``'s:
+    the allele sits somewhere inside a repeat tract at neither its input position
+    nor its proven left-most one, so :attr:`CanonicalAllele.left_alignment_proven`
+    is False and the key must not be reported as reference-backed. It used to
+    return ``USABLE`` here — a partial join key marked proven, uncounted by
+    ``unaligned_indel_count``, in a run whose report went on to state that every
+    indel had been placed against the reference.
+
+    Reachable only in a tract longer than 1 kb of the same repeat unit. Rare, and
+    exactly the kind of locus where a mis-joined indel is most likely to be
+    scored novel and ultra-rare."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +261,7 @@ def canonicalise_allele(
     if reference is not None:
         status = ReferenceStatus.USABLE
         try:
-            shift_position, shift_ref, shift_alt = _left_shift(
+            shift_position, shift_ref, shift_alt, limit_reached = _left_shift(
                 contig, trimmed_position, trimmed_ref, trimmed_alt, reference
             )
         except ReferenceUnusableError:
@@ -252,6 +274,15 @@ def canonicalise_allele(
             # input. Trim-only is at least a defined, reproducible representation.
             status = ReferenceStatus.UNUSABLE
         else:
+            if limit_reached:
+                # The budget ran out mid-tract. The reference answered every read,
+                # so this is not UNUSABLE — but the allele is not left-most either,
+                # and saying USABLE here is the claim that used to be made and was
+                # never true. The partially shifted form is kept: unlike the
+                # unreadable-reference case there is no doubt about the bases, and
+                # every run over this input stops at the same place, so the key
+                # stays reproducible even though it is not proven left-most.
+                status = ReferenceStatus.SHIFT_LIMIT_REACHED
             shifted = (shift_position, shift_ref, shift_alt) != (
                 trimmed_position,
                 trimmed_ref,
@@ -303,7 +334,7 @@ def trim_parsimoniously(position: int, ref: str, alt: str) -> tuple[int, str, st
 
 def _left_shift(
     contig: str, position: int, ref: str, alt: str, reference: ReferenceLookup
-) -> tuple[int, str, str]:
+) -> tuple[int, str, str, bool]:
     """Roll an indel as far left as the reference allows (Tan et al. Algorithm 1).
 
     While the alleles end in the same base and either is length 1, prepend the
@@ -317,6 +348,14 @@ def _left_shift(
     exhausted, so this raises rather than stopping — stopping would be
     indistinguishable from "already left-most".
 
+    Returns the shifted allele and **whether the iteration budget ran out while it
+    was still moving**. The flag is not optional bookkeeping. Every ``break`` above
+    is a *reason* the shift finished — left-most, complex substitution, start of
+    contig — and falling out of the ``for`` is the one case that is not a reason
+    but a stop, leaving the allele at neither its input position nor its left-most
+    one. Returning only the tuple made those indistinguishable, and the caller
+    then labelled the stop ``USABLE``.
+
     Raises:
         ReferenceUnusableError: the reference could not supply a base the shift
             required.
@@ -325,15 +364,15 @@ def _left_shift(
         while len(ref) > 1 and len(alt) > 1 and ref[-1] == alt[-1]:
             ref, alt = ref[:-1], alt[:-1]
         if len(ref) > 1 and len(alt) > 1:
-            break  # a complex substitution, not a shiftable indel
+            return position, ref, alt, False  # a complex substitution, not shiftable
         if ref[-1] != alt[-1]:
-            break  # already left-most
+            return position, ref, alt, False  # already left-most
         if position <= 1:
-            break  # nothing exists to the left of the first base of a contig
+            return position, ref, alt, False  # nothing to the left of a contig's first base
         base = _required_base(reference, contig, position - 1)
         ref, alt = base + ref, base + alt
         position -= 1
-    return position, ref, alt
+    return position, ref, alt, True
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +469,14 @@ def rightmost_equivalent_bound(
         if moved == position:
             break  # growing rightwards bought no shift; this is the right-most form
         position, ref, alt = moved, next_ref, next_alt
+    else:
+        # Fell out of the loop still moving. Every ``break`` above is a reason the
+        # search finished; this is the one exit that is not. The bound is therefore
+        # a stopping point, not the reference's answer, and reporting it USABLE
+        # told the caller the query window provably covers every equivalent
+        # spelling when it demonstrably does not. Not UNUSABLE either: the
+        # reference supplied every base it was asked for.
+        return QueryBound(position=position, reference_status=ReferenceStatus.SHIFT_LIMIT_REACHED)
     return QueryBound(position=position, reference_status=ReferenceStatus.USABLE)
 
 
@@ -588,6 +635,19 @@ class LeftAlignmentStatus(StrEnum):
     """A reference was supplied but could not be read, or disagreed with REF, for
     some records. Those records were trimmed only."""
 
+    INCOMPLETE_SHIFT_LIMIT = "incomplete_shift_limit"
+    """The reference answered every read, but some indels sat in a repeat tract
+    longer than :data:`MAX_SHIFT_BP` and the shift stopped before reaching the
+    left-most position.
+
+    A separate value from ``INCOMPLETE_REFERENCE_UNUSABLE`` because the operator
+    action is different — nothing is wrong with the FASTA and re-downloading it
+    changes nothing — while the consequence for those records' join keys is the
+    same: they are not left-most and may not match a left-aligned source. Kept
+    apart from ``APPLIED`` for the reason this enum exists at all: "every indel
+    was placed against the reference" was being stated over a batch in which some
+    had not been."""
+
 
 @dataclass(frozen=True, slots=True)
 class LeftAlignmentReport:
@@ -609,10 +669,26 @@ class LeftAlignmentReport:
     unaligned_indel_count: int
     reference_available: bool
 
+    shift_limited_count: int = 0
+    """Indels whose shift hit :data:`MAX_SHIFT_BP` while still moving.
+
+    Disjoint from ``unaligned_indel_count``, which counts records the reference
+    could not be *read* for. These were read successfully and are still not
+    left-most, and before this field existed they were counted as neither — so a
+    run could report ``APPLIED`` and "every indel was placed against it" over a
+    batch holding partially shifted keys."""
+
     @property
     def is_degraded(self) -> bool:
-        """True when at least one indel was never checked against a reference."""
-        return self.unaligned_indel_count > 0
+        """True when at least one indel's key is not proven left-most.
+
+        Both ways of failing to reach the left-most position count, because the
+        consequence downstream is identical: a key that may not match a
+        left-aligned source, whose miss is then read as "no record" and scored
+        novel and ultra-rare. The two causes are told apart by
+        :attr:`status`, not by whether the run is degraded at all.
+        """
+        return self.unaligned_indel_count > 0 or self.shift_limited_count > 0
 
     def describe(self) -> str:
         """One sentence a reader who has never seen this code can act on."""
@@ -626,6 +702,16 @@ class LeftAlignmentReport:
                 f"Left-alignment applied against the configured reference to all "
                 f"{self.indel_count} indel records; {self.shifted_count} moved to a "
                 "left-most position. Indel join keys agree with left-aligned sources."
+            )
+        if self.status is LeftAlignmentStatus.INCOMPLETE_SHIFT_LIMIT:
+            return (
+                f"DEGRADED: the reference was readable throughout, but "
+                f"{self.shift_limited_count} of {self.indel_count} indel records sit in a "
+                f"repeat tract longer than the {MAX_SHIFT_BP} bp shift budget and stopped "
+                "short of their left-most position. Their join keys are reproducible but "
+                "not left-most, so they may fail to match ClinVar or gnomAD and would then "
+                "be scored as novel. The FASTA is not at fault and re-downloading it will "
+                "not change this; raising MAX_SHIFT_BP is the only remedy."
             )
         if self.status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE:
             return (
@@ -653,6 +739,7 @@ class LeftAlignmentReport:
             "indel_count": self.indel_count,
             "shifted_count": self.shifted_count,
             "unaligned_indel_count": self.unaligned_indel_count,
+            "shift_limited_count": self.shift_limited_count,
             "degraded": self.is_degraded,
             "summary": self.describe(),
         }
@@ -664,14 +751,23 @@ def summarise_left_alignment(
     shifted_count: int,
     unaligned_indel_count: int,
     reference_available: bool,
+    shift_limited_count: int = 0,
 ) -> LeftAlignmentReport:
-    """Derive the status from the counts, so no caller can label a batch by hand."""
+    """Derive the status from the counts, so no caller can label a batch by hand.
+
+    Precedence when more than one degradation is present is worst-first:
+    no reference at all, then records the reference could not be read for, then
+    records that ran out of shift budget. The report carries every count either
+    way, so nothing is lost by the status naming only the most severe.
+    """
     if indel_count == 0:
         status = LeftAlignmentStatus.NOT_REQUIRED
     elif not reference_available:
         status = LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
     elif unaligned_indel_count:
         status = LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
+    elif shift_limited_count:
+        status = LeftAlignmentStatus.INCOMPLETE_SHIFT_LIMIT
     else:
         status = LeftAlignmentStatus.APPLIED
     return LeftAlignmentReport(
@@ -680,4 +776,5 @@ def summarise_left_alignment(
         shifted_count=shifted_count,
         unaligned_indel_count=unaligned_indel_count,
         reference_available=reference_available,
+        shift_limited_count=shift_limited_count,
     )

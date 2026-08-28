@@ -1237,6 +1237,137 @@ def test_a_backend_failure_never_echoes_the_queried_region(
     assert re.search(r"<region:[0-9a-f]{8}>", rendered), "no correlation handle was given"
 
 
+# ------------------------------------------------- the release is UTF-8, not ASCII
+#
+# The 4,962,060-variant run died at ~1h07m with a UnicodeDecodeError reported as
+# "the release may be truncated, its index may not match its bytes, or the file may
+# have changed under an open handle. Re-verify the release against its sha256 pin."
+# None of that was true: the md5 matched NCBI's shipped pin, the BGZF EOF marker was
+# present, and all 4,468,035 decompressed lines were valid UTF-8.
+#
+# The cause was pysam's default. `pysam.TabixFile(path)` decodes every header line
+# and every fetched record as **ASCII**, and ClinVar's CLNDN condition names are not
+# ASCII -- they carry eponyms and Greek letters as UTF-8. The first queried region
+# holding such a record aborts the run. The committed fixture is pure ASCII, which
+# is exactly why 1,421 passing tests never saw it, so the record below is built
+# in-test the way `write_indexed_vcf` exists to allow.
+
+#: Real ClinVar condition spellings that are valid UTF-8 and not ASCII. Public
+#: reference vocabulary, not patient data.
+NON_ASCII_CONDITIONS = "Björnstad_syndrome|3-β-hydroxysteroid_dehydrogenase_deficiency"
+
+
+def test_a_non_ascii_condition_name_is_decoded_rather_than_aborting_the_run(
+    tmp_path: Path,
+) -> None:
+    """The release is UTF-8. A handle that assumes ASCII fails an hour into a run.
+
+    Fails without the fix with ``AdapterUnavailableError`` -- the broad guard in
+    ``assertions`` converting pysam's ``UnicodeDecodeError`` into a backend
+    failure. GP-13: the variant is not dropped, it takes the whole callset with it.
+    """
+    info = f"ALLELEID=1;CLNSIG=Pathogenic;CLNDN={NON_ASCII_CONDITIONS}"
+    path = write_indexed_vcf(
+        tmp_path,
+        MINIMAL_HEADER + f"15\t40200239\t111\tA\tG\t.\t.\t{info}\n",
+        name="utf8.vcf",
+    )
+    instance = open_adapter(path)
+    try:
+        (assertion,) = instance.assertions([UNREVIEWED_PATHOGENIC])[UNREVIEWED_PATHOGENIC]
+    finally:
+        instance.close()
+    # Decoded, not replaced: `errors="replace"` would put U+FFFD here and a mangled
+    # condition name is worse than a refusal.
+    assert assertion.conditions == (
+        "Björnstad syndrome",
+        "3-β-hydroxysteroid dehydrogenase deficiency",
+    )
+    assert "�" not in "".join(assertion.conditions)
+
+
+def test_a_non_ascii_header_line_does_not_fail_construction(tmp_path: Path) -> None:
+    """The same codec applies to the header pysam reads at open time."""
+    path = write_indexed_vcf(
+        tmp_path,
+        "##fileformat=VCFv4.1\n"
+        "##fileDate=2026-08-22\n"
+        "##source=ClinVar\n"
+        "##reference=GRCh38\n"
+        '##INFO=<ID=CLNDN,Number=.,Type=String,Description="Disease name, e.g. Björnstad">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+        "15\t40200239\t111\tA\tG\t.\t.\tALLELEID=1;CLNSIG=Pathogenic;CLNDN=Ataxia\n",
+        name="utf8_header.vcf",
+    )
+    instance = open_adapter(path)
+    try:
+        assert instance.version == EXPECTED_VERSION
+        assert instance.assertions([UNREVIEWED_PATHOGENIC])
+    finally:
+        instance.close()
+
+
+def test_a_backend_failure_does_not_assert_causes_it_has_not_established(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GP-14 applied to a diagnostic: absence of evidence is not evidence.
+
+    The old text named truncation, an index/data mismatch and a file replaced under
+    an open handle. All three are checked at construction, so none of them can be
+    the cause of a query failure against an adapter that opened successfully --
+    and naming them sent an operator to re-verify a pin that was never wrong.
+    """
+    instance = open_adapter(FIXTURE)
+    monkeypatch.setattr(instance, "_tabix", _ExplodingTabix(instance._tabix, on_iteration=True))
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        instance.assertions([UNREVIEWED_PATHOGENIC])
+    instance.close()
+    message = str(excinfo.value)
+
+    for asserted_cause in (
+        "may be truncated",
+        "index may not match its bytes",
+        "may have changed under",
+    ):
+        assert asserted_cause not in message, (
+            f"still asserts an unestablished cause: {asserted_cause}"
+        )
+    # What it must still do.
+    assert re.search(r"<region:[0-9a-f]{8}>", message), "lost the correlation handle"
+    assert "40200239" not in message, "echoed the coordinate (PRIV-09)"
+    assert "OSError" in message, "dropped the one established fact, the exception class"
+    assert "not a candidate cause" in message
+    assert "Re-verifying the pin will not explain this." in message
+
+
+def test_a_decode_failure_points_at_the_codec_not_at_the_release() -> None:
+    """The class that actually killed the run gets the cause that is establishable."""
+
+    class _UndecodableTabix(_ExplodingTabix):
+        def fetch(self, reference: str, start: int, end: int) -> Iterator[str]:
+            def _iterate() -> Iterator[str]:
+                # Shaped like pysam's own: raised while decoding a fetched record.
+                raise UnicodeDecodeError(
+                    "ascii", b"Bj\xc3\xb6rnstad", 2, 3, "ordinal not in range(128)"
+                )
+                yield ""  # pragma: no cover - unreachable, makes this a generator
+
+            return _iterate()
+
+    instance = open_adapter(FIXTURE)
+    instance._tabix = _UndecodableTabix(instance._tabix, on_iteration=True)
+    with pytest.raises(AdapterUnavailableError) as excinfo:
+        instance.assertions([UNREVIEWED_PATHOGENIC])
+    instance.close()
+    message = str(excinfo.value)
+    assert "decoder mismatch" in message
+    assert "UnicodeDecodeError" in message
+    # PRIV-09: UnicodeDecodeError puts the offending bytes in its own str(); those
+    # bytes are release text sitting beside a proband coordinate.
+    assert "Bj" not in message
+    assert "rnstad" not in message
+
+
 def test_a_lookup_after_close_is_refused_rather_than_answered_as_absence() -> None:
     """A closed handle must not answer 'ClinVar has no record' for a whole batch."""
     instance = open_adapter(FIXTURE)
@@ -1559,3 +1690,75 @@ def test_the_real_release_index_reaches_the_end_of_the_release() -> None:
         assert instance.assertions(["GRCh38:chr15:40200239:A:G"])
     finally:
         instance.close()
+
+
+# ------------------------------------- the status comes from the shared rule
+#
+# `representation_status` was hand-rolled here:
+#
+#     if self._reference is None:      return UNAVAILABLE_NO_REFERENCE
+#     if self._unusable_reference_alleles: return INCOMPLETE_REFERENCE_UNUSABLE
+#     return APPLIED
+#
+# which has no case for "there were no indels" and so answered APPLIED over an
+# SNV-only batch -- rendered by `LeftAlignmentReport.describe()` as "left-alignment
+# applied against the configured reference to all 0 indel records". The invariant
+# it breaks is written down in `local_tables._left_alignment_report`: "could not
+# left-align" and "had nothing to left-align" are opposite claims about how far to
+# trust the rarity of every indel in the run and must not share a value.
+
+
+def test_an_snv_only_batch_is_not_required_rather_than_applied(tmp_path: Path) -> None:
+    """A batch with nothing to left-align did not left-align anything.
+
+    Fails before the fix with APPLIED. A fresh adapter is used rather than the
+    module fixture because the status is cumulative over everything the adapter
+    has been asked, which is the point: it is a statement about a run.
+    """
+    instance = open_adapter(FIXTURE, reference=_ConstantReference())
+    try:
+        assert instance.representation_status is LeftAlignmentStatus.NOT_REQUIRED
+        instance.assertions([PRACTICE_GUIDELINE, EXPERT_PANEL_PATHOGENIC, CONFLICTING])
+        assert instance.representation_status is LeftAlignmentStatus.NOT_REQUIRED, (
+            "an SNV-only batch reported that left-alignment had been applied to it"
+        )
+        assert instance.left_alignment.indel_count == 0
+        assert instance.representation_limitation is None
+        assert "no indel records" in instance.left_alignment.describe()
+    finally:
+        instance.close()
+    _ = tmp_path
+
+
+def test_an_snv_only_batch_without_a_reference_is_also_not_required() -> None:
+    """The same rule in the degraded configuration.
+
+    "No FASTA" costs nothing on a batch with no indels in it, and a warning a
+    reader cannot act on is noise that hides the ones they can.
+    """
+    instance = open_adapter(FIXTURE)
+    try:
+        instance.assertions([PRACTICE_GUIDELINE])
+        assert instance.representation_status is LeftAlignmentStatus.NOT_REQUIRED
+        assert instance.representation_limitation is None
+    finally:
+        instance.close()
+
+
+def test_one_indel_lookup_moves_the_batch_off_not_required() -> None:
+    """The counterpart: the moment an indel arrives the status must react."""
+    instance = open_adapter(FIXTURE)
+    try:
+        instance.assertions([INDEL_PATHOGENIC])
+        assert instance.representation_status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+        assert instance.left_alignment.indel_count > 0
+        assert instance.representation_limitation is not None
+    finally:
+        instance.close()
+
+
+class _ConstantReference:
+    """A reference of alternating bases, which terminates every shift quickly."""
+
+    def fetch(self, contig: str, start: int, end: int) -> str:
+        return "".join("ACGT"[position % 4] for position in range(start, end + 1))

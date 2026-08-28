@@ -17,16 +17,21 @@ is not present.
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import stat
+import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from mva.annotation import snpeff_local
 from mva.annotation.base import ConsequenceAdapter, is_synthetic
+from mva.annotation.service import DEFAULT_ANNOTATION_BATCH_SIZE
 from mva.annotation.snpeff_local import (
+    DEFAULT_BATCH_SIZE,
     JAVA_HOME_ENV,
     SNPEFF_ADAPTER_NAME,
     SNPEFF_OFFLINE_FLAGS,
@@ -1565,3 +1570,134 @@ def test_the_real_installation_is_pinned_from_the_manifest_it_shipped_with() -> 
     assert pins.composite_digest == REAL_PINS.composite_digest
     result = adapter.annotate([BUB1B_NONSENSE])
     assert result[BUB1B_NONSENSE]
+
+
+# --------------------------------------------------------- one launch per chunk
+#
+# SnpEff's cost is ~100% fixed start-up: measured on this machine, 35.5 s to
+# annotate ONE variant and 31.6 s to annotate 5,000, because both are a
+# GRCh38.115 database load. The marginal per-variant cost is indistinguishable
+# from zero, so the number of JVM launches IS the runtime, and the batch size is
+# the only lever on it.
+#
+# The 4,962,060-variant callset projected to ~30 h. `service.DEFAULT_ANNOTATION_
+# BATCH_SIZE` was 5,000 while `snpeff_local.DEFAULT_BATCH_SIZE` was 25,000, so the
+# adapter's own chunking never triggered and the run paid one launch per 5,000
+# variants: 993 launches, ~9.8 h of nothing but reloading the same database.
+#
+# These tests guard the two halves of the fix that are silent when broken -- a
+# mismatched pair of constants, and a return to buffering the output in memory.
+
+
+def test_the_two_batch_sizes_are_equal() -> None:
+    """A mismatch silently keeps most of the reloads, and nothing else notices.
+
+    Whichever constant is smaller decides the launch count. 5,000 against 25,000
+    meant the adapter's chunking never fired at all; 250,000 against a stale
+    25,000 would mean ten launches per service batch and 199 of the original 993
+    surviving a change that looks, from the outside, like it worked.
+    """
+    assert DEFAULT_ANNOTATION_BATCH_SIZE == DEFAULT_BATCH_SIZE, (
+        "the service batch and the SnpEff chunk disagree; the smaller one wins and "
+        "the JVM reloads come back"
+    )
+
+
+def test_the_batch_size_is_the_one_the_machine_can_afford() -> None:
+    """Both bounds, asserted, because both are real and they point opposite ways.
+
+    Too small and the run pays for a database reload it does not need; too large
+    and it trips the memory watchdog. 500,000 is deliberately not taken: the scale
+    sweep puts batch-1M at 7.79 GiB against a 12 GiB limit, and at 20 launches the
+    fixed cost is already amortised, so there is no throughput left to buy.
+    """
+    callset = 4_962_060
+    launches = math.ceil(callset / DEFAULT_ANNOTATION_BATCH_SIZE)
+    assert launches <= 25, (
+        f"{launches} JVM launches over the real callset; each is a full GRCh38.115 "
+        "database load and the run has no time for them"
+    )
+    assert DEFAULT_ANNOTATION_BATCH_SIZE <= 250_000, (
+        "24 GB of RAM and a 6 GB JVM heap; the scale sweep's batch-1M measured "
+        "7.79 GiB against a 12 GiB watchdog"
+    )
+
+
+def test_each_chunk_costs_exactly_one_subprocess(
+    adapter_factory: AdapterFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chunk count and launch count are the same number, which is the whole premise."""
+    adapter = adapter_factory(batch_size=2)
+    variants = [MULTI_TRANSCRIPT, SINGLE_TRANSCRIPT, INTRONIC, FRAMESHIFT, INTERGENIC]
+
+    launches: list[tuple[object, ...]] = []
+    real_run = subprocess.run
+
+    def _counting(*args: Any, **kwargs: Any) -> Any:
+        launches.append(args)
+        return real_run(*args, **kwargs)
+
+    # Patched after construction so the version probe's own launch is not counted.
+    monkeypatch.setattr(snpeff_local.subprocess, "run", _counting)
+    adapter.annotate(variants)
+
+    assert len(launches) == math.ceil(len(variants) / 2) == 3
+
+
+def test_annotation_output_is_spooled_to_a_file_not_held_in_memory(
+    adapter_factory: AdapterFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reason the 25,000 ceiling existed, removed rather than raised.
+
+    `_invoke` used `capture_output=True`, which accumulates the whole annotated VCF
+    as one `bytes` object and then again as the `str` that `.splitlines()` was
+    called on. At ~700 bytes per annotated record that is ~350 MB per 250,000
+    variants, before the list of lines -- and that memory, not any property of
+    SnpEff, is what the old batch ceiling encoded. Raising the batch size without
+    removing it would trade JVM reloads for an OOM.
+
+    Asserted structurally: a test that only measured wall time would pass against a
+    reintroduced buffer on a five-variant fixture.
+    """
+    adapter = adapter_factory()
+    captured: list[dict[str, Any]] = []
+    real_run = subprocess.run
+
+    def _recording(*args: Any, **kwargs: Any) -> Any:
+        captured.append(kwargs)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(snpeff_local.subprocess, "run", _recording)
+    adapter.annotate([MULTI_TRANSCRIPT, SINGLE_TRANSCRIPT])
+
+    (kwargs,) = captured
+    assert not kwargs.get("capture_output"), (
+        "stdout is being buffered in memory again; the batch ceiling this removed "
+        "would have to come back with it"
+    )
+    stdout = kwargs["stdout"]
+    assert hasattr(stdout, "fileno"), "stdout is not a real file the child writes into"
+    # Inside the run's own scratch directory: the spool holds annotated proband
+    # coordinates and must not outlive the call or land somewhere shared (GP-40).
+    assert "mva-snpeff-" in stdout.name
+    assert kwargs["stderr"] is not stdout, "stderr merged into the annotated output stream"
+
+
+def test_the_scratch_spool_does_not_outlive_the_call(
+    adapter_factory: AdapterFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The annotated VCF carries proband coordinates; it is unlinked with the scratch."""
+    adapter = adapter_factory()
+    paths: list[Path] = []
+    real_run = subprocess.run
+
+    def _recording(*args: Any, **kwargs: Any) -> Any:
+        paths.append(Path(kwargs["stdout"].name))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(snpeff_local.subprocess, "run", _recording)
+    adapter.annotate([MULTI_TRANSCRIPT])
+
+    (spool,) = paths
+    assert not spool.exists(), "the annotated output was left on disk after the call"
+    assert not spool.parent.exists(), "the scratch directory outlived the call"
