@@ -71,11 +71,14 @@ from typing import Final, Protocol, cast
 
 from mva.alleles import (
     CanonicalAllele,
+    LeftAlignmentReport,
     LeftAlignmentStatus,
     ReferenceLookup,
     ReferenceStatus,
     canonicalise_allele,
+    is_sequence_allele,
     rightmost_equivalent_bound,
+    summarise_left_alignment,
 )
 from mva.annotation.bgzf import index_covers_data
 from mva.determinism import hash_file
@@ -164,6 +167,14 @@ UNREPRESENTABLE_CLINVAR_FIELDS: Final[tuple[str, ...]] = (
 #: (PRIV-05), and importing it for a string helper would trip the architecture
 #: test for no benefit.
 _HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdefABCDEF")
+
+#: The codec the ClinVar release is actually written in, passed to pysam
+#: explicitly. **pysam's own default is ASCII**, and ClinVar's ``CLNDN`` condition
+#: names are not: the release carries eponyms and Greek letters as UTF-8. Leaving
+#: the default in place turns the first such record into a ``UnicodeDecodeError``
+#: raised from inside htslib's iterator — hours into a whole-callset run, against
+#: a release whose bytes are entirely valid. See :func:`_open_tabix`.
+RELEASE_ENCODING: Final = "utf-8"
 
 #: ClinVar's placeholder for "no value here" in a ``|``-delimited INFO list.
 _MISSING_VALUE: Final = "."
@@ -548,7 +559,8 @@ class ClinvarVcfAdapter:
         # window holds 1,761 Pathogenic/Likely_pathogenic indel assertions. The
         # check is on content rather than mtime, because a correct index is
         # routinely older than the file it describes; see index_covers_data.
-        if index_covers_data(vcf_path, index_path) is False:
+        index_reach = index_covers_data(vcf_path, index_path)
+        if index_reach is False:
             msg = (
                 f"The tabix index beside ClinVar release {vcf_path.name!r} does not reach "
                 "the end of the release: it was built from a shorter file, or the release "
@@ -565,11 +577,21 @@ class ClinvarVcfAdapter:
         self._build = build
         self._merge_window_bp = merge_window_bp
         self._reference = reference
-        # Per-run count of alleles whose canonicalisation could not read the
-        # reference. Not a boolean: the report states how many records are
-        # affected, and "one unreadable base" and "the FASTA is gone" are
-        # different operator problems.
+        # ``True`` only when the reach was actually measured and reached the end.
+        # ``index_covers_data`` returns None when it could not measure the index at
+        # all, and a backend failure message that reported an unmeasured index as
+        # "verified" would be committing the error it exists to stop committing.
+        self._index_reach_verified = index_reach is True
+        # Per-run counts over every allele this adapter canonicalised, on either
+        # side of the join — `canonicalise` is the single entry point both sides go
+        # through, so one population is counted rather than two half-populations.
+        # Counts, not booleans: the report states how many records are affected,
+        # and "one unreadable base" and "the FASTA is gone" are different operator
+        # problems.
         self._unusable_reference_alleles = 0
+        self._shift_limited_alleles = 0
+        self._indel_alleles = 0
+        self._shifted_alleles = 0
         self._tabix = _open_tabix(vcf_path)
         self._closed = False
         self._version = _release_version(self._tabix, path=vcf_path, build=build)
@@ -620,31 +642,72 @@ class ClinvarVcfAdapter:
         return self._build
 
     @property
+    def left_alignment(self) -> LeftAlignmentReport:
+        """The full typed report, derived through the one shared rule.
+
+        Derived, never asserted. This adapter used to label its own batch::
+
+            if self._reference is None:
+                return LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+            if self._unusable_reference_alleles:
+                return LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
+            return LeftAlignmentStatus.APPLIED
+
+        which has no case for "there were no indels" and therefore answered
+        ``APPLIED`` — rendered by ``describe()`` as "left-alignment applied to all
+        0 indel records" — over a batch that had nothing to left-align.
+        :func:`~mva.alleles.summarise_left_alignment` answers ``NOT_REQUIRED``
+        there, and the difference is the one ``local_tables._left_alignment_report``
+        documents: "could not left-align" and "had nothing to left-align" are
+        opposite claims about how far to trust the rarity of every indel in the
+        run, and they must not share a value. Two implementations of one status
+        rule is the same defect as two implementations of the representation rule
+        (ADR 0018), one level up.
+        """
+        return summarise_left_alignment(
+            indel_count=self._indel_alleles,
+            shifted_count=self._shifted_alleles,
+            unaligned_indel_count=self._unusable_reference_alleles,
+            shift_limited_count=self._shift_limited_alleles,
+            reference_available=self._reference is not None,
+        )
+
+    @property
     def representation_status(self) -> LeftAlignmentStatus:
         """Whether this adapter can reconcile a *shifted* indel spelling, typed.
 
-        ``APPLIED`` only when a reference was supplied **and every read the rule
-        needed from it succeeded**. A reference object that is merely non-``None``
-        proves nothing: a FASTA that raises on every read yields trim-only keys, and
-        reporting those as reference-backed is a provenance lie no downstream
-        consumer can detect. Trimming to the minimal representation is unconditional
-        either way, so the ``100 AT>AG`` versus ``101 T>G`` class of mismatch joins in
-        both states; what the degraded state costs is the repeat-tract class, where the
-        release and the proband place the same insertion at different positions.
-        Typed rather than logged so a report can state the limitation instead of a
-        reader having to infer it from an absent assertion.
+        ``APPLIED`` only when a reference was supplied, **every read the rule
+        needed from it succeeded**, and there was at least one indel to place. A
+        reference object that is merely non-``None`` proves nothing: a FASTA that
+        raises on every read yields trim-only keys, and reporting those as
+        reference-backed is a provenance lie no downstream consumer can detect.
+        Trimming to the minimal representation is unconditional either way, so the
+        ``100 AT>AG`` versus ``101 T>G`` class of mismatch joins in both states;
+        what the degraded state costs is the repeat-tract class, where the release
+        and the proband place the same insertion at different positions. Typed
+        rather than logged so a report can state the limitation instead of a reader
+        having to infer it from an absent assertion.
+
+        Read off :attr:`left_alignment` rather than re-derived here.
         """
-        if self._reference is None:
-            return LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
-        if self._unusable_reference_alleles:
-            return LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
-        return LeftAlignmentStatus.APPLIED
+        return self.left_alignment.status
 
     @property
     def representation_limitation(self) -> str | None:
         """One sentence for a report footer, or ``None`` when nothing is degraded."""
-        if self._reference is not None and not self._unusable_reference_alleles:
+        status = self.representation_status
+        if status in (LeftAlignmentStatus.APPLIED, LeftAlignmentStatus.NOT_REQUIRED):
             return None
+        if status is LeftAlignmentStatus.INCOMPLETE_SHIFT_LIMIT:
+            return (
+                f"The reference FASTA was readable throughout, but "
+                f"{self._shift_limited_alleles} ClinVar allele(s) sit in a repeat tract "
+                "longer than the shift budget and stopped short of their left-most "
+                "position. Their keys are reproducible but not left-most, so they may "
+                "fail to join against ClinVar's left-aligned alleles and would then be "
+                "reported as having no ClinVar record — absence of information, not "
+                "evidence of benignity. The FASTA is not at fault here."
+            )
         if self._reference is not None:
             return (
                 f"A reference FASTA was supplied but could not be read for "
@@ -755,17 +818,14 @@ class ClinvarVcfAdapter:
                     # original, whose message and frame are exactly what must not be
                     # printed, and a bare ``raise`` re-exposes it the same way. The
                     # token is a one-way handle, so two messages about one region
-                    # still correlate within a run.
+                    # still correlate within a run. Only the exception *class*
+                    # crosses over: a ``UnicodeDecodeError``'s ``str()`` embeds the
+                    # offending bytes, which on this path are release text sitting
+                    # beside a proband coordinate.
                     handle = error_token((ucsc_contig, span[0], span[1]))
-                    msg = (
-                        f"The tabix backend failed on a region query against ClinVar "
-                        f"{self._version} ({type(exc).__name__}). The region is a proband "
-                        f"coordinate and is not echoed; the correlation handle is "
-                        f"<region:{handle}> (PRIV-09). The release may be truncated, its "
-                        "index may not match its bytes, or the file may have changed under "
-                        "an open handle. Re-verify the release against its sha256 pin."
-                    )
-                    raise AdapterUnavailableError(msg) from None
+                    raise AdapterUnavailableError(
+                        self._backend_failure_message(exc, handle=handle)
+                    ) from None
 
         return {
             variant_id: tuple(sorted(found[variant_id], key=_assertion_sort_key))
@@ -782,6 +842,57 @@ class ClinvarVcfAdapter:
         self._closed = True
 
     # ------------------------------------------------------------------ internals
+
+    def _backend_failure_message(self, exc: BaseException, *, handle: str) -> str:
+        """Say what failed and what is already known, and assert nothing else.
+
+        GP-14 applied to a diagnostic. The previous text named three causes —
+        "the release may be truncated, its index may not match its bytes, or the
+        file may have changed under an open handle" — and closed with "re-verify
+        the release against its sha256 pin". All three are *conditions this
+        adapter already checked at construction*: :func:`_verify_integrity` hashed
+        the bytes against the pin and :func:`index_covers_data` compared the
+        index's reach against the file size, and neither can pass at ``__init__``
+        and then be the reason a query fails an hour later without the file having
+        been replaced underneath the run. Stating them as candidate causes sent an
+        operator to re-verify a pin that was never wrong, while the real cause —
+        a decoder mismatch inside the backend — was not on the list at all.
+
+        So the message now separates three things a reader can act on
+        differently: what is **established** (the exception class, the release,
+        that the checks passed), what is **ruled out** by those checks, and what
+        remains **unestablished**, offered as a next step rather than a finding.
+
+        PRIV-09 is unchanged. The region is a proband coordinate and is never
+        echoed; the one-way ``handle`` correlates two messages about one region
+        within a run. Only ``type(exc).__name__`` crosses over: several exception
+        classes here, ``UnicodeDecodeError`` among them, put file bytes into their
+        ``str()``, and those bytes sit beside the coordinate that was queried.
+        """
+        kind = type(exc).__name__
+        if isinstance(exc, UnicodeDecodeError):
+            specific = (
+                f"A {kind} is a decoder mismatch, not damaged data: htslib returned bytes "
+                f"that this handle's codec ({RELEASE_ENCODING}) refused. Check the codec "
+                "before you check the file — ClinVar ships UTF-8 condition names, and a "
+                "handle opened under a narrower codec fails on the first record carrying "
+                "one however sound the release is."
+            )
+        else:
+            specific = (
+                f"What the {kind} was raised by is not established here. The backend's own "
+                "message is withheld rather than summarised, because it carries the region."
+            )
+        checked = "the release matched its integrity pin"
+        if self._index_reach_verified:
+            checked += " and its index was measured to reach the end of the file"
+        return (
+            f"The tabix backend failed on a region query against ClinVar {self._version} "
+            f"({kind}). The region is a proband coordinate and is not echoed; the "
+            f"correlation handle is <region:{handle}> (PRIV-09). {specific} Already "
+            f"established when this adapter opened {self._vcf_path.name!r}, and so not a "
+            f"candidate cause: {checked}. Re-verifying the pin will not explain this."
+        )
 
     def canonicalise(self, contig: str, position: int, ref: str, alt: str) -> CanonicalAllele:
         """The single entry point both sides of the join go through.
@@ -803,9 +914,43 @@ class ClinvarVcfAdapter:
             alt=alt,
             reference=self._reference,
         )
+        return canonical
+
+    def _count(self, canonical: CanonicalAllele) -> None:
+        """Fold one canonicalised **query** allele into the left-alignment counts.
+
+        The query side, not the release side, and the distinction is the same one
+        ``local_tables._left_alignment_report`` gets wrong when it counts indels in
+        the lookup table. This adapter canonicalises every ClinVar record it
+        fetches as well, and a window queried for one SNV routinely contains a
+        dozen release indels — counting those would report left-alignment work
+        over records the caller never asked about, and would make an SNV-only
+        batch report ``APPLIED`` again by a different route.
+
+        A release record's key can only ever answer a query with the same key, so
+        an SNV-only batch is unaffected by how the release's indels were
+        represented. "This run's indel joins may be wrong" is a statement about
+        the indels this run looked up.
+
+        Symbolic alleles are excluded from the indel count: ``<DEL>`` against ``A``
+        has different lengths and is not a shiftable indel, and counting it would
+        claim left-alignment work over records the rule declines to touch.
+        """
+        if (
+            is_sequence_allele(canonical.ref)
+            and is_sequence_allele(canonical.alt)
+            and canonical.is_indel
+        ):
+            self._indel_alleles += 1
+            if canonical.left_aligned:
+                self._shifted_alleles += 1
+        # Only a shiftable indel can reach either degraded state — a SNV, a
+        # substitution and a symbolic allele all return before the rule reads a
+        # base — so these two counts stay bounded by the indel count above.
         if canonical.reference_status is ReferenceStatus.UNUSABLE:
             self._unusable_reference_alleles += 1
-        return canonical
+        elif canonical.reference_status is ReferenceStatus.SHIFT_LIMIT_REACHED:
+            self._shift_limited_alleles += 1
 
     def _parse_query(self, variant_id: str) -> _Query:
         """Decompose a canonical variant ID, refusing anything ambiguous.
@@ -844,6 +989,7 @@ class ClinvarVcfAdapter:
             raise ValueError(msg) from exc
         contig = normalise_contig(contig_token)
         canonical = self.canonicalise(contig, position, ref.strip().upper(), alt.strip().upper())
+        self._count(canonical)
         search_end = canonical.position
         if self._reference is not None:
             # `.proven` is False when the reference could not be read to the right
@@ -859,11 +1005,18 @@ class ClinvarVcfAdapter:
                 reference=self._reference,
             )
             search_end = max(search_end, bound.position)
-            if not bound.proven and canonical.reference_status is not ReferenceStatus.UNUSABLE:
+            if not bound.proven and canonical.left_alignment_proven:
                 # `canonicalise` already counted the key; count the bound only when
-                # this allele is not already in the tally, so the number stays a
-                # count of affected lookups rather than of failed reads.
-                self._unusable_reference_alleles += 1
+                # this allele is not already in a degraded tally — which is exactly
+                # what `left_alignment_proven` reports — so the number stays a count
+                # of affected lookups rather than of failed reads. *Which* tally it
+                # joins depends on why the bound is unproven: a reference that could
+                # not be read and a search that ran out of budget send an operator
+                # to different places.
+                if bound.reference_status is ReferenceStatus.SHIFT_LIMIT_REACHED:
+                    self._shift_limited_alleles += 1
+                else:
+                    self._unusable_reference_alleles += 1
         return _Query(
             variant_id=variant_id,
             build=build,
@@ -964,6 +1117,19 @@ def _open_tabix(path: Path) -> _TabixHandle:
     pysam is imported here rather than at module scope so that importing this
     module — which the composition root and the architecture tests both do —
     does not require the optional ``genomics`` extra to be installed.
+
+    ``encoding`` is passed explicitly and is not a preference. pysam's default is
+    **ASCII**, and it applies that codec to every header line and every record it
+    hands back; ClinVar's release is UTF-8 and genuinely contains non-ASCII text
+    in its condition names (``CLNDN``) — eponyms and Greek letters, e.g.
+    ``Björnstad syndrome`` or a ``β``-prefixed enzyme deficiency. Under the
+    default the very first such record raises ``UnicodeDecodeError`` from inside
+    htslib's iterator, which :meth:`ClinvarVcfAdapter.assertions` can only report
+    as a backend failure — a whole-run abort, hours in, on a release whose bytes
+    are perfectly valid. Declaring the file's actual encoding is the fix; the
+    codec is strict on purpose, because ``errors="replace"`` would silently
+    corrupt the condition name instead, and a mangled condition is worse than a
+    refusal.
     """
     try:
         import pysam  # noqa: PLC0415 - native backend, imported on demand
@@ -974,7 +1140,7 @@ def _open_tabix(path: Path) -> _TabixHandle:
         )
         raise AdapterUnavailableError(msg) from exc
     try:
-        return cast(_TabixHandle, pysam.TabixFile(str(path)))
+        return cast(_TabixHandle, pysam.TabixFile(str(path), encoding=RELEASE_ENCODING))
     except (OSError, ValueError) as exc:
         msg = (
             f"htslib could not open ClinVar release {path.name!r} with its tabix index; the "
