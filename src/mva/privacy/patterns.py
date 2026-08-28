@@ -425,6 +425,55 @@ RULES: Final[tuple[Rule, ...]] = (
 _RULES_BY_ID: Final[dict[str, Rule]] = {rule.rule_id: rule for rule in RULES}
 
 
+# ---------------------------------------------------------------------------
+# Positive controls
+#
+# A detector that has silently stopped detecting reports the same "clean" as a
+# repository that is genuinely clean, and the two are indistinguishable from the
+# outside. That is not hypothetical here: this project's audit passed over an IRB
+# protocol number, a specimen accession, a sequencing flowcell ID and several
+# derived callset statistics, because no rule was looking for them. It reported
+# success and was believed.
+#
+# So every rule carries a specimen it MUST match. The battery is re-proved against
+# these on every audit, and a rule that fails to fire on its own canary aborts the
+# run instead of contributing a passing check.
+#
+# The specimens are ASSEMBLED rather than written as literals wherever a literal
+# would make this file match its own battery. ``hpo_term`` and ``iso_date_bare``
+# are unanchored and would otherwise turn the positive controls into findings — the
+# same self-matching hazard documented above the patterns, arriving from the other
+# direction.
+# ---------------------------------------------------------------------------
+
+
+def detector_canaries() -> dict[str, bytes]:
+    """One specimen per rule, each of which that rule must match.
+
+    Fabricated throughout. ``CANARY`` and ``Canaryson`` are not a real sample name
+    or a real person, the coordinates are not a real locus, and the read is four
+    bases repeated -- a specimen has to be recognisable to the rule, not plausible
+    as data.
+    """
+    return {
+        "vcf_header": b"##fileformat=VCFv4.2\n",
+        "vcf_chrom_line": b"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+        "vcf_data_line": b"chrCANARY\t1\t.\tA\tG\t.\tPASS\t.\n",
+        "genotype_field": b"canary\tGT:AD:DP\t0/1\n",
+        "fastq_record": b"@CANARY\n" + b"ACGT" * 10 + b"\n+\n" + b"I" * 40 + b"\n",
+        "sam_rg_sample": b"@RG\tID:1\tSM:CANARY\n",
+        # assembled: a literal would make this file match hpo_term
+        "hpo_term": b" HP" + b":" + b"0000118 ",
+        "mrn": b"MRN: 123456789\n",
+        "dob": b"DOB: 01/02/1990\n",
+        # assembled: a literal would make this file match iso_date_bare
+        "iso_date_bare": b" 2026" + b"-01-02 ",
+        "person_name_keyed": b"patient name: Canaryson\n",
+        "fasta_record": b">canary\n" + b"ACGT" * 15 + b"\n",
+        "plink_ped_line": b"F1\tI1\tP1\tM1\t1\t-9\tA\tG\tA\tG\tA\tG\n",
+    }
+
+
 def rule_by_id(rule_id: str) -> Rule:
     """Look up a rule, failing loudly on an unknown ID."""
     try:
