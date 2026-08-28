@@ -123,7 +123,14 @@ what the conclusion rests on.
 >
 > So a reader reproducing this should expect the same resources, the same
 > representation rule and the same ranking inputs, and should verify the ranking
-> itself against `submission/track1_submission.csv` rather than assuming it.
+> itself rather than assuming it. The submitted CSV is **not in this repository
+> and will not be**: it is a list of one child's variant coordinates, which is
+> patient data (GP-40). It was uploaded directly to the challenge Space, and the
+> organisers can compare it against what this method produces. A reader without
+> access to the case volume can check the method here against the synthetic
+> golden case, which is what `tests/golden/` exists for; they cannot check it
+> against the child's own ranking, and no phrasing of this document should
+> suggest otherwise.
 
 
 Retained: PASS-filtered, HIGH or MODERATE impact, rare, and biallelic within a
