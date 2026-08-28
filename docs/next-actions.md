@@ -129,7 +129,7 @@ challenge requirement.
 ## Deliberately not doing
 
 - Tuning weights against the live leaderboard (ASSUMPTION-SCORING-03).
-- Fetching the 79 GB of FASTQs or realigning (`docs/resource-acquisition-assessment.md`).
+- Fetching the raw FASTQs or realigning (`docs/resource-acquisition-assessment.md`).
 - gnomAD genomes (524 GB — impossible here) or dbSNP (no allele number, so
   ADR 0010's guard is unimplementable against it).
 - A graph database (ADR 0002) or an LLM in the runtime path (ADR 0003).

@@ -1,13 +1,13 @@
 """Unit tests for the real, SnpEff-backed consequence adapter.
 
 Most of these run against a **stub SnpEff**
-(``tests/fixtures/synthetic/consequence/stub_snpeff.sh``) rather than the real
-~1 GB installation, and that is deliberate rather than a compromise. The
-adapter under test is entirely real; what is faked is the counterparty, so that
-the properties which actually go wrong in a subprocess integration — an offline
-flag quietly dropped, a chromosome name silently unmatched, a transcript list
-quietly collapsed, an input VCF echoed into a traceback — are locked by tests
-that run in a second on any machine, with no JRE.
+(``tests/fixtures/synthetic/consequence/stub_snpeff.sh``)
+rather than the real ~1 GB installation, and that is deliberate rather than a
+compromise. The adapter under test is entirely real; what is faked is the
+counterparty, so that the properties which actually go wrong in a subprocess
+integration — an offline flag quietly dropped, a chromosome name silently
+unmatched, a transcript list quietly collapsed, an input VCF echoed into a
+traceback — are locked by tests that run in a second on any machine, with no JRE.
 
 The real tool is exercised by :func:`test_real_snpeff_annotates_a_known_variant`,
 which skips when the installation produced by ``tools/setup/install_snpeff.sh``
@@ -1038,8 +1038,8 @@ REAL_MANE = REAL_INSTALL_ROOT / "mane" / "MANE.GRCh38.v1.5.summary.txt.gz"
 BUB1B_NONSENSE = "GRCh38:chr15:40165186:C:T"
 CEP57_NONSENSE = "GRCh38:chr11:95812970:C:T"
 #: ClinVar Pathogenic 2 bp deletion, MC=SO:0001589|frameshift_variant. Included
-#: because the real proband VCF is a substantial fraction indel-bearing, which the SNV-only
-#: fixtures would not have exercised.
+#: because a real short-read callset is indel-heavy — a large minority of records
+#: carry an indel — which the SNV-only fixtures would not have exercised.
 BUB1B_FRAMESHIFT = "GRCh38:chr15:40170578:AGG:A"
 
 REAL_VARIANTS = [BUB1B_NONSENSE, CEP57_NONSENSE, BUB1B_FRAMESHIFT]
