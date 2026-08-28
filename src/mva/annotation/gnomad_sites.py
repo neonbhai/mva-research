@@ -128,11 +128,14 @@ from typing import Final, Protocol, cast
 
 from mva.alleles import (
     CanonicalAllele,
+    LeftAlignmentReport,
     LeftAlignmentStatus,
     ReferenceLookup,
     ReferenceStatus,
     canonicalise_allele,
+    is_sequence_allele,
     rightmost_equivalent_bound,
+    summarise_left_alignment,
 )
 from mva.annotation.bgzf import (
     has_bgzf_eof,
@@ -639,11 +642,24 @@ class _Query:
     """How far the reference could be trusted while building *this* query.
 
     ``UNUSABLE`` when either the join key or ``search_end`` needed a base the
-    reference could not supply. Carried rather than discarded because the query
-    side is where the reference is actually read: a gnomAD release is already
-    left-aligned, so a release record almost never asks for a base, and an
-    adapter that counted only the release side would report ``APPLIED`` over a
-    FASTA that failed on every caller lookup."""
+    reference could not supply, ``SHIFT_LIMIT_REACHED`` when every base was
+    supplied and the search ran out of budget instead. Carried rather than
+    discarded because the query side is where the reference is actually read: a
+    gnomAD release is already left-aligned, so a release record almost never asks
+    for a base, and an adapter that counted only the release side would report
+    ``APPLIED`` over a FASTA that failed on every caller lookup."""
+
+    is_indel: bool
+    """Whether left-alignment was even applicable to this query.
+
+    Carried on the query rather than recomputed from ``ref``/``alt`` at the
+    counting site so that "is this an indel" is decided once, by the same rule
+    that decided whether to shift it. It is what makes ``NOT_REQUIRED``
+    distinguishable from ``APPLIED``: a batch of SNVs had nothing to left-align,
+    which is a different statement from having left-aligned everything."""
+
+    left_aligned: bool
+    """Whether canonicalisation actually moved this query's POS leftwards."""
 
     @property
     def span(self) -> tuple[int, int]:
@@ -756,8 +772,17 @@ def _parse_variant_id(
             reference=reference,
         )
         search_end = max(search_end, bound.position)
-        if not bound.proven:
+        # An unproven bound degrades the query, but *how* matters: an unreadable
+        # reference and an exhausted shift budget send an operator to different
+        # places, and only the first is a reason to go and look at the FASTA. The
+        # worse of the two wins when the key and the bound disagree.
+        if bound.reference_status is ReferenceStatus.UNUSABLE:
             status = ReferenceStatus.UNUSABLE
+        elif (
+            bound.reference_status is ReferenceStatus.SHIFT_LIMIT_REACHED
+            and status is ReferenceStatus.USABLE
+        ):
+            status = ReferenceStatus.SHIFT_LIMIT_REACHED
     return _Query(
         variant_id=variant_id,
         contig=canonical_contig,
@@ -766,6 +791,12 @@ def _parse_variant_id(
         alt=canonical.alt,
         search_end=search_end,
         reference_status=status,
+        is_indel=(
+            is_sequence_allele(canonical.ref)
+            and is_sequence_allele(canonical.alt)
+            and canonical.is_indel
+        ),
+        left_aligned=canonical.left_aligned,
     )
 
 
@@ -988,11 +1019,16 @@ class GnomadSitesFrequencyAdapter:
         self._subset = subset.strip()
         self._merge_window_bp = merge_window_bp
         self._reference = reference
-        # Per-run count of alleles whose canonicalisation could not read the
-        # reference. Not a boolean: the report states how many records are
-        # affected, and "one unreadable base" and "the FASTA is gone" are
-        # different operator problems.
+        # Per-run counts over every allele this adapter canonicalised, on either
+        # side of the join. Counts, not booleans: the report states how many
+        # records are affected, and "one unreadable base" and "the FASTA is gone"
+        # are different operator problems — as are "the FASTA is broken" and "this
+        # repeat tract is longer than the shift budget", which is why the last two
+        # are tallied apart.
         self._unusable_reference_alleles = 0
+        self._shift_limited_alleles = 0
+        self._indel_alleles = 0
+        self._shifted_alleles = 0
         if not self._release or not self._subset:
             msg = "gnomAD adapter requires a non-empty 'release' and 'subset' (GP-18)."
             raise AdapterUnavailableError(msg)
@@ -1255,31 +1291,72 @@ class GnomadSitesFrequencyAdapter:
         return self._incomplete_sources
 
     @property
+    def left_alignment(self) -> LeftAlignmentReport:
+        """The full typed report, derived through the one shared rule.
+
+        Derived, never asserted. This adapter used to label its own batch::
+
+            if self._reference is None:
+                return LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+            if self._unusable_reference_alleles:
+                return LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
+            return LeftAlignmentStatus.APPLIED
+
+        which has no case for "there were no indels" and so answered ``APPLIED``
+        — rendered by ``describe()`` as "left-alignment applied to all 0 indel
+        records" — over a batch that had nothing to left-align.
+        :func:`~mva.alleles.summarise_left_alignment` answers ``NOT_REQUIRED``
+        there, and the two must not share a value: as
+        ``local_tables._left_alignment_report`` puts it, "could not left-align" and
+        "had nothing to left-align" are opposite claims about how far to trust the
+        rarity of every indel in the run. Two implementations of one status rule is
+        the same defect as two implementations of the representation rule
+        (ADR 0018), one level up.
+        """
+        return summarise_left_alignment(
+            indel_count=self._indel_alleles,
+            shifted_count=self._shifted_alleles,
+            unaligned_indel_count=self._unusable_reference_alleles,
+            shift_limited_count=self._shift_limited_alleles,
+            reference_available=self._reference is not None,
+        )
+
+    @property
     def representation_status(self) -> LeftAlignmentStatus:
         """Whether this adapter can reconcile a *shifted* indel spelling, typed.
 
-        ``APPLIED`` only when a reference was supplied **and every read the rule
-        needed from it succeeded**. A reference object that is merely non-``None``
-        proves nothing: a FASTA that raises on every read yields trim-only keys,
-        and reporting those as reference-backed is a provenance lie no downstream
-        consumer can detect. Trimming is unconditional either way, so the non-minimal
-        class of mismatch joins in both states; what the degraded state costs is the
-        repeat-tract class, where gnomAD and the caller place one insertion at
-        different positions. Typed rather than logged so a report can state the
-        limitation instead of a reader having to infer it from a missing key —
-        which is precisely the inference GP-14 forbids.
+        ``APPLIED`` only when a reference was supplied, **every read the rule
+        needed from it succeeded**, and there was at least one indel to place. A
+        reference object that is merely non-``None`` proves nothing: a FASTA that
+        raises on every read yields trim-only keys, and reporting those as
+        reference-backed is a provenance lie no downstream consumer can detect.
+        Trimming is unconditional either way, so the non-minimal class of mismatch
+        joins in both states; what the degraded state costs is the repeat-tract
+        class, where gnomAD and the caller place one insertion at different
+        positions. Typed rather than logged so a report can state the limitation
+        instead of a reader having to infer it from a missing key — which is
+        precisely the inference GP-14 forbids.
+
+        Read off :attr:`left_alignment` rather than re-derived here.
         """
-        if self._reference is None:
-            return LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
-        if self._unusable_reference_alleles:
-            return LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
-        return LeftAlignmentStatus.APPLIED
+        return self.left_alignment.status
 
     @property
     def representation_limitation(self) -> str | None:
         """One sentence for a report footer, or ``None`` when nothing is degraded."""
-        if self._reference is not None and not self._unusable_reference_alleles:
+        status = self.representation_status
+        if status in (LeftAlignmentStatus.APPLIED, LeftAlignmentStatus.NOT_REQUIRED):
             return None
+        if status is LeftAlignmentStatus.INCOMPLETE_SHIFT_LIMIT:
+            return (
+                f"The reference FASTA was readable throughout, but "
+                f"{self._shift_limited_alleles} gnomAD allele(s) sit in a repeat tract "
+                "longer than the shift budget and stopped short of their left-most "
+                "position. Their keys are reproducible but not left-most, so they may "
+                "fail to join against gnomAD's left-aligned alleles and would then be "
+                "reported as having no frequency data — absence of information, not "
+                "evidence of rarity. The FASTA is not at fault here."
+            )
         if self._reference is not None:
             return (
                 f"A reference FASTA was supplied but could not be read for "
@@ -1331,9 +1408,36 @@ class GnomadSitesFrequencyAdapter:
             alt=alt,
             reference=self._reference,
         )
-        if canonical.reference_status is ReferenceStatus.UNUSABLE:
-            self._unusable_reference_alleles += 1
         return canonical
+
+    def _count(self, *, is_indel: bool, left_aligned: bool, status: ReferenceStatus) -> None:
+        """Fold one canonicalised **query** allele into the left-alignment counts.
+
+        The query side, not the release side, and the distinction is the same one
+        ``local_tables._left_alignment_report`` gets wrong when it counts indels in
+        the lookup table. This adapter canonicalises every release record it reads
+        as well, and a window queried for one SNV routinely holds release indels —
+        counting those would report left-alignment work over records the caller
+        never asked about, and would put an SNV-only batch back on ``APPLIED`` by a
+        different route.
+
+        A release record's key can only ever answer a query with the same key, so
+        an SNV-only batch is unaffected by how the release's indels were
+        represented. "This run's indel joins may be wrong" is a statement about the
+        indels this run looked up.
+
+        Symbolic alleles are excluded from the indel count: ``<DEL>`` against ``A``
+        has different lengths and is not a shiftable indel, and counting it would
+        claim left-alignment work over records the rule declines to touch.
+        """
+        if is_indel:
+            self._indel_alleles += 1
+            if left_aligned:
+                self._shifted_alleles += 1
+        if status is ReferenceStatus.UNUSABLE:
+            self._unusable_reference_alleles += 1
+        elif status is ReferenceStatus.SHIFT_LIMIT_REACHED:
+            self._shift_limited_alleles += 1
 
     # --------------------------------------------------------------------- lookup
 
@@ -1407,9 +1511,12 @@ class GnomadSitesFrequencyAdapter:
             _parse_variant_id(variant_id, build=self.build, reference=self._reference)
             for variant_id in dict.fromkeys(variant_ids)
         ]
-        self._unusable_reference_alleles += sum(
-            1 for query in queries if query.reference_status is ReferenceStatus.UNUSABLE
-        )
+        for query in queries:
+            self._count(
+                is_indel=query.is_indel,
+                left_aligned=query.left_aligned,
+                status=query.reference_status,
+            )
         by_contig: dict[str, list[_Query]] = {}
         for query in queries:
             by_contig.setdefault(query.contig, []).append(query)

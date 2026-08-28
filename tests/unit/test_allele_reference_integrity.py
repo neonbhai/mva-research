@@ -38,11 +38,13 @@ import pytest
 
 from mva.alleles import (
     CanonicalAllele,
+    LeftAlignmentStatus,
     ReferenceStatus,
     _left_shift,
     canonicalise_allele,
     rightmost_equivalent_bound,
     rightmost_equivalent_position,
+    summarise_left_alignment,
 )
 from mva.errors import ReferenceUnusableError
 from mva.models.variant import OP_LEFT_ALIGN
@@ -380,3 +382,171 @@ def test_the_unusable_reference_error_names_the_problem_not_the_value() -> None:
     assert "OSError" in reasons[0]
     assert "KeyError" in reasons[1]
     assert "truncated" in reasons[2]
+
+
+# ---------------------------------------------------------------------------
+# Running out of shift budget is not the same as succeeding
+# ---------------------------------------------------------------------------
+#
+# Both shift loops ran `for _ in range(MAX_SHIFT_BP)` and, on falling out of the
+# loop still moving, returned as if they had finished. `canonicalise_allele`
+# labelled that `ReferenceStatus.USABLE` and `rightmost_equivalent_bound` returned
+# a `QueryBound` marked `proven`. A repeat tract longer than 1 kb therefore
+# produced a partial join key stamped as reference-backed, `unaligned_indel_count`
+# never counted it, and the batch report went on to say that every indel had been
+# placed against the reference.
+#
+# The state is real: >1 kb homopolymer and short-tandem-repeat tracts exist in
+# GRCh38, and they are precisely the loci where a mis-placed indel is most likely
+# to be scored novel and ultra-rare.
+
+
+class UnboundedHomopolymerReference:
+    """A contig that is nothing but `A`. Every read succeeds; the tract never ends.
+
+    Deliberately NOT a broken reference: it answers every question it is asked,
+    with a valid nucleotide, for ever. It is the shift *budget* that runs out, not
+    the FASTA, which is why the resulting status must not be `UNUSABLE` — an
+    operator told the reference is unusable would go and check a file that is
+    perfectly healthy.
+    """
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def fetch(self, contig: str, start: int, end: int) -> str:
+        self.reads += 1
+        return "A" * (end - start + 1)
+
+
+#: A one-base insertion inside the unbounded tract. Shiftable in both directions
+#: without limit, which is the whole point.
+TRACT_POSITION = 500_000
+TRACT_REF = "A"
+TRACT_ALT = "AA"
+
+
+def test_a_left_shift_that_exhausts_its_budget_says_so() -> None:
+    """`_left_shift` reports the stop, so its caller can tell it from a finish."""
+    reference = UnboundedHomopolymerReference()
+    *_, limit_reached = _left_shift(CONTIG, TRACT_POSITION, TRACT_REF, TRACT_ALT, reference)
+    assert limit_reached is True
+    assert reference.reads > 0, "the tract was never walked at all"
+
+
+def test_a_left_shift_that_finishes_normally_does_not_claim_the_limit() -> None:
+    """The healthy path must stay healthy: every ordinary stop is a reason, not a limit."""
+    reference = WorkingReference()
+    *_, limit_reached = _left_shift(CONTIG, SHIFTED_POSITION, SHIFTED_REF, SHIFTED_ALT, reference)
+    assert limit_reached is False
+
+
+def test_exhausting_the_shift_budget_is_not_reported_as_a_proven_alignment() -> None:
+    """The defect. A partial shift must not come back stamped reference-backed.
+
+    Before the fix this asserted `USABLE` and `left_alignment_proven` was True, so
+    the key looked identical to one that really had reached its left-most position.
+    """
+    canonical = canonicalise_allele(
+        contig=CONTIG,
+        position=TRACT_POSITION,
+        ref=TRACT_REF,
+        alt=TRACT_ALT,
+        reference=UnboundedHomopolymerReference(),
+    )
+    assert canonical.reference_status is ReferenceStatus.SHIFT_LIMIT_REACHED
+    assert not canonical.left_alignment_proven, (
+        "a key that stopped mid-tract claims to be the proven left-most spelling"
+    )
+
+
+def test_the_shift_limit_is_a_distinct_state_from_a_broken_reference() -> None:
+    """Different causes, different fixes, so they must not share a value.
+
+    `UNUSABLE` sends an operator to the FASTA. Here the FASTA is fine and the only
+    remedy is a larger `MAX_SHIFT_BP`; conflating them would send someone to
+    re-verify a file that was never at fault.
+    """
+    limited = canonicalise_allele(
+        contig=CONTIG,
+        position=TRACT_POSITION,
+        ref=TRACT_REF,
+        alt=TRACT_ALT,
+        reference=UnboundedHomopolymerReference(),
+    )
+    broken = canonicalise_shifted(RaisingReference())
+    assert limited.reference_status is not ReferenceStatus.UNUSABLE
+    assert limited.reference_status is not broken.reference_status
+    assert limited.reference_status is not ReferenceStatus.NOT_SUPPLIED
+
+
+def test_a_rightward_bound_that_exhausts_its_budget_is_not_proven() -> None:
+    """The mirror loop had the same fall-through, with the same consequence.
+
+    An unproven bound means the fetch window may be short, so a source record
+    beyond it is never even read — a miss indistinguishable from "the source holds
+    no record", which is what `QueryBound` carries its provenance to prevent.
+    """
+    bound = rightmost_equivalent_bound(
+        contig=CONTIG,
+        position=TRACT_POSITION,
+        ref=TRACT_REF,
+        alt=TRACT_ALT,
+        reference=UnboundedHomopolymerReference(),
+    )
+    assert bound.reference_status is ReferenceStatus.SHIFT_LIMIT_REACHED
+    assert not bound.proven, "a bound that ran out of budget claims to be the proven right-most"
+    assert bound.position != TRACT_POSITION, "the search did not move at all"
+
+
+def test_a_rightward_bound_that_finishes_normally_is_still_proven() -> None:
+    """The healthy path is unchanged; the new state must not leak into it."""
+    bound = rightmost_equivalent_bound(
+        contig=CONTIG,
+        position=SHIFTED_POSITION,
+        ref=SHIFTED_REF,
+        alt=SHIFTED_ALT,
+        reference=WorkingReference(),
+    )
+    assert bound.reference_status is ReferenceStatus.USABLE
+    assert bound.proven
+
+
+def test_the_batch_report_surfaces_a_shift_limited_indel() -> None:
+    """`alleles.py` must stop reporting "every indel was placed against it".
+
+    The count is the whole point: before the fix a shift-limited indel was in
+    neither `unaligned_indel_count` nor any other tally, so the batch summed to
+    APPLIED and `describe()` stated that all of them had been left-aligned.
+    """
+    report = summarise_left_alignment(
+        indel_count=3,
+        shifted_count=3,
+        unaligned_indel_count=0,
+        shift_limited_count=1,
+        reference_available=True,
+    )
+    assert report.status is LeftAlignmentStatus.INCOMPLETE_SHIFT_LIMIT
+    assert report.is_degraded, "an indel that never reached its left-most position is not healthy"
+    assert report.shift_limited_count == 1
+    assert report.as_dict()["shift_limited_count"] == 1
+
+    described = report.describe()
+    assert "1 of 3" in described
+    assert "shift budget" in described
+    assert "not at fault" in described
+    assert "Indel join keys agree with left-aligned sources" not in described
+
+
+def test_an_unreadable_reference_still_outranks_a_shift_limit_in_the_batch_status() -> None:
+    """Worst-first. Both counts survive in the report either way, so nothing is lost."""
+    report = summarise_left_alignment(
+        indel_count=4,
+        shifted_count=2,
+        unaligned_indel_count=1,
+        shift_limited_count=1,
+        reference_available=True,
+    )
+    assert report.status is LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
+    assert report.shift_limited_count == 1
+    assert report.unaligned_indel_count == 1

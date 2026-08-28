@@ -94,7 +94,8 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -219,10 +220,52 @@ def genome_is_declared(config_path: Path, genome_database: str) -> bool:
         return False
 
 
-#: Variants per SnpEff invocation. The JVM start-up and database load cost ~15s and
-#: are paid once per chunk, so this is set high; the reason it is bounded at all is
-#: memory, not speed. See :meth:`SnpEffConsequenceAdapter.annotate`.
-DEFAULT_BATCH_SIZE: Final = 25_000
+#: Variants per SnpEff invocation. The JVM start-up and the GRCh38.115 database
+#: load are the entire cost and are paid once per chunk, so this is set high; the
+#: reason it is bounded at all is memory, not speed.
+#:
+#: Measured on this machine: 35.5 s for ONE variant, 31.6 s for 5,000. The
+#: marginal per-variant cost is indistinguishable from zero, so the number of
+#: launches *is* the runtime. At 4,962,060 variants that is the difference between
+#: 20 launches (~25-30 min) and 993 (~9.8 h of reloading the same database).
+#:
+#: It must equal :data:`mva.annotation.service.DEFAULT_ANNOTATION_BATCH_SIZE`.
+#: Whichever is smaller decides the launch count, so a mismatch silently keeps the
+#: reloads: 25,000 under a 250,000 service batch means ten launches per batch and
+#: 199 of the original 993 survive.
+#:
+#: The old 25,000 ceiling existed because ``_invoke`` used ``capture_output=True``
+#: and held the whole annotated VCF in memory as one ``bytes`` object. It no longer
+#: does — stdout is spooled to a file in the run's own scratch directory and read
+#: back a line at a time — so the ceiling that number encoded is gone. What still
+#: bounds it is the *input* side and the ``VariantRecord`` batch upstream; 250,000
+#: is ~918 MB of records against 24 GB of RAM and a 6 GB JVM heap, and 500,000 is
+#: deliberately not taken (the scale sweep puts batch-1M at 7.79 GiB against a
+#: 12 GiB watchdog, and there is no throughput left to buy).
+DEFAULT_BATCH_SIZE: Final = 250_000
+
+#: Bytes of a spooled stderr hashed into the ``<stderr:...>`` correlation handle.
+#: A tail rather than the whole file: SnpEff's stderr is unbounded (it reports
+#: progress per chromosome), and the handle only has to be stable and one-way.
+_STDERR_TOKEN_BYTES: Final = 4096
+
+
+def _tail_bytes(path: Path, limit: int = _STDERR_TOKEN_BYTES) -> bytes:
+    """The last ``limit`` bytes of ``path``, or ``b""`` if it cannot be read.
+
+    Seeks rather than reading the file in, because this runs on the failure path
+    against a stream whose size is the child's business. Returns bytes, never text:
+    the caller hashes them into a one-way handle, and decoding is both unnecessary
+    and a way for undecodable output to raise inside an error handler.
+    """
+    try:
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - limit))
+            return handle.read()
+    except OSError:  # pragma: no cover - the spool file is ours and was just written
+        return b""
+
 
 _VCF_HEADER: Final = "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
 
@@ -1271,8 +1314,11 @@ class SnpEffConsequenceAdapter:
         incomplete: list[str] = []
         records_returned = 0
 
-        # Chunked because both the rendered input and the captured stdout are held
-        # in memory: a whole genome in one call is tens of GB of annotated VCF.
+        # Chunked because the rendered input is held in memory: a whole genome in
+        # one call is tens of GB of VCF text. The *output* no longer is -- `_run`
+        # spools it to a file and hands back a line iterator -- which is what
+        # allowed DEFAULT_BATCH_SIZE to rise from 25,000 to 250,000 and the JVM
+        # launch count over the 4.9 M-variant callset to fall from 993 to 20.
         # Chunk boundaries fall after the coordinate sort and the key assignment, so
         # they are a function of the variant set alone and do not affect the result
         # (GP-30) -- proven by test_batch_size_does_not_change_the_answer.
@@ -1280,46 +1326,47 @@ class SnpEffConsequenceAdapter:
             chunk = sites[start : start + self._batch_size]
             by_key = {site.key: site.variant_id for site in chunk}
             seen: set[str] = set()
-            for line in self._run(render_input_vcf(chunk)).splitlines():
-                if not line or line.startswith("#"):
-                    continue
-                columns = line.split("\t")
-                if len(columns) < _VCF_MIN_COLUMNS:
-                    self._refuse_output(
-                        f"a data row carried {len(columns)} tab-separated columns, fewer "
-                        f"than the {_VCF_MIN_COLUMNS} mandatory VCF columns, so the run "
-                        "was truncated mid-record"
+            with self._run(render_input_vcf(chunk)) as lines:
+                for line in lines:
+                    if not line or line.startswith("#"):
+                        continue
+                    columns = line.split("\t")
+                    if len(columns) < _VCF_MIN_COLUMNS:
+                        self._refuse_output(
+                            f"a data row carried {len(columns)} tab-separated columns, fewer "
+                            f"than the {_VCF_MIN_COLUMNS} mandatory VCF columns, so the run "
+                            "was truncated mid-record"
+                        )
+                    key = columns[_VCF_ID_COLUMN]
+                    variant_id = by_key.get(key)
+                    if variant_id is None:
+                        self._refuse_output(
+                            "a record came back under an ID that was never sent, so the "
+                            "output cannot be joined to the input"
+                        )
+                    if key in seen:
+                        self._refuse_output(
+                            "a record ID came back twice; one variant's annotations would "
+                            "silently overwrite another's"
+                        )
+                    seen.add(key)
+                    records_returned += 1
+                    parsed = parse_ann_entries(
+                        columns[_VCF_INFO_COLUMN],
+                        tool=SNPEFF_ADAPTER_NAME,
+                        tool_version=self._version,
+                        mane_select_ids=self._mane_select_ids,
                     )
-                key = columns[_VCF_ID_COLUMN]
-                variant_id = by_key.get(key)
-                if variant_id is None:
-                    self._refuse_output(
-                        "a record came back under an ID that was never sent, so the "
-                        "output cannot be joined to the input"
-                    )
-                if key in seen:
-                    self._refuse_output(
-                        "a record ID came back twice; one variant's annotations would "
-                        "silently overwrite another's"
-                    )
-                seen.add(key)
-                records_returned += 1
-                parsed = parse_ann_entries(
-                    columns[_VCF_INFO_COLUMN],
-                    tool=SNPEFF_ADAPTER_NAME,
-                    tool_version=self._version,
-                    mane_select_ids=self._mane_select_ids,
-                )
-                if parsed.annotations:
-                    annotated[variant_id] = tuple(
-                        sorted(parsed.annotations, key=consequence_sort_key)
-                    )
-                elif not parsed.present:
-                    without_ann.append(variant_id)
-                elif parsed.unplaceable:
-                    unplaceable.append(variant_id)
-                else:
-                    incomplete.append(variant_id)
+                    if parsed.annotations:
+                        annotated[variant_id] = tuple(
+                            sorted(parsed.annotations, key=consequence_sort_key)
+                        )
+                    elif not parsed.present:
+                        without_ann.append(variant_id)
+                    elif parsed.unplaceable:
+                        unplaceable.append(variant_id)
+                    else:
+                        incomplete.append(variant_id)
             if len(seen) != len(chunk):
                 self._refuse_output(
                     f"{len(chunk) - len(seen)} of {len(chunk)} variants in a chunk came "
@@ -1564,30 +1611,83 @@ class SnpEffConsequenceAdapter:
         )
         raise AdapterUnavailableError(msg)
 
-    def _run(self, vcf_text: str) -> str:
-        return self._invoke(
-            self.build_argv(),
-            stdin_text=vcf_text,
-            what="annotation",
-            timeout=self._timeout_seconds,
-        )[0]
+    @contextmanager
+    def _run(self, vcf_text: str) -> Generator[Iterator[str]]:
+        """Annotate one chunk, yielding its output **lines** rather than one string.
+
+        A context manager because the lines are read from a spool file that lives
+        in the run's scratch directory: the directory has to outlive the read and
+        be removed afterwards, and tying that to a ``with`` block is the only way
+        to guarantee it on the error paths too.
+
+        Streaming rather than returning ``str`` is what lifted the batch ceiling.
+        The previous shape held the entire annotated VCF in memory twice — once as
+        the ``bytes`` ``capture_output=True`` accumulates, once as the ``str`` that
+        ``.splitlines()`` was called on — and at ~700 bytes of annotated record
+        that is ~350 MB per 250,000 variants before the list of lines. Spooling to
+        disk and iterating makes the resident cost a line at a time, so the chunk
+        size can be chosen on how many JVM launches the run can afford instead.
+        """
+        with (
+            self._spool(
+                self.build_argv(),
+                stdin_text=vcf_text,
+                what="annotation",
+                timeout=self._timeout_seconds,
+            ) as (stdout_path, _stderr_path),
+            stdout_path.open("r", encoding="utf-8", errors="replace") as handle,
+        ):
+            # `rstrip("\r\n")` rather than `splitlines()`, which also splits on
+            # \x0b, \x1c-\x1e and U+2028. Those cannot appear in a VCF data row,
+            # but the two must agree exactly: batch size may not change the answer
+            # (GP-30), and the whole-input path reads the same lines.
+            yield (line.rstrip("\r\n") for line in handle)
 
     def _invoke(
         self, argv: tuple[str, ...], *, stdin_text: str, what: str, timeout: float
     ) -> tuple[str, str]:
-        """Run SnpEff in a scratch directory with a fixed, minimal environment.
+        """Run SnpEff and return both streams as strings.
+
+        The small-output form, for the version probe. :meth:`_run` is the form
+        annotation uses, because an annotated whole-genome chunk is not something
+        to hold in a ``str``.
+        """
+        with self._spool(argv, stdin_text=stdin_text, what=what, timeout=timeout) as (
+            stdout_path,
+            stderr_path,
+        ):
+            return (
+                stdout_path.read_text(encoding="utf-8", errors="replace"),
+                stderr_path.read_text(encoding="utf-8", errors="replace"),
+            )
+
+    @contextmanager
+    def _spool(
+        self, argv: tuple[str, ...], *, stdin_text: str, what: str, timeout: float
+    ) -> Generator[tuple[Path, Path]]:
+        """Run SnpEff in a scratch directory, with both streams spooled to files.
 
         The environment is rebuilt rather than inherited: an operator's ``LANG`` or
         ``TZ`` must not be able to change the bytes of an annotation run (GP-30),
         and ``HOME``/``TMPDIR`` are pointed at the scratch directory so nothing the
-        JVM decides to write lands anywhere permanent.
+        JVM decides to write lands anywhere permanent. The spool files go in that
+        same directory, so they are inside the run's own workspace and are unlinked
+        with it — they carry annotated proband coordinates and must not outlive the
+        call or land in a shared temp directory (GP-40).
+
+        Redirecting the child's streams to files rather than pipes also removes the
+        deadlock the old shape only avoided by accident: SnpEff echoes offending
+        records to stderr, and a child filling a stderr pipe while the parent is
+        still writing a 250,000-record VCF to its stdin would block both ends.
 
         Nothing from the child's stderr, and no coordinate from its stdin, is ever
-        put into the exception message: SnpEff echoes offending VCF lines when it
-        fails, and an exception message reaches terminals, logs and agent context
-        (PRIV-09).
+        put into the exception message: an exception message reaches terminals, log
+        files, crash reports and agent context (PRIV-09).
         """
         with TemporaryDirectory(prefix="mva-snpeff-") as scratch:
+            scratch_path = Path(scratch)
+            stdout_path = scratch_path / "snpeff.stdout"
+            stderr_path = scratch_path / "snpeff.stderr"
             env = {
                 "PATH": "/usr/bin:/bin",
                 "LC_ALL": "C",
@@ -1597,16 +1697,21 @@ class SnpEffConsequenceAdapter:
                 "TMPDIR": scratch,
             }
             try:
-                completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                    argv,
-                    input=stdin_text.encode("utf-8"),
-                    capture_output=True,
-                    cwd=scratch,
-                    env=env,
-                    timeout=timeout,
-                    check=False,
-                    shell=False,
-                )
+                with (
+                    stdout_path.open("wb") as out_handle,
+                    stderr_path.open("wb") as err_handle,
+                ):
+                    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                        argv,
+                        input=stdin_text.encode("utf-8"),
+                        stdout=out_handle,
+                        stderr=err_handle,
+                        cwd=scratch,
+                        env=env,
+                        timeout=timeout,
+                        check=False,
+                        shell=False,
+                    )
             except FileNotFoundError as exc:
                 msg = (
                     f"SnpEff {what} could not start: {self._java_binary} is not an "
@@ -1617,20 +1722,18 @@ class SnpEffConsequenceAdapter:
             except subprocess.TimeoutExpired as exc:
                 msg = (
                     f"SnpEff {what} exceeded its {timeout:.0f}s timeout and "
-                    "was killed. No output was produced; input is not echoed (PRIV-09)."
+                    "was killed. Any partial output was discarded with the scratch "
+                    "directory; input is not echoed (PRIV-09)."
                 )
                 raise AdapterUnavailableError(msg) from exc
-        if completed.returncode != 0:
-            msg = (
-                f"SnpEff {what} failed with exit code {completed.returncode} "
-                f"(database {self._genome_database}). Diagnostics are withheld: SnpEff "
-                "echoes offending VCF records on failure and an exception message "
-                "reaches terminals, logs and agent context (PRIV-09). Reproduce with a "
-                f"non-patient VCF to see them. stderr handle "
-                f"<stderr:{error_token(completed.stderr[-4096:])}>."
-            )
-            raise AdapterUnavailableError(msg)
-        return (
-            completed.stdout.decode("utf-8", errors="replace"),
-            completed.stderr.decode("utf-8", errors="replace"),
-        )
+            if completed.returncode != 0:
+                msg = (
+                    f"SnpEff {what} failed with exit code {completed.returncode} "
+                    f"(database {self._genome_database}). Diagnostics are withheld: SnpEff "
+                    "echoes offending VCF records on failure and an exception message "
+                    "reaches terminals, logs and agent context (PRIV-09). Reproduce with a "
+                    f"non-patient VCF to see them. stderr handle "
+                    f"<stderr:{error_token(_tail_bytes(stderr_path))}>."
+                )
+                raise AdapterUnavailableError(msg)
+            yield stdout_path, stderr_path
