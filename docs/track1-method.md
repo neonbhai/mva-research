@@ -36,7 +36,7 @@ counts. It never prints a record. Two facts from it shaped everything downstream
 * **Contigs are bare** (`15`, not `chr15`), Ensembl/NCBI style. The scorer compares
   chromosome strings raw, so emitting a correct answer with a bare contig scores
   exactly zero. Conversion happens once, in the renderer, and a test asserts it.
-* **a substantial fraction** of records are indel-bearing, and multi-allelic records are **not**
+* **A large minority** of records are indel-bearing, and multi-allelic records are **not**
   split. Both make allele representation a first-order correctness problem rather
   than a formatting detail.
 

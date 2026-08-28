@@ -165,9 +165,10 @@ say — reversine abrogates the checkpoint and causes missegregation (Santaguida
 *J Cell Biol* 2010;190:73-87, PMID 20624901) — and the class is in active anticancer
 development (Wang et al., *Eur J Med Chem* 2019;175:247-268, PMID 31121430).
 
-**This child is not a tumour.** The oncology logic works by pushing chromosomally
-unstable cells past an aneuploidy-tolerance ceiling. This child's non-tumour cells are
-already at that ceiling in every tissue, with no reserve. Target proximity is maximal
+**The affected soma is not a tumour.** The oncology logic works by pushing
+chromosomally unstable cells past an aneuploidy-tolerance ceiling. In this disorder a
+substantial and variable fraction of non-tumour cells already sits at that ceiling in
+every tissue, so there is no unaffected compartment held in reserve. Target proximity is maximal
 and the sign is inverted. In the pipeline, reversine scores **0.110, the lowest of all
 13 agents**, and is rejected with `WRONG_DIRECTION` — the inversion is mechanical, not
 editorial, and no weight change can resurrect it (a model validator forbids constructing
@@ -185,8 +186,10 @@ exploiting a vulnerability that arises *from being aneuploid*. Aneuploid cells d
 autophagic degradation to manage their protein burden (Santaguida 2015) and have
 impaired HSP90-dependent folding (Donnelly 2014).
 
-For the rhabdomyosarcoma, that is an attractive property. For the child, **the same
-property is a description of every cell in their body.** Hydroxychloroquine and
+Against an MVA-associated embryonal tumour, that is an attractive property. In the
+non-tumour soma **the same property has no compartment it spares**: the aneuploidy is
+mosaic, so the affected fraction varies cell to cell, but it is distributed across
+tissues rather than confined to one. Hydroxychloroquine and
 metformin are approved, cheap, extremely well tolerated, and have extensive paediatric
 exposure — which is precisely what makes them dangerous to a repurposing search that
 scores availability and tolerability but cannot see a sign. Both are rejected here with
