@@ -294,8 +294,10 @@ def build_submission_rows(
     Ordering is by EPCR descending. The scorer derives rank exactly this way
     (``sorted(enumerate(rows), key=lambda x: (-x[1][1], x[0]))``), so ties break by
     file order — which means our file order is a scientific decision, not a
-    formatting one. Ties therefore fall back to the candidate sort key (composite
-    score, then genomic position), giving a total, reproducible order (GP-30).
+    formatting one. Ties therefore fall back to
+    :meth:`~mva.models.pair.CandidatePair.sort_key`, which is total: composite
+    score, then both variants' coordinates, then the content-derived ``pair_id``.
+    No row's position depends on the order the caller happened to supply (GP-30).
 
     Three composition passes then run over that order, in this sequence:
 
@@ -324,10 +326,15 @@ def build_submission_rows(
             "higher-ranked candidate.",
             subsumed,
         )
-    rows = [_row_for_pair(pair, proband_id) for pair in ordered]
-    # Stable sort: candidates whose EPCR collides after rounding keep the
-    # score-then-position order established above.
-    rows.sort(key=lambda row: -row.epcr)
+    # Each row is carried with the candidate key that produced it so the EPCR sort
+    # below is a TOTAL order in its own right. Sorting on ``-epcr`` alone would be
+    # correct only by stability — it would inherit the preceding order for rows
+    # whose EPCRs collide after rounding, which quietly makes this pass depend on
+    # the one above it. Composite score still leads (EPCR is a strictly increasing
+    # function of it), so this appends tiebreakers and re-ranks nothing.
+    keyed = [(_row_for_pair(pair, proband_id), pair.sort_key()) for pair in ordered]
+    keyed.sort(key=lambda item: (-item[0].epcr, item[1]))
+    rows = [row for row, _ in keyed]
 
     if len(rows) > max_rows:
         # Counts only, never coordinates: an exception or log line travels

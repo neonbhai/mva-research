@@ -15,7 +15,7 @@ import json
 import platform
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +25,13 @@ import yaml
 
 from mva.clock import Clock, SystemClock, demo_clock
 from mva.config import CaseConfig, NetworkProfile, Workspace
-from mva.determinism import canonical_json, hash_file, hash_text, short_hash
+from mva.determinism import (
+    canonical_json,
+    hash_file,
+    hash_text,
+    short_hash,
+    write_canonical_json_rows,
+)
 from mva.errors import ConfigError
 from mva.models.base import Sensitivity
 from mva.models.provenance import (
@@ -186,6 +192,36 @@ class RunContext:
             relative,
             text + "\n",
             kind=kind,
+            stage=stage,
+            upstream=upstream,
+            row_count=row_count,
+        )
+
+    def write_json_rows_artifact(
+        self,
+        relative: str,
+        rows: Iterable[object],
+        *,
+        kind: ArtifactKind,
+        stage: str,
+        upstream: Sequence[str] = (),
+    ) -> ArtifactProvenance:
+        """Stream a JSON-array artifact row by row, byte-identical to the buffered write.
+
+        Same bytes as :meth:`write_json_artifact` over the same rows, but it never
+        holds the whole document. A whole-genome variants artifact is ~2.4 GB, and
+        building that as one Python ``str`` is a large part of why the pipeline
+        could not ingest a real WGS callset (``docs/scale-report.md``).
+
+        Use this wherever the row count scales with the callset. Keep
+        :meth:`write_json_artifact` for bounded payloads such as the QC report,
+        where a single object is clearer than a row stream.
+        """
+        path = self.artifact_path(relative)
+        row_count = write_canonical_json_rows(path, rows)
+        return self.register_artifact(
+            kind=kind,
+            path=path,
             stage=stage,
             upstream=upstream,
             row_count=row_count,

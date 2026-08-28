@@ -207,11 +207,86 @@ def _gnomad_exome_entries(chromosomes: tuple[str, ...]) -> tuple[ResourceEntry, 
 #: The complete, declarative resource registry. Nullable-hash `ResourceEntry` objects
 #: in their as-declared state (status=NOT_FETCHED, sha256=None) -- see
 #: `tools.acquire.inspect.inspect_all` for how these get filled in from real disk state.
+
+_MANE_LICENSE: Final[str] = (
+    "NCBI/EMBL-EBI MANE. US Government work, public domain in the USA; "
+    "Ensembl content under Apache 2.0. Cite Morales et al. 2022, Nature 604:310-315."
+)
+
+#: MANE Select gene models. Used for gene assignment, which is load-bearing:
+#: VariantRecord.gene_symbols is derived from consequences, and pairing is
+#: gene-scoped, so with no gene assignment the pipeline proposes nothing at all.
+_MANE: Final[tuple[ResourceEntry, ...]] = (
+    ResourceEntry(
+        name="mane_gtf",
+        url=(
+            "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/"
+            "MANE.GRCh38.v1.5.ensembl_genomic.gtf.gz"
+        ),
+        version="1.5",
+        path="mane/MANE.GRCh38.v1.5.ensembl_genomic.gtf.gz",
+        license=_MANE_LICENSE,
+        description=(
+            "MANE v1.5 Ensembl genomic GTF, chr-prefixed. The gene interval index is "
+            "built from the GTF 'gene' rows, not the summary's transcript span -- the "
+            "two differ (BUB1B by 85 bases at the 5' UTR) and using the summary "
+            "silently drops variants at the boundary."
+        ),
+    ),
+    ResourceEntry(
+        name="mane_summary",
+        url=(
+            "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/"
+            "MANE.GRCh38.v1.5.summary.txt.gz"
+        ),
+        version="1.5",
+        path="mane/MANE.GRCh38.v1.5.summary.txt.gz",
+        license=_MANE_LICENSE,
+        description=(
+            "MANE v1.5 summary. GRCh38_chr is a RefSeq accession (NC_000015.10), not "
+            "'chr15'; the mapping is keyed on the version-stripped accession so a "
+            "patch bump does not silently stop resolving a chromosome."
+        ),
+    ),
+)
+
+_REFERENCE_LICENSE: Final[str] = (
+    "GRCh38 no-alt analysis set, Genome Reference Consortium via NCBI. "
+    "Public domain / unrestricted."
+)
+
+#: The reference genome. Required for indel LEFT-ALIGNMENT: without it a
+#: right-shifted proband indel cannot reach the minimal representation that
+#: gnomAD and ClinVar store, so it misses its join -- which is indistinguishable
+#: from "novel and ultra-rare" (ADR 0018). The real callset is a substantial fraction
+#: indel-bearing, so this is a main-path dependency, not an optional extra.
+_REFERENCE: Final[tuple[ResourceEntry, ...]] = (
+    ResourceEntry(
+        name="grch38_no_alt_fasta",
+        url=(
+            "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/"
+            "GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/"
+            "GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz"
+        ),
+        version="GCA_000001405.15",
+        path="reference/GRCh38_no_alt.fna.gz",
+        license=_REFERENCE_LICENSE,
+        description=(
+            "GRCh38 no-alt analysis set, UCSC-style contig names. Decompressed and "
+            "faidx-indexed after fetch. Chosen over the 1000G plus-decoy build purely "
+            "on transfer size (873 MB gzipped vs 3.26 GB): the decoys are irrelevant "
+            "here because non-canonical contigs are rejected at ingestion."
+        ),
+    ),
+)
+
 KNOWN_RESOURCES: Final[tuple[ResourceEntry, ...]] = (
     _CLINVAR
     + _HPO
     + _GNOMAD_CONSTRAINT
     + _GENEPANELS
+    + _MANE
+    + _REFERENCE
     + _gnomad_exome_entries(GNOMAD_EXOME_CHROMOSOMES)
 )
 

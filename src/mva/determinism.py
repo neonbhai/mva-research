@@ -40,6 +40,32 @@ def canonical_json(value: Any) -> str:
     )
 
 
+def write_canonical_json_rows(path: Path, rows: Iterable[Any]) -> int:
+    """Write a JSON array one row at a time; return the row count.
+
+    Byte-identical to ``canonical_json(list(rows))``, but it never holds the whole
+    artifact. :func:`canonical_json` builds the entire document as one Python
+    ``str`` before a byte reaches disk, which is 2.6 GB for a whole-genome
+    variants artifact (``docs/scale-report.md`` §4). Measured with this function:
+    a 2,409,978,805-byte artifact written at 243 MB peak RSS.
+
+    The equivalence holds because ``canonical_json`` of a list is exactly the
+    concatenation of its elements' encodings between ``[`` and ``]`` with ``,``
+    separators -- no whitespace, no trailing comma, keys already sorted per
+    element. A test asserts the two agree rather than leaving that to the reader.
+    """
+    written = 0
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("[")
+        for row in rows:
+            if written:
+                handle.write(",")
+            handle.write(canonical_json(row))
+            written += 1
+        handle.write("]\n")
+    return written
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value

@@ -28,7 +28,13 @@ from dataclasses import dataclass, replace
 from itertools import combinations
 
 from mva.config import FrequencyThresholds
-from mva.models.pair import InheritanceModel, PhaseEvidence, PhaseStatus, make_pair_id
+from mva.models.pair import (
+    NO_SECOND_VARIANT,
+    InheritanceModel,
+    PhaseEvidence,
+    PhaseStatus,
+    make_pair_id,
+)
 from mva.models.variant import FLAG_POSSIBLE_MOSAIC, ImpactSeverity, VariantRecord, Zygosity
 from mva.prioritization.filters import FLAG_LOW_QUALITY_CALL, select_candidate_variants
 
@@ -99,7 +105,6 @@ PROMOTED_VARIANT_FLAGS: tuple[str, ...] = (
 
 #: Sorts before any real coordinate, so single-variant candidates order ahead of
 #: two-variant candidates that share the same first variant.
-_NO_SECOND_VARIANT: tuple[int, int, str, str] = (-1, -1, "", "")
 
 #: Backstop on the number of candidate hypotheses one gene may carry forward.
 DEFAULT_MAX_PAIRS_PER_GENE = 20
@@ -156,7 +161,7 @@ class PairCandidate:
 
     def sort_key(self) -> tuple[str, tuple[int, int, str, str], tuple[int, int, str, str], str]:
         """Total order: gene, first coordinate, second coordinate, pair id."""
-        second = _NO_SECOND_VARIANT if self.variant_b is None else self.variant_b.sort_key()
+        second = NO_SECOND_VARIANT if self.variant_b is None else self.variant_b.sort_key()
         return (self.gene_symbol, self.variant_a.sort_key(), second, self.pair_id)
 
 
