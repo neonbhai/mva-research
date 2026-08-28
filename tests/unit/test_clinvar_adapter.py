@@ -1577,8 +1577,23 @@ def test_the_measured_cost_of_an_unreferenced_clinvar_join() -> None:
     referenced = ClinvarVcfAdapter(FULL_CLINVAR, expected_md5=md5, reference=reference)
     try:
         with_reference = referenced.assertions(queries)
-        assert referenced.representation_status is LeftAlignmentStatus.APPLIED
-        assert referenced.representation_limitation is None
+        # Re-baselined 2026-08-28, deliberately (GP-32). This asserted APPLIED and
+        # a null limitation until shift-budget exhaustion became a state of its
+        # own. Against the pinned reference and the pinned ClinVar release, 2215
+        # of 2215 indels shift and none fail to align -- but 14 sit in repeat
+        # tracts longer than MAX_SHIFT_BP and stop short of their left-most
+        # position. Their keys are reproducible and join correctly; what is not
+        # true is that they were proven leftmost, and APPLIED asserted exactly
+        # that. The old expectation was not wrong about the join, it was wrong
+        # about what had been established -- which is the failure this file
+        # exists to catch, arriving in the file itself.
+        assert referenced.representation_status is LeftAlignmentStatus.INCOMPLETE_SHIFT_LIMIT
+        assert referenced.representation_limitation is not None
+        report = referenced.left_alignment
+        assert report.indel_count == 2215
+        assert report.shifted_count == 2215
+        assert report.unaligned_indel_count == 0
+        assert report.shift_limited_count == 14
     finally:
         referenced.close()
 
