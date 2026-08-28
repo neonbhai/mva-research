@@ -6,8 +6,14 @@ is run by an agent and by CI; its output lands in a model context window and a
 build log, so a check that echoed what it found would be the largest leak in the
 system.
 
-The check set is chosen around how patient data actually escapes a research repo,
-which is almost never "someone published a VCF on purpose":
+One check is not about the repository at all. ``detector_liveness`` runs FIRST and
+re-proves the rule battery against one specimen per rule before anything else is
+allowed to report "clean", because a detector that has silently stopped detecting
+emits exactly the report a clean tree does, and from outside the two are
+indistinguishable. Everything below is conditional on it.
+
+The rest of the check set is chosen around how patient data actually escapes a
+research repo, which is almost never "someone published a VCF on purpose":
 
 * it is already **tracked**, so ``.gitignore`` is irrelevant to it
   (``git_tracked_sensitive``);
@@ -80,6 +86,7 @@ from mva.privacy.patterns import (
     correlation_id,
     decode_lossy,
     decode_scrubbed,
+    detector_canaries,
     gunzip_capped,
     read_capped,
     sniff_binary,
@@ -809,6 +816,26 @@ def index_loader(repo_root: Path) -> Callable[[str], bytes | None]:
         return seen[path]
 
     return load
+
+
+def staged_blob_size(repo_root: Path, path: str) -> int | None:
+    """The FULL size of the staged blob for ``path``, or ``None`` if git will not say.
+
+    :func:`index_loader` caps what it returns at
+    :data:`~mva.privacy.patterns.MAX_SCAN_BYTES` and cannot report having done so:
+    it returns bytes, and a truncated buffer is indistinguishable from a short
+    one. This is the only way back to the number the cap removed, so a caller that
+    scanned a capped blob can say how much of it it never read.
+
+    Costs a subprocess, so callers ask only when a blob came back at the cap.
+    """
+    code, out = _git(repo_root, ["cat-file", "-s", f":{path}"])
+    if code != 0:
+        return None
+    try:
+        return int(out.decode("ascii", errors="replace").strip())
+    except ValueError:
+        return None
 
 
 def _reference_fixture_declaration(
@@ -1625,6 +1652,49 @@ def _scan_gzip_member(
     ]
 
 
+#: The rule ID carried by a truncation finding. Not a rule in :data:`RULES` -- it
+#: reports the absence of scanning rather than the presence of a match, in the
+#: same way ``magic:*`` and ``path_identifier`` report something no regex found.
+TRUNCATION_RULE_ID: Final[str] = "scan_truncated"
+
+
+def truncated_scan_finding(*, check: str, path_label: str, size: int) -> Finding:
+    """Say out loud that the scan stopped before the end of the bytes.
+
+    Truncation is the one failure mode a scanner cannot report by finding
+    something, so it has to be reported by construction. Without this the cap is
+    invisible: ``knowledge/real/gene_phenotype.tsv`` is 17,324,806 bytes, nearly
+    nine megabytes of a TRACKED file are past the cap, and the audit's summary
+    line ("N file(s) scanned") counted it as scanned like any other. A rule that
+    would have fired in the unread tail is indistinguishable from a rule that
+    found nothing, which is precisely the confusion :func:`check_detector_liveness`
+    exists to refuse elsewhere.
+
+    The unscanned byte count is stated rather than left to be derived: a reader
+    who has to subtract two numbers to learn how much of a file went unread
+    generally does not.
+
+    Deliberately ``warn`` and not ``fail``. The cap is a real defence -- a 60 GiB
+    CRAM must not be read into memory -- so hitting it is not by itself a leak,
+    and raising the cap to silence this would trade a visible gap for an invisible
+    memory bound. The finding is the honest report of a known blind spot.
+    """
+    return Finding(
+        check=check,
+        path=path_label,
+        line=None,
+        rule_id=TRUNCATION_RULE_ID,
+        span_len=None,
+        severity="warn",
+        detail=(
+            f"Scan truncated: {size} bytes present, cap is {MAX_SCAN_BYTES}, so "
+            f"{size - MAX_SCAN_BYTES} byte(s) were never seen by any rule. "
+            "Magic-byte identification still applied to the head. Findings for "
+            "this path describe the scanned prefix only."
+        ),
+    )
+
+
 def scan_file(
     path: Path,
     *,
@@ -1662,20 +1732,7 @@ def scan_file(
         reference_fixture=reference_fixture,
     )
     if size > MAX_SCAN_BYTES:
-        findings.append(
-            Finding(
-                check=check,
-                path=path_label,
-                line=None,
-                rule_id=None,
-                span_len=None,
-                severity="warn",
-                detail=(
-                    f"File is {size} bytes; only the first {MAX_SCAN_BYTES} were scanned. "
-                    "Magic-byte identification still applied to the head."
-                ),
-            )
-        )
+        findings.append(truncated_scan_finding(check=check, path_label=path_label, size=size))
     return findings
 
 
@@ -1697,6 +1754,124 @@ def _configured_workspace(workspace: Path | None) -> Path | None:
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
+
+#: What the liveness findings carry in place of a path. The check inspects no
+#: file, and `"."` would read as the repository root -- which is the one thing a
+#: liveness failure is emphatically NOT about.
+CANARY_LABEL: Final[str] = "<detector-canary>"
+
+
+def check_detector_liveness(*, strict: bool = False) -> CheckResult:
+    """Re-prove the rule battery against one specimen per rule, live.
+
+    A live probe, not a static assertion -- the same argument as
+    :func:`check_log_redaction_probe`, arriving from the detection side. Every
+    static case for "the scanner works" is an argument about source code, and a
+    detector that has silently stopped detecting emits exactly the report a clean
+    repository does. From the outside the two are indistinguishable, and this
+    audit has already spent that indistinguishability once: it passed over an IRB
+    protocol number, a specimen accession, a sequencing flowcell ID and several
+    derived callset statistics, said so, and was believed.
+
+    So each rule carries a specimen it MUST match
+    (:func:`~mva.privacy.patterns.detector_canaries`) and the specimen is pushed
+    through :func:`scan_bytes` -- deliberately not ``rule.pattern.search``.
+    ``scan_bytes`` is the function every other check actually calls, and it holds
+    the whole-file severity refinement for ``vcf_data_line`` and ``hpo_term``;
+    proving the compiled pattern in isolation would leave the path between the
+    pattern and the report untested, and that path is most of the machinery.
+
+    A canary is asserted on ``rule_id`` alone, never on severity. Both
+    context-gated rules resolve to ``warn`` on a lone specimen -- no VCF header
+    beside the data line, one distinct term rather than three -- and that is the
+    refinement working, not a dead detector.
+
+    Coverage is bidirectional, which is what makes the control self-maintaining: a
+    rule with no specimen fails, and a specimen naming no rule fails. Adding a
+    rule without a positive control therefore breaks the build instead of quietly
+    shrinking the proven surface, which is the failure mode that produced this
+    check.
+    """
+    name = "detector_liveness"
+    canaries = detector_canaries()
+    findings: list[Finding] = []
+
+    for orphan in sorted(set(canaries) - {rule.rule_id for rule in RULES}):
+        findings.append(
+            Finding(
+                check=name,
+                path=CANARY_LABEL,
+                line=None,
+                rule_id=orphan,
+                span_len=None,
+                severity="fail",
+                detail=(
+                    "A canary names a rule that is not in the battery. Either the "
+                    "rule was deleted and its specimen left behind, or the ID is "
+                    "misspelled -- in which case the rule it was meant to cover is "
+                    "running with no positive control at all."
+                ),
+            )
+        )
+
+    proved = 0
+    for rule in RULES:
+        specimen = canaries.get(rule.rule_id)
+        if specimen is None:
+            findings.append(
+                Finding(
+                    check=name,
+                    path=CANARY_LABEL,
+                    line=None,
+                    rule_id=rule.rule_id,
+                    span_len=None,
+                    severity="fail",
+                    detail=(
+                        f"{rule.description} This rule has no canary, so nothing "
+                        "proves it still fires. Add one specimen for it to "
+                        "mva.privacy.patterns.detector_canaries; a rule shipped "
+                        "without a positive control silently shrinks the audit's "
+                        "proven surface."
+                    ),
+                )
+            )
+            continue
+        # The findings scan_bytes returns here are DISCARDED. They are findings
+        # about the specimen, and a specimen is supposed to look like the thing
+        # its rule detects -- reporting them would fail this check for exactly the
+        # wrong reason. Only their rule IDs are read.
+        hit = any(
+            finding.rule_id == rule.rule_id
+            for finding in scan_bytes(specimen, check=name, path_label=CANARY_LABEL)
+        )
+        if hit:
+            proved += 1
+            continue
+        findings.append(
+            Finding(
+                check=name,
+                path=CANARY_LABEL,
+                line=None,
+                rule_id=rule.rule_id,
+                span_len=None,
+                severity="fail",
+                detail=(
+                    f"{rule.description} The rule did NOT fire on its own specimen "
+                    "through scan_bytes. The battery is not detecting what it "
+                    "claims to detect, so every `clean` result in this report is "
+                    "unproven -- including the checks that did not run because "
+                    "this one failed first."
+                ),
+            )
+        )
+
+    return _result(
+        name,
+        findings,
+        f"{proved}/{len(RULES)} rule(s) re-proved through scan_bytes; "
+        f"{len(canaries)} specimen(s) offered.",
+        strict=strict,
+    )
 
 
 def _reference_exemption_note(verdict: ReferenceFixtureVerdict, path: str) -> str:
@@ -1817,6 +1992,17 @@ def check_git_staged_sensitive(repo_root: Path, *, strict: bool = False) -> Chec
         blob = load(path)
         if blob is None:
             continue
+        # The loader capped this blob and had no way to say so. Ask git for the
+        # real size and report the shortfall: a staged blob whose first 8 MiB are
+        # a public coordinate table and whose remainder is a call set scans
+        # "clean", reads as clean, and nothing in the report distinguished that
+        # from a file the battery had actually seen to the end.
+        if len(blob) >= MAX_SCAN_BYTES:
+            staged_size = staged_blob_size(repo_root, path)
+            if staged_size is not None and staged_size > MAX_SCAN_BYTES:
+                findings.append(
+                    truncated_scan_finding(check=name, path_label=path, size=staged_size)
+                )
         # `reference_fixture` carries ONLY the provenance half of ADR 0012.
         # scan_bytes decides the sites-only half against `blob` itself, which is
         # the buffer about to be committed -- the worktree file of the same name
@@ -2741,7 +2927,12 @@ def check_cloud_sync_location(
 # ---------------------------------------------------------------------------
 
 #: Checks that inspect the index/worktree only — the pre-commit subset.
+#:
+#: ``detector_liveness`` leads it for the same reason it leads the full run: the
+#: pre-commit hook is the check most likely to be trusted without being read, and
+#: a dead battery there waves a commit through with a clean report.
 STAGED_CHECKS: Final[tuple[str, ...]] = (
+    "detector_liveness",
     "git_staged_sensitive",
     "gitignore_effectiveness",
     "gitignore_negation_safety",
@@ -2761,6 +2952,11 @@ def run_audit(
 ) -> AuditReport:
     """Run the privacy audit.
 
+    ``detector_liveness`` is first in both orderings. It is the only check whose
+    subject is the audit itself, and a battery that has stopped firing makes every
+    later "clean" meaningless rather than merely incomplete, so it is answered
+    before anything can be reported on its strength.
+
     ``staged_only`` runs the fast pre-commit subset (:data:`STAGED_CHECKS`): what is
     about to be committed, plus the ignore-file and logging invariants. It skips the
     whole-tree content scan and the symlink walk, which are the slow checks and
@@ -2779,6 +2975,9 @@ def run_audit(
     results: list[CheckResult] = []
     if staged_only:
         results = [
+            # FIRST, in both lists. A dead detector must abort the run before any
+            # other check has the chance to report "clean" on its strength.
+            check_detector_liveness(strict=strict),
             check_git_staged_sensitive(root, strict=strict),
             check_gitignore_effectiveness(root, strict=strict),
             check_gitignore_negation_safety(root, strict=strict),
@@ -2789,6 +2988,7 @@ def run_audit(
         ]
     else:
         results = [
+            check_detector_liveness(strict=strict),
             check_git_tracked_sensitive(root, strict=strict),
             check_git_staged_sensitive(root, strict=strict),
             check_gitignore_effectiveness(root, strict=strict),
