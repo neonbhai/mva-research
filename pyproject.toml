@@ -138,6 +138,11 @@ markers = [
     "golden: end-to-end expectation locks",
     "privacy: privacy boundary enforcement tests",
     "slow: excluded from the default fast loop",
+    # Opens a socket. SKIPPED unless the run explicitly asks for it, via
+    # `-m network` or MVA_VERIFY_CITATIONS=1 (tests/conftest.py). PRIV-05 makes
+    # offline the default; a test that reaches the internet is the exception and
+    # has to say so twice -- once in its marker, once in how it is invoked.
+    "network: reaches the internet; opt-in only (see tests/conftest.py)",
 ]
 filterwarnings = ["error::DeprecationWarning:mva.*"]
 

@@ -69,3 +69,42 @@ def golden() -> Callable[[str], list[dict[str, str]]]:
     package -- test modules should not import from each other.
     """
     return _read_golden_tsv
+
+
+# --------------------------------------------------------------------------- network
+
+
+#: Setting this to ``1`` opts the suite into the tests that reach the internet.
+NETWORK_OPT_IN_ENV = "MVA_VERIFY_CITATIONS"
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip `network`-marked tests unless someone explicitly asked for them.
+
+    PRIV-05 makes "offline by default" a property of this repository rather than a
+    habit, so a test that opens a socket has to be opted into twice over: it must
+    be marked, and the run must ask for it. Either ask works --
+    ``pytest -m network`` (the marker expression) or ``MVA_VERIFY_CITATIONS=1``
+    (the environment) -- because the first is what a human types and the second is
+    what a scheduled refresh job sets.
+
+    ``-m "not network"`` is honoured as the opt-*out* it obviously is, rather than
+    being read as the substring "network" and treated as consent.
+    """
+    import os
+
+    markexpr = str(config.getoption("markexpr", default="") or "")
+    asked_by_marker = "network" in markexpr and "not network" not in markexpr
+    asked_by_env = os.environ.get(NETWORK_OPT_IN_ENV) == "1"
+    if asked_by_marker or asked_by_env:
+        return
+
+    skip = pytest.mark.skip(
+        reason=(
+            "network test: opt in with `-m network` or "
+            f"`{NETWORK_OPT_IN_ENV}=1`, or run `just verify-citations`"
+        )
+    )
+    for item in items:
+        if "network" in item.keywords:
+            item.add_marker(skip)

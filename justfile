@@ -94,6 +94,22 @@ workflow-check:
         --configfile config/synthetic-case.yaml > /dev/null
     @echo "  workflow: DAG resolves"
 
+# ---------------------------------------------------------------- citations
+
+# Re-resolve every PMID we write down against PubMed and rewrite the ledger.
+#
+# THE ONLY RECIPE HERE THAT TOUCHES THE NETWORK, and it is not part of `verify`
+# for that reason (PRIV-05). `just verify` checks our prose against the committed
+# ledger with zero network; this recipe is what refreshes that ledger. Run it when
+# a citation is added or changed, and review the diff before committing it.
+verify-citations:
+    uv run python -m tools.citations refresh
+    MVA_VERIFY_CITATIONS=1 uv run pytest -q -m network
+
+# Check citations against the committed ledger. Offline; also runs inside `just test`.
+check-citations:
+    uv run python -m tools.citations check
+
 # ---------------------------------------------------------------- privacy
 
 # Scan the repository for privacy boundary violations.
