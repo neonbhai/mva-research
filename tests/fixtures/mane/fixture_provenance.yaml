@@ -1,0 +1,33 @@
+# ADR 0012 provenance record for the MANE gene-interval fixtures. See
+# tests/fixtures/clinvar/fixture_provenance.yaml for what the audit does with it.
+#
+# Neither file here is a VCF, so neither can ever earn the sites-only content
+# exemption -- and neither needs it: they carry no VCF header, no #CHROM line and
+# no genotype, so no fail-severity rule fires on them. What this record buys is
+# ADR 0012 conditions 1, 2 and 4: these files are traceable to a hash-pinned
+# release rather than being anonymous bytes in a directory whose .gitignore
+# negations re-admit `MANE.*.gz`.
+#
+# Regenerate with:
+#
+#   uv run python tests/fixtures/mane/make_fixture.py
+manifest: knowledge/manifests/resources.yaml
+generator: make_fixture.py
+fixtures:
+  MANE.GRCh38.v1.5.slice.ensembl_genomic.gtf.gz:
+    resource: mane_gtf
+    regions:
+      # Genes are selected by OVERLAP with each window and then emitted in full,
+      # so no gene span is truncated. The generator's docstring says why each.
+      - chr5:560000-925000        # CEP72, TPPP, ZDHHC11B, ZDHHC11, BRD9, TRIP13
+      - chr11:95650000-95950000   # FAM76B, CEP57, MTMR2 (three-way overlap)
+      - chr13:24760000-24930000   # RNF17, CPAP (the CENPJ symbol-drift trap)
+      - chr15:40080000-40345000   # BMF, BUB1B, PAK6, PLCB2
+      - chrX:153940000-154145000  # non-autosomal spans
+      - "gene_id ENSG00000293532.1"  # MUC2, on a _fix patch scaffold
+      - "gene_id ENSG00000277656.3"  # GSTT1, on an _alt haplotype
+      - "gene_id ENSG00000288608.1"  # RP11-148K1.15 / LOC128092247 name disagreement
+  MANE.GRCh38.v1.5.slice.summary.txt.gz:
+    resource: mane_summary
+    regions:
+      - the summary rows for exactly the gene set selected for the GTF slice above

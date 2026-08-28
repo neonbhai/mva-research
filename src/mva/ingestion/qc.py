@@ -33,7 +33,6 @@ from mva.config import QualityThresholds
 from mva.errors import IngestionError
 from mva.ingestion.normalise import REF_ALLELE_MISMATCH_FLAG
 from mva.models.base import AssertionTier, error_token
-from mva.models.genome import contig_sort_key
 from mva.models.evidence import (
     EvidenceCategory,
     EvidenceDirection,
@@ -42,6 +41,7 @@ from mva.models.evidence import (
     EvidenceType,
     make_evidence_id,
 )
+from mva.models.genome import contig_sort_key
 from mva.models.variant import (
     FLAG_FILTERED_BY_CALLER,
     FLAG_HIGH_ALLELE_BALANCE,
@@ -144,8 +144,16 @@ class QcResult:
     metrics: dict[str, int | float]
 
 
+@dataclass(frozen=True, slots=True)
+class AssessedVariant:
+    """One record and the analytical evidence item that describes it."""
+
+    variant: VariantRecord
+    evidence: EvidenceItem
+
+
 # ---------------------------------------------------------------------------
-# Entry point
+# Entry points
 # ---------------------------------------------------------------------------
 
 
@@ -160,23 +168,132 @@ def assess_quality(
 
     No variant is ever dropped. Records are returned sorted by
     ``coordinate.sort_key()`` with their evidence in the same order.
+
+    This holds the whole callset, its flagged copy and one evidence item each, all
+    at once — measured at 7.13 KB per record, which is ~32 GB for a WGS callset
+    (``docs/scale-report.md`` §2). It is the right shape at fixture scale and the
+    wrong one at genome scale; :func:`iter_assessed` is the same work, streamed.
     """
-    timestamp = clock.now()
+    stream = iter_assessed(
+        sorted(variants, key=lambda item: item.sort_key()),
+        thresholds=thresholds,
+        clock=clock,
+        tool_version=tool_version,
+    )
     assessed: list[VariantRecord] = []
     evidence: list[EvidenceItem] = []
+    for item in stream:
+        assessed.append(item.variant)
+        evidence.append(item.evidence)
+    return QcResult(variants=tuple(assessed), evidence=tuple(evidence), metrics=stream.metrics())
 
-    for record in sorted(variants, key=lambda item: item.sort_key()):
-        flags = _flags_for(record, thresholds)
-        flagged = record.with_qc_flags(*flags) if flags else record
-        assessed.append(flagged)
-        evidence.append(
-            _evidence_for(flagged, thresholds=thresholds, timestamp=timestamp, version=tool_version)
-        )
 
-    return QcResult(
-        variants=tuple(assessed),
-        evidence=tuple(evidence),
-        metrics=_aggregate_metrics(assessed, evidence),
+def iter_assessed(
+    variants: Iterable[VariantRecord],
+    *,
+    thresholds: QualityThresholds,
+    clock: Clock,
+    tool_version: str = "mva-qc/0.1.0",
+) -> QcStream:
+    """Assess a stream of records without holding them.
+
+    The caller supplies records **already in ``sort_key()`` order** — which is what
+    :func:`mva.ingestion.reader.iter_vcf` emits and what
+    :func:`~mva.ingestion.normalise.normalise_variants` returns for each chunk of
+    such a stream. This function cannot sort them, so it *verifies* the order
+    instead of assuming it: a record that arrives out of order raises rather than
+    producing a run whose artifact is silently in a different order from the one
+    :func:`assess_quality` would have written (GP-30).
+
+    Metrics that need every value — the median depth, and the exact ``fsum``-based
+    means — are accumulated into two fixed-width arrays rather than lists of Python
+    objects, so the whole summary costs 16 bytes per record and comes out
+    bit-identical to the batch path.
+    """
+    return QcStream(variants, thresholds=thresholds, clock=clock, tool_version=tool_version)
+
+
+class QcStream:
+    """Flagged records and their evidence, one at a time; metrics at the end.
+
+    Construct via :func:`iter_assessed`.
+    """
+
+    __slots__ = ("_metrics", "_source", "_started", "_thresholds", "_timestamp", "_version")
+
+    def __init__(
+        self,
+        variants: Iterable[VariantRecord],
+        *,
+        thresholds: QualityThresholds,
+        clock: Clock,
+        tool_version: str,
+    ) -> None:
+        self._source = variants
+        self._thresholds = thresholds
+        # Sampled once, before any record is seen, so every evidence item in a run
+        # carries the same timestamp however long the stream takes (GP-30).
+        self._timestamp = clock.now()
+        self._version = tool_version
+        self._metrics = _MetricsAccumulator()
+        self._started = False
+
+    def __iter__(self) -> Iterator[AssessedVariant]:
+        if self._started:
+            msg = (
+                "This QC stream has already been iterated. Re-iterating would "
+                "double-count every metric. Call iter_assessed() again for a second "
+                "pass over a re-read source."
+            )
+            raise IngestionError(msg)
+        self._started = True
+        return self._drive()
+
+    def _drive(self) -> Iterator[AssessedVariant]:
+        thresholds = self._thresholds
+        metrics = self._metrics
+        previous: tuple[int, int, str, str] | None = None
+        ranks: dict[str, int] = {}
+        for record in self._source:
+            coordinate = record.coordinate
+            rank = ranks.get(coordinate.contig)
+            if rank is None:
+                rank = contig_sort_key(coordinate.contig)
+                ranks[coordinate.contig] = rank
+            key = (rank, coordinate.position, coordinate.ref, coordinate.alt)
+            if previous is not None and key < previous:
+                raise _unsorted_error(coordinate.contig)
+            previous = key
+
+            flags = _flags_for(record, thresholds)
+            flagged = record.with_qc_flags(*flags) if flags else record
+            evidence = _evidence_for(
+                flagged,
+                thresholds=thresholds,
+                timestamp=self._timestamp,
+                version=self._version,
+            )
+            metrics.observe(flagged, evidence)
+            yield AssessedVariant(variant=flagged, evidence=evidence)
+
+    def metrics(self) -> dict[str, int | float]:
+        """The same aggregate metrics :class:`QcResult` carries, for what was seen.
+
+        Meaningful only once the stream has been consumed; a caller that stops early
+        gets the metrics for the prefix it read, and the record counts inside say so.
+        """
+        return self._metrics.finalise()
+
+
+def _unsorted_error(contig: str) -> IngestionError:
+    return IngestionError(
+        "Records reached analytical QC out of coordinate order. Streaming QC cannot "
+        "reorder them — it never holds more than one — so it stops rather than write "
+        "an artifact ordered differently from the batch path, which would break the "
+        "byte-identical repeat-run guarantee (GP-30). Sort the input, or use "
+        "assess_quality(), which sorts. Contig handle "
+        f"<contig:{error_token(contig)}> — the coordinate is tokenised rather than "
+        "echoed (PRIV-09)."
     )
 
 
@@ -402,42 +519,83 @@ def _render_float(value: float | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _aggregate_metrics(
-    variants: Sequence[VariantRecord], evidence: Sequence[EvidenceItem]
-) -> dict[str, int | float]:
-    depths = [v.genotype.depth for v in variants if v.genotype.depth is not None]
-    het_fractions = [
-        fraction
-        for fraction in (allele_fraction(v) for v in variants if v.genotype.is_heterozygous)
-        if fraction is not None
-    ]
-    flag_names = (*FLAG_ORDER, REF_ALLELE_MISMATCH_FLAG)
+#: Every flag the metrics block counts, in emission order.
+_FLAG_NAMES: Final[tuple[str, ...]] = (*FLAG_ORDER, REF_ALLELE_MISMATCH_FLAG)
 
-    metrics: dict[str, int | float] = {
-        "total_variants": len(variants),
-        "flagged_variants": sum(1 for v in variants if v.qc_flags),
-        "unflagged_variants": sum(1 for v in variants if not v.qc_flags),
-    }
-    for name in flag_names:
-        metrics[f"flag_{name}"] = sum(1 for v in variants if name in v.qc_flags)
+#: Evidence directions the metrics block counts, in reporting order.
+_DIRECTIONS: Final[tuple[EvidenceDirection, ...]] = (
+    EvidenceDirection.SUPPORTS,
+    EvidenceDirection.CONTRADICTS,
+    EvidenceDirection.NEUTRAL,
+)
 
-    metrics["evidence_items"] = len(evidence)
-    for direction in (
-        EvidenceDirection.SUPPORTS,
-        EvidenceDirection.CONTRADICTS,
-        EvidenceDirection.NEUTRAL,
-    ):
-        metrics[f"evidence_{direction.value}"] = sum(
-            1 for item in evidence if item.direction is direction
-        )
 
-    metrics["variants_with_depth"] = len(depths)
-    metrics["variants_with_het_allele_fraction"] = len(het_fractions)
-    if depths:
-        metrics["mean_depth"] = round(statistics.fmean(depths), 3)
-        metrics["median_depth"] = round(float(statistics.median(depths)), 3)
-        metrics["min_observed_depth"] = min(depths)
-        metrics["max_observed_depth"] = max(depths)
-    if het_fractions:
-        metrics["mean_het_allele_fraction"] = round(statistics.fmean(het_fractions), 6)
-    return metrics
+class _MetricsAccumulator:
+    """Aggregate metrics built one record at a time.
+
+    Every count is a running integer. The two quantities that genuinely need all
+    the data — the median depth, and the ``math.fsum``-exact means behind
+    ``statistics.fmean`` — are kept in ``array`` buffers of machine ints and
+    doubles rather than Python lists, which is 8 bytes per value instead of ~36 and
+    keeps a whole-genome summary at tens of megabytes. Feeding the same values to
+    the same ``statistics`` functions is what makes the streamed metrics identical
+    to the batch ones rather than merely close.
+    """
+
+    __slots__ = ("_depths", "_directions", "_evidence", "_flagged", "_flags", "_het", "_total")
+
+    def __init__(self) -> None:
+        self._total = 0
+        self._flagged = 0
+        self._evidence = 0
+        self._flags: dict[str, int] = dict.fromkeys(_FLAG_NAMES, 0)
+        self._directions: dict[str, int] = {d.value: 0 for d in _DIRECTIONS}
+        self._depths = array("q")
+        self._het = array("d")
+
+    def observe(self, variant: VariantRecord, evidence: EvidenceItem) -> None:
+        self._total += 1
+        flags = variant.qc_flags
+        if flags:
+            self._flagged += 1
+            for name in flags:
+                if name in self._flags:
+                    self._flags[name] += 1
+        self._evidence += 1
+        direction = evidence.direction.value
+        if direction in self._directions:
+            self._directions[direction] += 1
+
+        depth = variant.genotype.depth
+        if depth is not None:
+            self._depths.append(depth)
+        if variant.genotype.is_heterozygous:
+            fraction = allele_fraction(variant)
+            if fraction is not None:
+                self._het.append(fraction)
+
+    def finalise(self) -> dict[str, int | float]:
+        metrics: dict[str, int | float] = {
+            "total_variants": self._total,
+            "flagged_variants": self._flagged,
+            "unflagged_variants": self._total - self._flagged,
+        }
+        for name in _FLAG_NAMES:
+            metrics[f"flag_{name}"] = self._flags[name]
+
+        metrics["evidence_items"] = self._evidence
+        for direction in _DIRECTIONS:
+            metrics[f"evidence_{direction.value}"] = self._directions[direction.value]
+
+        depths = self._depths
+        het_fractions = self._het
+        metrics["variants_with_depth"] = len(depths)
+        metrics["variants_with_het_allele_fraction"] = len(het_fractions)
+        if depths:
+            metrics["mean_depth"] = round(statistics.fmean(depths), 3)
+            metrics["median_depth"] = round(float(statistics.median(depths)), 3)
+            metrics["min_observed_depth"] = min(depths)
+            metrics["max_observed_depth"] = max(depths)
+        if het_fractions:
+            metrics["mean_het_allele_fraction"] = round(statistics.fmean(het_fractions), 6)
+        return metrics

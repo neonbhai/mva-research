@@ -70,8 +70,55 @@ we recorded fetching.
   A negation for `tests/fixtures/clinvar/**/*.vcf.gz` does not admit anything else.
 - **The audit must fail loudly if a file under a reference-fixture prefix carries
   sample columns.** That is the whole guarantee; it is a test, not a comment.
-- The proband's VCF can never qualify: it has sample columns, and it is not in
-  `resources.yaml` — patient data is never a registered public resource.
+- A new audit check, `reference_fixtures_declared`, runs in both the full and the
+  staged sets, alongside `synthetic_fixtures_marked`.
+- Each fixture directory carries a committed `fixture_provenance.yaml` naming the
+  resource each file descends from, the generator, and the regions cut. `manifest:`
+  is pinned to a constant — a directory allowed to name its own manifest could
+  ship that manifest, which is the escape hatch condition 2 exists to close.
+- The provenance record is read **through the same loader as the data** (index
+  blobs for the tracked and staged checks, worktree for the content scan).
+  Otherwise the staged-versus-worktree divergence simply moves up one level: an
+  unstaged record on disk would clear a staged fixture the commit carries without
+  it.
+- Condition 3 is derived from **the exact buffer being scanned**, not from a path
+  reopened independently, so the gzip recursion re-validates the decompressed
+  stream for free.
+
+## What is actually enforced — and what is not
+
+Stating this precisely matters more than stating it favourably, because the next
+person to touch this will trust the table and not the prose.
+
+| | Condition | Status |
+|---|---|---|
+| 1 | Allowlisted prefix | **Enforced.** Nested paths are refused; the record is per directory. |
+| 2 | Derived from a hash-pinned registered release | **Enforced as a reviewable named claim, not as verified descent.** |
+| 3 | No sample columns, no genotypes | **Enforced**, against the scanned buffer, whole-stream, fail-closed. This is the condition doing real work. |
+| 4 | Committed, re-runnable generator recording what was cut | **Partly.** A generator must exist beside the fixture and non-empty regions must be recorded. Nothing checks the generator is re-runnable, or that the regions describe what was actually cut. |
+
+**Condition 2 does not do what this ADR originally claimed.** The audit proves a
+fixture *names* a resource that is registered, fetched, and carries a real sha256;
+the generator proves *its own input* hashed to that digest. **Neither proves the
+committed bytes came from that input.** Verified: a sites-only export of the
+proband's VCF, committed with a forged `resource: clinvar_vcf` line, passes the
+entire audit — and condition 3 cannot catch it either, because it is genuinely
+sites-only.
+
+So the honest claim is narrower than "hash-pinned provenance": *a file can no
+longer enter this category by being dropped into a directory. It must be named, in
+a committed file, beside a generator, against a release the manifest records
+fetching.* That converts a silent bypass into **a lie a reviewer can see in a
+diff** — which is worth having, and is not proof of descent.
+
+The only mechanical strengthening available is to re-derive the slice from the
+pinned release and compare bytes. That requires the release on disk, which costs
+test hermeticity. It deserves its own decision rather than a quiet assumption.
+
+- The proband's VCF cannot qualify *silently*: it has sample columns, and nothing
+  in `resources.yaml` describes it. It can be made to qualify by someone who
+  writes a false provenance record, and that is a review problem, not a
+  mechanical one.
 
 ## Rejected alternative worth naming
 
@@ -79,3 +126,11 @@ Allowing the category based on *provenance alone* ("it came from ClinVar, so it
 is fine") without condition 3. Rejected because provenance is a claim in a
 comment and genotype absence is a property of the bytes. When the two disagree,
 only one of them is checkable — so the check is written against the bytes.
+
+That reasoning still holds, and the enforcement table above is its consequence:
+the byte-level condition is the one that is genuinely checked, and the provenance
+conditions are checked only as far as claims can be. An earlier draft of this ADR
+described condition 2 as *"what stops the category from becoming a
+general-purpose escape hatch."* It stops the silent path. It does not stop a
+determined author, and saying otherwise would have been the same category of
+error the rejected alternative makes.

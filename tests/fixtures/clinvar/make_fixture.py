@@ -43,9 +43,30 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import os
 from pathlib import Path
 
 import pysam
+
+from mva.config import find_repo_root
+from mva.privacy.audit import pinned_source
+
+
+def _default_resource_root() -> Path | None:
+    """``$MVA_RESOURCES``, expanded, if it is set.
+
+    Where the acquisition tool puts its downloads is that tool's business
+    (``tools.acquire.fetch.resolve_resource_root``); this only reads the same
+    environment variable rather than growing a second opinion about the default.
+    """
+    raw = os.environ.get("MVA_RESOURCES")
+    return Path(raw).expanduser() if raw else None
+
+
+#: The manifest resource this fixture is cut from. Must match the ``resource:``
+#: recorded for it in ``fixture_provenance.yaml``, which is what the privacy
+#: audit reads when it decides whether the committed slice is exempt.
+RESOURCE = "clinvar_vcf"
 
 #: (contig, 1-based inclusive start, 1-based inclusive end). Bare ClinVar contigs.
 REGIONS: tuple[tuple[str, int, int], ...] = (
@@ -59,11 +80,31 @@ FIXTURE_NAME = "clinvar_slice.vcf.gz"
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", required=True, type=Path, help="Path to clinvar.vcf.gz")
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the pinned release. Optional: resolved from "
+            "knowledge/manifests/resources.yaml under --resource-root by default. "
+            "Either way its sha256 must match the digest the manifest pins."
+        ),
+    )
+    parser.add_argument(
+        "--resource-root",
+        type=Path,
+        default=_default_resource_root(),
+        help="External resource root holding the acquired releases. Defaults to $MVA_RESOURCES.",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).parent)
     args = parser.parse_args()
 
-    source: Path = args.source
+    source = pinned_source(
+        find_repo_root(),
+        RESOURCE,
+        source=args.source,
+        resource_root=args.resource_root,
+    )
     out_dir: Path = args.out_dir
     plain = out_dir / FIXTURE_NAME.removesuffix(".gz")
     compressed = out_dir / FIXTURE_NAME

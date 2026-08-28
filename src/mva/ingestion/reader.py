@@ -267,16 +267,26 @@ class _Tally:
 def detect_backend() -> str:
     """Return the default backend: ``"text"``.
 
-    **Measured, not assumed.** On the 4,492,805-line WGS phantom
-    (``docs/scale-report.md`` §1) the pure-Python text parser read the whole file
-    in 142.4 s (32,005 rec/s) against cyvcf2's 453.6 s (10,044 rec/s) — 3.2x
-    slower — and at the 1 M point that did not page, 55,298 rec/s against 42,545.
-    Isolating the body parse on the 100 k file makes the reason plain: htslib's
-    own iteration is fast (0.25 s), but this stage needs the *text*
-    representation, and converting htslib's decoded arrays back into it costs more
-    than parsing the text directly (0.89 s for the cyvcf2 adapter against 0.34 s
-    for the text parser; 0.51 s after the adapter was fixed to stop allocating a
-    NumPy array per FORMAT tag per record).
+    **Measured, not assumed**, and re-measured after :func:`_raw_from_cyvcf2` was
+    fixed, because the first result could have been an artifact of a bad adapter
+    rather than of the library. On the 4,492,805-line WGS phantom
+    (``docs/scale-report.md`` §§1, 8), streaming the whole file back to back on one
+    machine:
+
+    ==========  ==========  ============  ========
+    backend     wall        rec/s         peak RSS
+    ==========  ==========  ============  ========
+    ``text``    73.3 s      62,200        59 MB
+    ``cyvcf2``  109.0 s     41,783        81 MB
+    ==========  ==========  ============  ========
+
+    Both emit byte-identical records and identical tallies. The adapter fix closed
+    the gap from 3.19x (453.6 s against 142.4 s, before) to **1.49x**, and that is
+    as far as it goes: htslib's own iteration is fast (0.25 s for 100 k records),
+    but this stage needs the *text* representation htslib spends its speed
+    decoding away. Isolating the body parse on the 100 k phantom, alternating in
+    one process: the cyvcf2 adapter went 1.53 s -> 1.21 s, against the text
+    parser's 0.55 s. Undoing htslib costs more than never using it.
 
     cyvcf2 remains fully supported via ``backend="cyvcf2"`` and is the right choice
     for BCF input or for a file the text parser cannot open; it is simply not the
@@ -1053,10 +1063,12 @@ def _raw_from_cyvcf2(variant: object, index: int) -> _RawRecord:
     times per record — each allocating a NumPy array that was unpacked element by
     element with ``int()`` and thrown away — including for tags the record does not
     carry, where the call raises and the exception is caught. Now the record's own
-    FORMAT list is consulted once, absent tags are never asked for, and each array
-    is converted with a single ``tolist()``. Measured on the 100 k phantom, the
-    body parse fell from 0.89 s to 0.51 s. It is still slower than the text parser
-    at 0.34 s, which is why :func:`detect_backend` returns ``"text"``.
+    FORMAT list is consulted once, absent tags are never asked for, each array is
+    converted with a single ``tolist()``, and the GT text is rebuilt once per
+    *distinct* call rather than once per record. Measured on the 100 k phantom,
+    alternating old and new in one process: the body parse fell from 1.53 s to
+    1.21 s (-21%). It is still slower than the text parser's 0.55 s, which is why
+    :func:`detect_backend` returns ``"text"``.
     """
     filters = getattr(variant, "FILTERS", None) or ()
     depth, allelic_depths, genotype_quality, phase_set = _cyvcf2_sample_fields(variant)

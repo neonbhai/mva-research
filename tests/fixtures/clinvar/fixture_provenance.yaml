@@ -1,0 +1,28 @@
+# ADR 0012 provenance record for the ClinVar adapter fixtures.
+#
+# The privacy audit reads this file. A committed file in this directory earns the
+# `public-reference-fixture` category ONLY if it is named here, names a resource
+# that `knowledge/manifests/resources.yaml` records as `status: fetched` with a
+# real sha256, sits beside the generator named below, AND -- separately, and
+# against its own bytes -- is a single sites-only VCF. Undeclared files fail the
+# `reference_fixtures_declared` check; see src/mva/privacy/audit.py.
+#
+# Regenerate the fixtures with:
+#
+#   uv run python tests/fixtures/clinvar/make_fixture.py
+#
+# which resolves its input from the manifest and refuses to run against bytes
+# whose sha256 does not match the pinned digest.
+manifest: knowledge/manifests/resources.yaml
+generator: make_fixture.py
+fixtures:
+  clinvar_slice.vcf.gz:
+    resource: clinvar_vcf
+    regions:
+      - 7:117509000-117510000   # CFTR, the only practice_guideline (4-star) record in reach
+      - 15:40199000-40206000    # BUB1B: pathogenic, benign, VUS, conflicting, indels
+      - 17:43045000-43048000    # BRCA1 3' end: expert-panel, CLNSIGCONF, ONC-only records
+  clinvar_slice.vcf.gz.tbi:
+    # An index holds byte offsets, never records. It inherits the verdict of the
+    # fixture it indexes, which must itself be a declared, verified sites-only VCF.
+    indexes: clinvar_slice.vcf.gz
