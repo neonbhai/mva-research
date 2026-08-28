@@ -67,7 +67,7 @@ from mva.privacy.export import gate_public_export
 from mva.privacy.netguard import OfflineProfile
 from mva.reporting.dossier import build_candidate_dossier
 from mva.reporting.track1 import (
-    build_submission_rows,
+    compose_submission,
     render_submission_csv,
     validate_submission,
 )
@@ -563,9 +563,10 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
     top_gene = ranked[0].gene_symbol if ranked else None
 
     # ---------------------------------------------------------------- track 1
-    rows = build_submission_rows(
+    submission = compose_submission(
         ranked, proband_id=config.proband_id, max_rows=config.max_submission_rows
     )
+    rows = submission.rows
     submission_text = render_submission_csv(rows)
 
     # Self-check BEFORE the bytes reach disk: a malformed submission that exists is
@@ -590,7 +591,9 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
     resolver = AssertionResolver(ledger)
     context.write_text_artifact(
         "reports/candidate_dossier.md",
-        build_candidate_dossier(ranked, resolver=resolver, clock=context.clock),
+        build_candidate_dossier(
+            ranked, submission=submission, resolver=resolver, clock=context.clock
+        ),
         kind=ArtifactKind.DOSSIER,
         stage="report",
         upstream=[pairs_art.artifact_id],

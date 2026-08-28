@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 from dataclasses import replace
 
 import pytest
@@ -326,6 +327,49 @@ def test_validate_submission_rejects_a_repeated_epcr() -> None:
     ok, errors = validate_submission(render_submission_csv_unvalidated(tied))
     assert not ok
     assert any("repeats the value" in error for error in errors), errors
+
+
+def test_diagnostics_number_rows_as_the_file_does_not_as_the_filtered_list_does() -> None:
+    """DEFECT 3. A row number in a submission diagnostic has to be the file's.
+
+    The tie and ordering checks were handed `[value for value in epcrs if not
+    isnan(value)]` — a bare list of floats with the unparseable rows *removed* —
+    and then enumerated it from 1. Every row after the first unparseable one was
+    therefore reported one position too low: a tie between data rows 4 and 5 came
+    out as "row 4 ... row 3". Both of those rows exist, both hold an epcr, and
+    neither is the problem, so the reader spends the time twice — once finding
+    that the named rows are fine and once finding the rows that are not.
+
+    Here data row 2 carries a NaN epcr, data rows 4 and 5 are tied, and data rows
+    6 and 7 have had their epcrs swapped so the column rises. Every diagnostic is
+    asserted against the row numbers a person reading the CSV would count.
+    """
+    rows = build_submission_rows(_colliding_pairs(), proband_id=ACCEPTED_PROBAND_ID)
+    assert len(rows) == MAX_SUBMISSION_ROWS
+
+    broken = (
+        rows[0],
+        replace(rows[1], epcr=math.nan),  # data row 2: no usable epcr, so it is skipped
+        rows[2],
+        rows[3],
+        replace(rows[4], epcr=rows[3].epcr),  # data rows 4 and 5 are now tied
+        replace(rows[5], epcr=rows[6].epcr),  # data rows 6 and 7 swap, so 7 outranks 6
+        replace(rows[6], epcr=rows[5].epcr),
+        *rows[7:],
+    )
+    ok, errors = validate_submission(render_submission_csv_unvalidated(broken))
+    assert not ok
+
+    assert any(error.startswith("row 2:") for error in errors), (
+        f"the unparseable row must be reported at its own position: {errors}"
+    )
+
+    tie = next(error for error in errors if "repeats the value" in error)
+    assert tie.startswith("row 5:"), tie
+    assert "already used by row 4" in tie, tie
+
+    order = next(error for error in errors if "not sorted by epcr descending" in error)
+    assert order.startswith("rows 6 and 7:"), order
 
 
 def test_the_plain_renderer_refuses_the_same_tie() -> None:

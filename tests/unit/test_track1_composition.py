@@ -51,6 +51,7 @@ from mva.reporting.track1 import (
     SubmissionRow,
     build_submission_rows,
     render_submission_csv,
+    render_submission_csv_unvalidated,
     validate_submission,
 )
 
@@ -122,6 +123,18 @@ def _candidate(
 def _shape(row: SubmissionRow) -> tuple[int, int | None]:
     """A row as (first position, second position or None) — enough to identify it."""
     return (row.pos_1, int(row.pos_2) if row.pos_2 else None)
+
+
+def _assert_no_subset_precedes_its_superset(rows: tuple[SubmissionRow, ...]) -> None:
+    """No emitted row may be a strict subset of a row ranked below it (ADR 0015/0023)."""
+    keys = [row.variant_keys() for row in rows]
+    for index, variants in enumerate(keys):
+        below = [other for other in range(index + 1, len(keys)) if variants < keys[other]]
+        assert not below, (
+            f"row {index + 1} is a strict subset of row(s) {[i + 1 for i in below]}, which "
+            "are ranked below it; only the superset can be a full match and it re-emits "
+            "the subset's variants, so the subset above it is a rank demotion for nothing"
+        )
 
 
 def _assert_strictly_separated(rows: tuple[SubmissionRow, ...]) -> None:
@@ -243,6 +256,96 @@ def test_a_partially_overlapping_pair_is_not_promoted() -> None:
         (40_200_000, 40_210_500),
         (40_200_000, 40_211_000),
     ]
+
+
+# ---------------------------------------------------------------------------
+# The exchange must leave the window in the state pass 1 put it in.
+#
+# Promotion runs over the WHOLE ranked list and then exchanges an out-of-window
+# superset for an in-window subset (ADR 0023). The exchanged-in pair lands at the
+# subset's slot — which can be BELOW a different subset of that same pair, one the
+# exchange skipped because another superset already covered it inside the window.
+# That re-creates exactly the inversion the first pass exists to remove, and the
+# first pass was not run again.
+# ---------------------------------------------------------------------------
+
+
+def test_the_exchange_does_not_re_create_the_inversion_promotion_removes() -> None:
+    """DEFECT 1. A pair swapped in from below the cut must not land under a subset.
+
+    Five candidates into a four-row window:
+
+    * ``{v1}`` — a single that outscores its own parent pair, so it is kept;
+    * ``{v1, v2}`` — that parent pair, lifted above it by pass 1;
+    * ``{v3}`` — a second single, with no superset inside the window;
+    * ``{v4, v5}`` — an unrelated hypothesis;
+    * ``{v1, v3}`` — ranked below the cut, and a superset of BOTH singles.
+
+    Pass 2 exchanges ``{v3}`` out for ``{v1, v3}``, which is the whole point of
+    ADR 0023. But ``{v1, v3}`` lands at slot 3, and ``{v1}`` is sitting at slot 2 —
+    so the file now proposes a strict subset above its own superset, which is the
+    arrangement pass 1 removed two passes earlier. If ``{v1, v3}`` is the true
+    compound heterozygote, that costs it a rank for nothing: only the pair can
+    satisfy ``row.variants == true_variants``, and it re-emits ``{v1}`` anyway, so
+    the F-max union is identical either way.
+    """
+    v1 = _variant(40_200_000)
+    v2 = _variant(40_210_500, alt="A")
+    v3 = _variant(40_300_000, alt="G")
+    v4 = _variant(40_400_000, alt="A")
+    v5 = _variant(40_500_000, alt="G")
+
+    candidates = [
+        _candidate(v1, None, composite=0.95),
+        _candidate(v1, v2, composite=0.90),
+        _candidate(v3, None, composite=0.85),
+        _candidate(v4, v5, composite=0.80),
+        _candidate(v1, v3, composite=0.40),
+    ]
+
+    rows = build_submission_rows(candidates, proband_id=ACCEPTED_PROBAND_ID, max_rows=4)
+
+    assert [_shape(row) for row in rows] == [
+        (40_200_000, 40_210_500),
+        (40_200_000, 40_300_000),
+        (40_200_000, None),
+        (40_400_000, 40_500_000),
+    ], (
+        "the pair exchanged in from below the cut is ranked beneath a single-variant "
+        "row it subsumes; promotion was not re-run after the exchange moved it in"
+    )
+    _assert_no_subset_precedes_its_superset(rows)
+    _assert_strictly_separated(rows)
+
+
+def test_the_renderer_refuses_a_row_that_is_a_strict_subset_of_a_later_row() -> None:
+    """DEFECT 1, closing assertion. The renderer must not trust the passes.
+
+    The exact three-row file the exchange produced, hand-built so the check is on
+    the renderer rather than on composition: row 2 proposes ``{chr1:100}`` and row
+    3 proposes ``{chr1:100, chr2:200}``, so a strict subset is ranked above its own
+    superset. Every per-row rule holds — right proband, chr-prefixed contigs,
+    distinct in-range epcrs in descending order, no duplicated variant set, no
+    compound-het hypothesis split across two rows — and `render_submission_csv`
+    accepted it. Three composition passes vouching for an invariant is not the same
+    as checking it, which is how the exchange re-introduced this silently.
+    """
+    rows = (
+        SubmissionRow(
+            "PROBAND01", "chr1", 100, "A", "T", "chr3", "300", "G", "A", 0.70, "primary", "GENA"
+        ),
+        SubmissionRow("PROBAND01", "chr1", 100, "A", "T", "", "", "", "", 0.69, "primary", "GENA"),
+        SubmissionRow(
+            "PROBAND01", "chr1", 100, "A", "T", "chr2", "200", "C", "G", 0.60, "primary", "GENB"
+        ),
+    )
+
+    ok, errors = validate_submission(render_submission_csv_unvalidated(rows))
+    assert not ok
+    assert any("row 2 is a strict subset of row 3" in error for error in errors), errors
+
+    with pytest.raises(ValueError, match="row 2 is a strict subset of row 3"):
+        render_submission_csv(rows)
 
 
 # ---------------------------------------------------------------------------
