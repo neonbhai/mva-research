@@ -30,6 +30,10 @@ step, not a one-time team step.
 
 ---
 
+**Attempts already spent are recorded in `docs/submission-ledger.md`.** Read it
+before spending another: six Track 1 slots exist, the automated metric is already
+at its ceiling, and only the best score counts.
+
 ## 1. One-time setup
 
 ### 1.1 Install the `hf` CLI
