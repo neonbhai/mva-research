@@ -130,12 +130,31 @@ class AnnotationResult:
 #:
 #: Adapters are batch lookups by contract (``Sequence[str]`` in,
 #: ``Mapping[str, ...]`` out), so the choice is a trade between round trips and
-#: resident memory, not between batching and not batching. 5,000 records is ~20 MB
-#: of ``VariantRecord`` (measured at 3,672 bytes each, ``docs/scale-report.md`` §2)
-#: plus whatever the adapter returns for them, and it costs 911 adapter calls over
-#: a 4.5 M-record whole-genome callset. Smaller batches buy little memory and pay
-#: real per-call overhead against a subprocess- or index-backed adapter.
-DEFAULT_ANNOTATION_BATCH_SIZE: int = 5_000
+#: resident memory, not between batching and not batching.
+#:
+#: **Why 250,000 and not 5,000.** The dominant adapter here is SnpEff, and its
+#: cost is ~100% fixed start-up: measured on this machine, one variant takes
+#: 35.5 s and 5,000 take 31.6 s, because both are a GRCh38.115 database load and
+#: the marginal per-variant cost is indistinguishable from zero. At 5,000 the
+#: 4,962,060-variant callset pays 993 JVM launches — about 9.8 h of nothing but
+#: reloading the same database, inside a run that projected to ~30 h. At 250,000
+#: it pays 20, and SnpEff's share drops from ~16.5 h to ~25-30 min.
+#:
+#: The bound is memory. 250,000 records is ~918 MB of ``VariantRecord`` (measured
+#: at 3,672 bytes each, ``docs/scale-report.md`` §2) plus the adapter results for
+#: them, against 24 GB of RAM and a 6 GB JVM heap. It is deliberately not 500,000:
+#: the scale sweep puts batch-1M at 7.79 GiB against a 12 GiB watchdog, and there
+#: is no throughput left to buy — at 20 launches the fixed cost is already amortised.
+#:
+#: ``snpeff_local.DEFAULT_BATCH_SIZE`` is kept equal to this. When the SnpEff
+#: adapter's own chunk size is the smaller of the two it re-chunks what the service
+#: already batched, and the launches come back: 5,000 against 25,000 meant the
+#: adapter's chunking never triggered at all, and 250,000 against 25,000 would mean
+#: 10 launches per service batch, i.e. 199 of the 993 reloads surviving the fix.
+#: Batch size cannot change the answer either way (GP-30,
+#: ``test_batch_size_does_not_change_the_answer``); it only decides how many times
+#: the database is read off disk.
+DEFAULT_ANNOTATION_BATCH_SIZE: int = 250_000
 
 
 @dataclass(frozen=True, slots=True)

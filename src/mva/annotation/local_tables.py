@@ -391,6 +391,27 @@ def _read_rows(path: Path, columns: Sequence[str]) -> tuple[tuple[int, dict[str,
     if header is None:
         msg = f"Annotation table {path.name} contains no header row."
         raise AdapterUnavailableError(msg)
+    if not rows:
+        # A header-only table used to build cleanly. The manifest hash verified, the
+        # schema check passed, the AdapterSet was constructed, and every lookup then
+        # missed — silently, because a miss in these adapters is the *correct*
+        # answer for a variant the table does not hold (GP-14). Every variant lost
+        # its `gene_symbols`, and compound-heterozygous pairing groups by gene, so
+        # the whole run produced zero candidate pairs while reporting success.
+        # Refused here for the same reason `gene_intervals._read_gtf` refuses an
+        # empty gene model and `GnomadSitesFrequencyAdapter` refuses a release with
+        # no complete shard: an index over nothing answers every question with
+        # absence, and absence is what this pipeline is least able to detect.
+        msg = (
+            f"Annotation table {path.name} has a header but no data rows. An adapter over "
+            "an empty index answers every lookup with 'not in my table', which is "
+            "indistinguishable from a variant genuinely having no annotation and would "
+            "silently strip the gene assignment off every variant in the run — collapsing "
+            "compound-heterozygous pairing to zero pairs while the run reported success. "
+            "Refusing to build it. Re-run the knowledge-table build, or check that the "
+            "file was not truncated to its header."
+        )
+        raise AdapterUnavailableError(msg)
     return tuple(rows)
 
 
@@ -621,23 +642,31 @@ def _key_is_indel(key: str) -> bool:
     return len(ref) != len(alt)
 
 
-def _left_alignment_report(index: Mapping[str, object]) -> LeftAlignmentReport:
+def _left_alignment_report(indel_queries: int) -> LeftAlignmentReport:
     """What this adapter's keys may and may not be trusted to join (GP-14).
 
-    Derived from the index rather than asserted, and derived through
+    Derived from the counts rather than asserted, and derived through
     :func:`~mva.alleles.summarise_left_alignment` so no adapter can label its own
     batch by hand. ``reference_available=False`` is not a placeholder: a TSV
-    adapter has no reference and never will, so every indel in the table is
-    trimmed-only and the status is ``UNAVAILABLE_NO_REFERENCE``. A table of SNVs
-    reports ``NOT_REQUIRED`` instead — "could not left-align" and "had nothing to
-    left-align" are opposite claims about how far to trust the rarity of every
-    indel in the run, and they must not share a value.
+    adapter has no reference and never will, so every indel it is asked about is
+    trimmed-only and the status is ``UNAVAILABLE_NO_REFERENCE``. A run that asks
+    only about SNVs reports ``NOT_REQUIRED`` instead — "could not left-align" and
+    "had nothing to left-align" are opposite claims about how far to trust the
+    rarity of every indel in the run, and they must not share a value.
+
+    ``indel_queries`` counts the **variants this run looked up**, not the rows in
+    the table. This function used to take the index and count
+    ``sum(1 for key in index if _key_is_indel(key))``, which is the wrong side of
+    the join in the direction that matters: an SNV-only table asked about a run
+    full of indels reported ``NOT_REQUIRED`` and asserted "this run contains no
+    indel records" — over precisely the indels that were, at that moment, silently
+    returning absence because a trim-only key cannot match a left-aligned one. The
+    table's own composition is not a fact about the run; the query set is.
     """
-    indels = sum(1 for key in index if _key_is_indel(key))
     return summarise_left_alignment(
-        indel_count=indels,
+        indel_count=indel_queries,
         shifted_count=0,
-        unaligned_indel_count=indels,
+        unaligned_indel_count=indel_queries,
         reference_available=False,
     )
 
@@ -658,7 +687,9 @@ class LocalConsequenceAdapter:
         self._index: dict[str, tuple[ConsequenceAnnotation, ...]] = _index_consequences(
             table_path, tool=CONSEQUENCE_ADAPTER_NAME, tool_version=version
         )
-        self._left_alignment = _left_alignment_report(self._index)
+        #: Indel variants this adapter has been ASKED about, accumulated across
+        #: calls. Not a property of the table: see :func:`_left_alignment_report`.
+        self._indel_queries = 0
 
     @property
     def name(self) -> str:
@@ -679,12 +710,14 @@ class LocalConsequenceAdapter:
 
     @property
     def left_alignment(self) -> LeftAlignmentReport:
-        """Whether this table's indel keys can be trusted to join (GP-14).
+        """Whether this run's indel keys can be trusted to join (GP-14).
 
         Always ``reference_available=False``: a TSV adapter has no FASTA, so its
-        keys are trimmed and not left-aligned. See :func:`_left_alignment_report`.
+        keys are trimmed and not left-aligned. Counted over the variants this
+        adapter has been asked about rather than over the table's own rows, so it
+        accumulates as the run proceeds. See :func:`_left_alignment_report`.
         """
-        return self._left_alignment
+        return _left_alignment_report(self._indel_queries)
 
     def annotate(
         self, variant_ids: Sequence[str]
@@ -702,7 +735,13 @@ class LocalConsequenceAdapter:
         """
         found: dict[str, tuple[ConsequenceAnnotation, ...]] = {}
         for variant_id in _unique_ids(variant_ids):
-            entry = self._index.get(_join_key(variant_id))
+            key = _join_key(variant_id)
+            # Counted on every query, hit or miss. A miss is exactly the case the
+            # left-alignment report exists to qualify: it is the shape a
+            # representation mismatch takes.
+            if _key_is_indel(key):
+                self._indel_queries += 1
+            entry = self._index.get(key)
             if entry is not None:
                 found[variant_id] = entry
         return found
@@ -715,7 +754,9 @@ class LocalFrequencyAdapter:
         self._table_path = table_path
         self._version = version
         self._index: dict[str, tuple[PopulationFrequency, ...]] = _index_frequencies(table_path)
-        self._left_alignment = _left_alignment_report(self._index)
+        #: Indel variants this adapter has been ASKED about, accumulated across
+        #: calls. Not a property of the table: see :func:`_left_alignment_report`.
+        self._indel_queries = 0
 
     @property
     def name(self) -> str:
@@ -736,14 +777,16 @@ class LocalFrequencyAdapter:
 
     @property
     def left_alignment(self) -> LeftAlignmentReport:
-        """Whether this table's indel keys can be trusted to join (GP-14).
+        """Whether this run's indel keys can be trusted to join (GP-14).
 
         The expensive direction: a frequency that fails to join is scored as no
         frequency data at all, and absence of frequency is not evidence of rarity —
         but it is the input to the rarity signal, which is the strongest promoting
-        term the ranker has. See :func:`_left_alignment_report`.
+        term the ranker has. Counted over the variants this adapter has been asked
+        about rather than over the table's own rows. See
+        :func:`_left_alignment_report`.
         """
-        return self._left_alignment
+        return _left_alignment_report(self._indel_queries)
 
     def frequencies(
         self, variant_ids: Sequence[str]
@@ -759,7 +802,13 @@ class LocalFrequencyAdapter:
         """
         found: dict[str, tuple[PopulationFrequency, ...]] = {}
         for variant_id in _unique_ids(variant_ids):
-            entry = self._index.get(_join_key(variant_id))
+            key = _join_key(variant_id)
+            # Counted on every query, hit or miss: a miss is exactly the shape a
+            # representation mismatch takes, and it is the case the left-alignment
+            # report exists to qualify.
+            if _key_is_indel(key):
+                self._indel_queries += 1
+            entry = self._index.get(key)
             if entry is not None:
                 found[variant_id] = entry
         return found

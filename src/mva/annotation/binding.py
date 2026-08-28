@@ -567,18 +567,45 @@ class BoundAdapters:
     that can have holes. ``None`` for the synthetic tables, which cover exactly
     what they contain."""
 
+    clinical: ClinvarVcfAdapter | None = None
+    frequency: GnomadSitesFrequencyAdapter | None = None
+    """The two joining adapters themselves, kept so their representation status can
+    be read **after** the run rather than copied at construction. ``None`` for the
+    synthetic branch, whose tables have no reference to break.
+
+    Not a tuple of pre-rendered strings, deliberately.
+    ``representation_limitation`` is derived from ``_unusable_reference_alleles``,
+    a counter that is zero until a lookup has failed — and every lookup happens
+    after this object exists. Anything captured here as a *value* answers "was the
+    reference broken before we started", to which the answer is always no."""
+
     closers: tuple[_Closeable, ...] = ()
     """Everything holding an OS handle, closed in construction order."""
 
     def run_warnings(self) -> tuple[str, ...]:
         """Bind-time warnings plus anything the run itself discovered.
 
-        Call it after annotation has drained:
-        :class:`PartialCoverageFrequencyAdapter` cannot know which contigs were
-        asked about until they have been.
+        Call it after annotation has drained. Two kinds of hole can only be known
+        by then, and both used to be reported as if they could not happen:
+
+        * :class:`PartialCoverageFrequencyAdapter` cannot know which contigs were
+          asked about until they have been.
+        * A joining adapter cannot know its reference was unreadable until it has
+          tried to read it. ``representation_warnings`` was previously evaluated
+          inside the ``BoundAdapters(...)`` call in
+          :func:`build_real_adapter_set`, which is to say before the first lookup,
+          so a run whose FASTA raised on **every** read still reported
+          ``APPLIED`` with no limitation. Indels it could not left-align came back
+          as "no gnomAD record" and were scored novel and ultra-rare — GP-14
+          inverted into a manufactured false positive.
         """
         gaps = self.coverage.warnings() if self.coverage is not None else ()
-        return (*self.warnings, *gaps)
+        representation = (
+            representation_warnings(clinical=self.clinical, frequency=self.frequency)
+            if self.clinical is not None and self.frequency is not None
+            else ()
+        )
+        return (*self.warnings, *representation, *gaps)
 
     def close(self) -> None:
         """Release every open file handle. Idempotent; safe in a ``finally``."""
@@ -615,13 +642,17 @@ def build_real_adapter_set(
             closer.close()
         raise
 
+    # ``warnings`` carries only what is knowable NOW. The representation status is
+    # deliberately NOT among it: it is derived from a per-lookup failure counter
+    # that no lookup has yet had the chance to increment, so evaluating it here
+    # freezes a healthy answer over a run that has not started. Both adapters are
+    # handed to BoundAdapters instead, and `run_warnings()` asks them at the end.
     return BoundAdapters(
         adapters=AdapterSet(consequence=consequence, frequency=frequency, clinical=clinical),
-        warnings=(
-            *resolved.warnings,
-            *representation_warnings(clinical=clinical, frequency=frequency.inner),
-        ),
+        warnings=tuple(resolved.warnings),
         coverage=frequency,
+        clinical=clinical,
+        frequency=frequency.inner,
         closers=tuple(closers),
     )
 

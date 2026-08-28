@@ -40,6 +40,7 @@ from mva.annotation.binding import (
 )
 from mva.annotation.clinvar_vcf import ClinvarVcfAdapter
 from mva.annotation.gnomad_sites import GnomadSitesFrequencyAdapter
+from mva.annotation.local_tables import load_default_adapters
 from mva.config import CaseConfig, Workspace, find_repo_root
 from mva.determinism import hash_file
 from mva.errors import ConfigError
@@ -71,11 +72,17 @@ MITOCHONDRIAL_ID = "GRCh38:chrM:8993:T:G"
 class RecordingReference:
     """A `ReferenceLookup` that records every read and answers with valid bases.
 
-    Returning a constant nucleotide is safe and deliberate: `canonicalise_allele`
-    stops shifting the moment the base it reads does not match, so this reference
-    is consulted, bounded, and never able to move a coordinate — which keeps the
-    test about *whether the adapter asked* rather than about alignment arithmetic,
-    which `tests/unit/test_normalise_representation.py` already covers.
+    The bases cycle `ACGT` by absolute position, which makes this a *terminating*
+    reference: the shift stops the moment a base does not match, and the rightward
+    equivalent-position search stops within a base or two. That keeps the tests
+    below about *whether the adapter asked* rather than about alignment
+    arithmetic, which `tests/unit/test_normalise_representation.py` already covers.
+
+    It used to answer `"A" * n`. That is not a neutral filler — it is an infinite
+    poly-A tract, in which a single-base indel can be shifted for ever, so the
+    rightward search spent its whole `MAX_SHIFT_BP` budget on every indel lookup.
+    That went unnoticed for exactly the reason `ReferenceStatus.SHIFT_LIMIT_REACHED`
+    now exists: exhausting the budget used to be reported as success.
     """
 
     def __init__(self) -> None:
@@ -83,7 +90,7 @@ class RecordingReference:
 
     def fetch(self, contig: str, start: int, end: int) -> str:
         self.calls.append((contig, start, end))
-        return "A" * (end - start + 1)
+        return "".join("ACGT"[position % 4] for position in range(start, end + 1))
 
 
 def _resolved(reference_fasta: Path | None = None) -> ResolvedResources:
@@ -152,10 +159,15 @@ def test_the_binding_gives_clinvar_the_reference_and_clinvar_uses_it(
     """
     adapter, reference = clinvar_with_reference
 
-    assert adapter.representation_status is LeftAlignmentStatus.APPLIED
+    # Nothing has been looked up yet, so there is nothing to have left-aligned.
+    # `NOT_REQUIRED`, not `APPLIED`: "had nothing to left-align" and "left-aligned
+    # everything" are different claims and the shared rule keeps them apart.
+    assert adapter.representation_status is LeftAlignmentStatus.NOT_REQUIRED
     assert adapter.representation_limitation is None
 
     adapter.assertions([CLINVAR_INDEL_ID])
+    assert adapter.representation_status is LeftAlignmentStatus.APPLIED
+    assert adapter.representation_limitation is None
     assert reference.calls, (
         "ClinVar was constructed but never consulted the reference on an indel lookup: "
         "the keyword was accepted and dropped, which is the failure this test exists for"
@@ -175,10 +187,12 @@ def test_the_binding_gives_gnomad_the_reference_and_gnomad_uses_it(
     """
     adapter, reference = gnomad_with_reference
 
-    assert adapter.representation_status is LeftAlignmentStatus.APPLIED
+    assert adapter.representation_status is LeftAlignmentStatus.NOT_REQUIRED
     assert adapter.representation_limitation is None
 
     adapter.frequencies([GNOMAD_INDEL_ID])
+    assert adapter.representation_status is LeftAlignmentStatus.APPLIED
+    assert adapter.representation_limitation is None
     assert reference.calls, (
         "gnomAD was constructed but never consulted the reference on an indel lookup"
     )
@@ -194,6 +208,14 @@ def test_a_reference_less_binding_says_so_out_loud_for_both_slots() -> None:
     clinical = build_clinical_adapter(_resolved(), reference=None)
     wrapper = build_frequency_adapter(_resolved(), reference=None)
     try:
+        # An indel each, because that is what a missing reference actually costs.
+        # Before one is looked up both slots honestly report NOT_REQUIRED: an
+        # SNV-only batch is unaffected by left-alignment whether or not a FASTA
+        # was configured, and reporting a degradation there would be a warning a
+        # reader cannot act on.
+        clinical.assertions([CLINVAR_INDEL_ID])
+        wrapper.frequencies([GNOMAD_INDEL_ID])
+
         assert clinical.representation_status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
         assert wrapper.inner.representation_status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
         assert clinical.representation_limitation is not None
@@ -219,6 +241,114 @@ def test_a_bound_real_set_with_a_reference_raises_no_representation_warning() ->
     finally:
         clinical.close()
         wrapper.close()
+
+
+# ---------------------------------------------------------------------------
+# A reference that is present but BROKEN
+# ---------------------------------------------------------------------------
+
+
+class BrokenReference:
+    """A `ReferenceLookup` that is non-``None`` and fails on every single read.
+
+    The state the whole binding used to be blind to. `reference is not None` is the
+    condition the composition root checks; it proves the object was passed and
+    nothing at all about whether a base can be read out of it. A FASTA that has
+    been truncated, replaced by an LFS pointer, or whose `.fai` names contigs the
+    file no longer holds looks exactly like this from here.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fetch(self, contig: str, start: int, end: int) -> str:
+        self.calls += 1
+        msg = "reference FASTA is unreadable"
+        raise OSError(msg)
+
+
+def test_a_reference_that_fails_every_read_is_not_reported_as_applied() -> None:
+    """The adapters' own report, once a lookup has actually been attempted.
+
+    Fails before the fix at the `run_warnings()` assertion, not here: the per-
+    adapter status was already computed lazily and correctly. What was frozen is
+    the *binding's* copy of it.
+    """
+    reference = BrokenReference()
+    clinical = build_clinical_adapter(_resolved(), reference=reference)
+    wrapper = build_frequency_adapter(_resolved(), reference=reference)
+    try:
+        # Before any lookup, nothing has been asked of the reference, so both
+        # adapters report NOT_REQUIRED and no limitation. This is the exact moment
+        # the binding used to sample them, and it is a moment at which a broken
+        # reference is indistinguishable from a working one.
+        assert clinical.representation_status is LeftAlignmentStatus.NOT_REQUIRED
+        assert wrapper.inner.representation_status is LeftAlignmentStatus.NOT_REQUIRED
+        assert representation_warnings(clinical=clinical, frequency=wrapper.inner) == ()
+
+        clinical.assertions([CLINVAR_INDEL_ID])
+        wrapper.frequencies([GNOMAD_INDEL_ID])
+        assert reference.calls > 0, "neither adapter consulted the reference at all"
+
+        # After, the truth is available — and it is not UNAVAILABLE_NO_REFERENCE,
+        # because a reference WAS supplied. Two different operator problems.
+        assert clinical.representation_status is (LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE)
+        assert wrapper.inner.representation_status is (
+            LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE
+        )
+        assert clinical.representation_limitation is not None
+        assert wrapper.inner.representation_limitation is not None
+    finally:
+        clinical.close()
+        wrapper.close()
+
+
+def test_run_warnings_reads_the_reference_status_after_the_run_not_at_bind_time() -> None:
+    """The regression. A broken FASTA must not produce a silent, healthy-looking run.
+
+    Before the fix `representation_warnings(...)` was evaluated *inside* the
+    `BoundAdapters(...)` expression in `build_real_adapter_set`, i.e. before any
+    lookup could increment `_unusable_reference_alleles`. The result was a run that
+    reported APPLIED with `representation_limitation is None` while every indel it
+    could not left-align came back as "no gnomAD record" and was then scored novel
+    and ultra-rare — GP-14 inverted into a manufactured false positive, which is
+    the worst direction for this failure to point.
+    """
+    reference = BrokenReference()
+    clinical = build_clinical_adapter(_resolved(), reference=reference)
+    wrapper = build_frequency_adapter(_resolved(), reference=reference)
+    knowledge_root = REPO_ROOT / "knowledge"
+    bound = BoundAdapters(
+        # The consequence slot is not under test; the synthetic set supplies a
+        # valid one so this is the real BoundAdapters shape rather than a stub.
+        adapters=load_default_adapters(
+            knowledge_root, knowledge_root / "manifests" / "knowledge.yaml"
+        ),
+        warnings=(),
+        coverage=wrapper,
+        clinical=clinical,
+        frequency=wrapper.inner,
+        closers=(clinical, wrapper),
+    )
+    try:
+        assert bound.run_warnings() == (), "a warning appeared before anything was annotated"
+        clinical.assertions([CLINVAR_INDEL_ID])
+        wrapper.frequencies([GNOMAD_INDEL_ID])
+
+        warnings = bound.run_warnings()
+        assert len(warnings) == 2, (
+            "the binding reported success it did not achieve: a reference that failed "
+            "on every read produced no representation warning at all"
+        )
+        assert any("ClinVar" in warning for warning in warnings)
+        assert any("gnomAD" in warning for warning in warnings)
+        assert all("DEGRADED" in warning for warning in warnings)
+        assert all(
+            LeftAlignmentStatus.INCOMPLETE_REFERENCE_UNUSABLE.value in warning
+            for warning in warnings
+        )
+    finally:
+        bound.close()
 
 
 # ---------------------------------------------------------------------------

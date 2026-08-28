@@ -1086,7 +1086,22 @@ def test_representation_status_is_typed_and_names_its_own_limitation(
 
     Without it, the repeat-tract miss below is indistinguishable from "gnomAD has
     no record", and a report has nothing to put in its footer.
+
+    Both adapters are driven with an indel first, deliberately. The status is a
+    statement about a batch, and over a batch with no indels in it the honest
+    answer is ``NOT_REQUIRED`` for either configuration — SNVs are unaffected by
+    left-alignment, so "no reference" costs nothing until an indel arrives. Making
+    the indel explicit here also keeps the assertion independent of whether some
+    earlier test happened to drive these module-scoped fixtures first.
     """
+    # An indel whose whole shift and whose whole rightward bound search stay
+    # inside the positions the slice reference covers, so the healthy adapter
+    # really is healthy rather than quietly hitting the end of the fixture. The
+    # degraded-reference case has its own test further down.
+    covered_indel = "GRCh38:chr21:5033364:A:AT"
+    adapter.frequencies([covered_indel])
+    aligning_adapter.frequencies([covered_indel])
+
     assert adapter.representation_status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
     assert aligning_adapter.representation_status is LeftAlignmentStatus.APPLIED
     assert aligning_adapter.representation_limitation is None
@@ -2464,3 +2479,72 @@ def test_every_real_shard_is_covered_by_its_own_index() -> None:
         status = check_source_complete(shard)
         assert status.index_covers_data is True, f"{shard.name} index falls short"
         assert status.is_complete, f"{shard.name}: {status.reasons}"
+
+
+# ------------------------------------- the status comes from the shared rule
+#
+# `representation_status` was hand-rolled here:
+#
+#     if self._reference is None:          return UNAVAILABLE_NO_REFERENCE
+#     if self._unusable_reference_alleles: return INCOMPLETE_REFERENCE_UNUSABLE
+#     return APPLIED
+#
+# which has no case for "there were no indels" and so answered APPLIED over an
+# SNV-only batch -- rendered by `LeftAlignmentReport.describe()` as "left-alignment
+# applied against the configured reference to all 0 indel records". The invariant
+# it breaks is written down in `local_tables._left_alignment_report`: "could not
+# left-align" and "had nothing to left-align" are opposite claims about how far to
+# trust the rarity of every indel in the run and must not share a value.
+
+
+def test_an_snv_only_batch_is_not_required_rather_than_applied() -> None:
+    """A batch with nothing to left-align did not left-align anything.
+
+    Fails before the fix with APPLIED. A fresh adapter rather than the module
+    fixture, because the status is cumulative over everything the adapter has been
+    asked -- which is the point: it is a statement about a run.
+    """
+    with open_adapter(FIXTURE, reference=_SliceReference.from_fixture()) as instance:
+        assert instance.representation_status is LeftAlignmentStatus.NOT_REQUIRED
+        instance.frequencies([TRUE_ZERO, COMMON, DIVERGENT])
+        assert instance.representation_status is LeftAlignmentStatus.NOT_REQUIRED, (
+            "an SNV-only batch reported that left-alignment had been applied to it"
+        )
+        assert instance.left_alignment.indel_count == 0
+        assert instance.representation_limitation is None
+        assert "no indel records" in instance.left_alignment.describe()
+
+
+def test_an_snv_only_batch_without_a_reference_is_also_not_required() -> None:
+    """The same rule in the degraded configuration.
+
+    "No FASTA" costs nothing on a batch with no indels in it, and a warning a
+    reader cannot act on is noise that hides the ones they can.
+    """
+    with open_adapter(FIXTURE) as instance:
+        instance.frequencies([TRUE_ZERO, COMMON])
+        assert instance.representation_status is LeftAlignmentStatus.NOT_REQUIRED
+        assert instance.representation_limitation is None
+
+
+def test_one_indel_lookup_moves_the_batch_off_not_required() -> None:
+    """The counterpart: the moment an indel arrives the status must react."""
+    with open_adapter(FIXTURE) as instance:
+        instance.frequencies([TRUE_ZERO, DELETION])
+        assert instance.representation_status is LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE
+        assert instance.left_alignment.indel_count == 1
+        assert instance.representation_limitation is not None
+
+
+def test_the_indel_count_is_the_query_side_not_the_release_side() -> None:
+    """The population counted is the one whose joins the status is about.
+
+    The release holds indels in every window this fixture covers. Counting those
+    would put an SNV-only batch back on a non-`NOT_REQUIRED` status by a different
+    route, and would state left-alignment work over records the caller never
+    asked about.
+    """
+    with open_adapter(FIXTURE, reference=_SliceReference.from_fixture()) as instance:
+        # A window that certainly contains release indels, queried for one SNV.
+        instance.frequencies([TRUE_ZERO])
+        assert instance.left_alignment.indel_count == 0
