@@ -583,9 +583,10 @@ the ranking has to be carried elsewhere. In priority order:
    outranks one in an unpanelled gene by an enormous margin, and this is the only signal
    that is fully available today. See D4.
 2. **Phenotype match.** `phenotype.hpoa` terms for the proband's HPO profile against the
-   gene's disease. `HP:0002667` (nephroblastoma) is the sharpest single discriminator in
-   this differential — annotated 6/6 to MVA3/*TRIP13* and to MVA1/*BUB1B*, and **not at
-   all** to MVA2/*CEP57*.
+   gene's disease. The sharpest single discriminator this differential can offer is
+   `HP:0002667` (nephroblastoma): wherever it appears in a profile it is annotated 6/6 to
+   MVA3/*TRIP13* and to MVA1/*BUB1B*, and **not at all** to MVA2/*CEP57*. That is a
+   property of the disease annotations, not a claim about any particular child.
 3. **ClinVar significance** of either member allele. Real, curated, and on disk.
 4. **Rarity**, where AF exists.
 5. **Consequence severity**, where it exists. A HIGH+HIGH pair (two LoF alleles) outranks

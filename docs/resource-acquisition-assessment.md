@@ -7,7 +7,7 @@ quoted from documentation.
 
 > **Boundary observed.** Nothing in `SageBio/mva-hackathon-2026-data` was accessed — not the VCF,
 > not the FASTQs, not the dataset README, with or without a token. That dataset is patient data
-> under WCG IRB protocol #REDACTED-PROTOCOL. Every claim about the proband VCF below is inference from the
+> under a WCG IRB protocol. Every claim about the proband VCF below is inference from the
 > **public** challenge Space source, and is labelled as such. The task brief also mentioned reading
 > the dataset card "if publicly rendered"; that conflicts with the explicit prohibition on the
 > README, so the prohibition was followed and the card was not fetched.
@@ -89,9 +89,11 @@ What the public Space source actually supports
   VEP, dbSNP, annotation, DRAGEN or GATK. The Space is a registration/leaderboard front end and says
   nothing about the upstream pipeline.
 
-Inference from the naming convention `WGS_SPECIMEN_FLOWCELL.vcf.gz` — `FLOWCELL` is a NovaSeq
-(S4-family) flowcell ID — is that this is standard secondary-analysis output named by flowcell,
-i.e. DRAGEN or GATK germline. Both emit **population-annotation-free** VCFs by default. A 300 MB
+Inference from the naming convention — the VCF is named `WGS_<specimen accession>_<flowcell>.vcf.gz`,
+and the flowcell component is a NovaSeq (S4-family) ID — is that this is standard secondary-analysis
+output named by flowcell, i.e. DRAGEN or GATK germline. (The literal names are patient identifiers
+and are not reproduced here; see `tools/setup/fetch_case_data.sh`, which discovers them at run time
+from the gated listing.) Both emit **population-annotation-free** VCFs by default. A 300 MB
 bgzipped WGS VCF is also consistent with a plain single-sample SNV/indel callset (~4.5–5M records);
 a gnomAD-annotated WGS VCF would typically be considerably larger.
 
@@ -115,7 +117,7 @@ print('--- AF description (is it population or sample?) ---')
 if 'AF' in h.info: print(h.info['AF'].description)
 for k in ('gnomad_AF','gnomAD_AF','AF_popmax','AF_grpmax','CSQ','ANN'):
     if k in h.info: print('POPULATION ANNOTATION PRESENT:', k, '->', h.info[k].description[:200])
-" /path/to/WGS_SPECIMEN_FLOWCELL.vcf.gz
+" "$MVA_WORKSPACE"/inputs/*.vcf.gz
 ```
 
 **If that header shows `CSQ`/`ANN` with gnomAD fields, or `AF_grpmax`, stop and cancel the pull

@@ -23,8 +23,9 @@ left-aligned `chr1:100 A>AA`.
 **A failed join is indistinguishable from "novel, ultra-rare variant"** — the
 strongest promoting signal in our ranking. It simultaneously manufactures false
 positives and discards true pathogenic assertions, and it does both silently.
-**a substantial fraction of the real proband's records are indel-bearing**, so this is a
-main-path defect, not a corner case.
+**A large minority of the records in a real short-read callset are
+indel-bearing** — this one included — so a rule that silently mishandles indels
+is a main-path defect, not a corner case.
 
 The root cause was two implementations of one rule.
 

@@ -62,8 +62,15 @@ clinician as a probability had better be one — not a scoring debt.
 | 10 `chr15:40205000 / chr15:40210500` | 0.3900 | **0.3800** |
 
 Rows 1, 2, 3, 5, 6, 7, 9 byte-identical. No row moves, no coordinate changes.
-**The causal pair remains row 1 at REDACTED-EPCR.** Ten distinct values, minimum gap
-exactly 0.0100.
+Ten distinct values, minimum gap exactly 0.0100.
+
+**The invariant this had to demonstrate is that the separation pass never
+reorders**, and in particular never displaces the top-ranked candidate. That is
+asserted on the synthetic golden case rather than on any real result:
+`tests/golden/test_golden_case.py::test_synthetic_causal_pair_ranks_first`, plus
+`tests/unit/test_track1_composition.py::test_unrelated_rows_keep_their_epcr_order`
+and `::test_a_genuine_score_difference_still_decides_the_order`. Real-case EPCRs
+and ranks are patient-derived and are not reproduced in this repository.
 
 ## The enforcement gap this exposed — and it is the important part
 

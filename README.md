@@ -4,10 +4,24 @@ A provenance-first pipeline for rare-disease variant prioritisation and
 mechanism-grounded drug-repurposing hypotheses, built for
 **Rare Disease, Real Kid: The MVA Hackathon 2026**.
 
-> **This repository contains no patient data and never will.** Everything
-> demonstrable here runs on a fully synthetic case with fictional genes. Real
-> patient data lives in an external, encrypted workspace that the code refuses to
-> locate inside this repo.
+> **Nothing derived from the child's genome or clinical record is in this
+> repository.** No variant records, no genomic coordinates from the case, no
+> genotypes or allele balances, no phenotype terms taken from the case profile, no
+> scores or rankings from a real run, and no file names, sizes or checksums that
+> identify the case files. Everything demonstrable here runs on a fully synthetic
+> case with fictional genes; the coordinates that do appear are public ClinVar,
+> gnomAD and MANE records, or invented ones. The real VCF, the phenotype document
+> and every artifact derived from them live in an external, encrypted workspace
+> that the code refuses to locate inside this repo.
+>
+> **What the repository does say about the case**, because the engineering cannot
+> be justified otherwise: that it is a single-sample short-read WGS callset from a
+> standard germline pipeline, in GRCh38 with bare contig names, with unsplit
+> multi-allelics and an indel-heavy record mix; the disorder under study (Mosaic
+> Variegated Aneuploidy) and the disease-level literature about it; and the
+> operational terms of access — gated dataset, no resharing, deletion within 30
+> days of challenge close. Those are properties of a file format, a pipeline and a
+> disease, not facts about the child. See `docs/privacy-model.md`.
 >
 > **Nothing here is medical advice.** Track 2 output is a research hypothesis
 > requiring pre-clinical validation.

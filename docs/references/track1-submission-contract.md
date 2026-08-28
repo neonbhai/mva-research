@@ -87,7 +87,7 @@ is **`chr`-prefixed**: the docs example is `chr15`, the template uses
   Scientific Rigor 35%, Potential Impact 25%, Innovation 25%, Scalability 15%.
 - Submission limits: Track 1 six attempts (best counts), Track 2 one.
 - Close: 2026-10-24 23:59 UTC.
-- Data is gated under WCG IRB protocol #REDACTED-PROTOCOL; no resharing; **deletion within
+- Data is gated under a WCG IRB protocol; no resharing; **deletion within
   30 days of close from all environments including derived datasets**, confirmed
   by email. See `docs/privacy-model.md` for how we meet that obligation.
 - No stated rule restricting LLM use or external data. Reproducibility IS
