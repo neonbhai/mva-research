@@ -67,18 +67,35 @@ truncate → `_enforce_epcr_separation`. Separation stays last and stays after
 truncation: it is order-preserving by construction and only the submitted rows are
 scored.
 
-Reaching past the cut changes what promotion *costs*, so the pass is in two parts
-and they are justified differently.
+Reaching past the cut changes what promotion *costs*, so the pass is in three
+parts and they are justified differently.
 
 **1. Reordering inside the window is free.** No row enters or leaves. Every
 superset already submitted is lifted above every subset it covers — ADR 0015
 unchanged, including several pairs carrying one variant.
+
+*Amended 2026-08-28.* "Free" is true of the lift in isolation and was read as
+true of the pass as a whole, which it is not: step 2 brings a new superset into
+the window, and that superset can land below a subset the lift had already
+placed. An adversarial review reproduced exactly that — a five-row list into a
+four-row window emitted a single above its own superset, costing the rank tier
+this ADR exists to protect. The lift is therefore **re-run after the exchange**
+(step 3). Once suffices: the lift only permutes the window, so it creates no new
+exchange opportunity and there is no fixpoint to iterate to.
 
 **2. Crossing the cut costs a row, so it is rationed.** A subset row with no
 superset inside the window is **exchanged** with the highest-ranked superset
 outside it: the pair takes the subset's slot, the subset takes the pair's. Exactly
 one row enters, exactly one leaves, the row that leaves is the subset itself, and
 **no unrelated row moves by a single position**.
+
+**3. Re-lift, because step 2 can undo step 1.** The exchanged-in superset is
+placed at the departing subset's rank, which may sit below a subset the lift
+already ordered. Step 1 is therefore repeated. `validate_submission` then makes
+the invariant unfalsifiable rather than trusted: a submission in which any row is
+a strict subset of a lower-ranked row is **refused**, on every path to bytes —
+`render_submission_csv`, `write_submission`, and the orchestrator's re-check —
+not in the one renderer that happened to be reviewed.
 
 ### The exchange inverts one sentence of ADR 0015, on purpose
 
@@ -166,7 +183,8 @@ volume.
 - If the ground truth ever turns out to be single-variant, the exchange costs the
   full match that the retained single would have provided. That is ADR 0015's
   accepted risk, now taken one step further, and stated here so the reversal is
-  cheap: delete pass 2 of `_promote_pairs_above_subsets`.
+  cheap: delete the exchange step of `_promote_pairs_above_subsets`, keeping the
+  lift.
 - The split-pair check is best-effort on an optional column. A submission whose
   rows carry no `notes` is not checked for splits — recorded in
   `docs/tech-debt.md` rather than papered over.
