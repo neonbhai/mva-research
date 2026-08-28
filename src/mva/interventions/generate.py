@@ -85,10 +85,23 @@ __all__ = [
 TOOL_NAME = "mva.interventions.generate"
 TOOL_VERSION = "0.1.0"
 
-#: GP-20. Appended to every limitation this module writes.
+#: GP-20. Appended to every limitation this module writes for a synthetic catalogue.
 SYNTHETIC_CATALOGUE_LIMITATION = (
     "Derived from a SYNTHETIC drug catalogue describing fictional agents. It is not "
     "pharmacological fact, carries no clinical validity, and is not medical advice."
+)
+
+#: ADR 0022. The literature counterpart. A curated catalogue is real pharmacology,
+#: so the synthetic sentence is a false provenance claim on it — but it is not a
+#: pharmacological database either, and saying nothing would overstate it in the
+#: other direction. What actually bounds it is the reading: specific papers, read
+#: by a specific author, on a specific date, with no completeness guarantee.
+LITERATURE_CATALOGUE_LIMITATION = (
+    "Derived from a LITERATURE-CURATED drug catalogue: every row cites a specific "
+    "publication (see SOURCES.md), but the row set is one author's reading of the "
+    "literature on one date, not a systematic review or a pharmacological database. "
+    "Absence of an agent is not evidence against it. This is a research hypothesis "
+    "and is not medical advice."
 )
 
 # --------------------------------------------------------------------- weights
@@ -191,14 +204,30 @@ def generate_drug_hypotheses(
     rather than a non-event, and because filtering before scoring would hide the
     near misses that make the ranking legible (GP-13).
     """
+    # Provenance is read from the catalogue once, here, and carried down. Both the
+    # caveat and the citation title used to be hardcoded to the synthetic wording,
+    # which stamped "fictional agents" onto every row of a literature-curated
+    # catalogue — a false provenance claim in the fields whose only job is
+    # provenance. ADR 0022 anticipated this; this stage had been missed.
+    catalogue_limitation = (
+        SYNTHETIC_CATALOGUE_LIMITATION if catalog.synthetic else LITERATURE_CATALOGUE_LIMITATION
+    )
     citation = Citation(
         source="mva-knowledge/drug_catalog.tsv",
         identifier=mechanism.mechanism_id,
         version=catalog.version,
-        title="Synthetic drug catalogue",
+        title=(
+            "Synthetic drug catalogue" if catalog.synthetic else "Literature-curated drug catalogue"
+        ),
     )
     triaged = [
-        _triage_entry(entry, mechanism=mechanism, clock=clock, citation=citation)
+        _triage_entry(
+            entry,
+            mechanism=mechanism,
+            clock=clock,
+            citation=citation,
+            catalogue_limitation=catalogue_limitation,
+        )
         for entry in catalog.entries()
     ]
 
@@ -307,6 +336,7 @@ def _evidence_item(
     tier: AssertionTier,
     method: str,
     limitations: str,
+    catalogue_limitation: str,
     clock: Clock,
     citation: Citation | None,
     numeric_value: float | None = None,
@@ -328,7 +358,7 @@ def _evidence_item(
         method=method,
         tool=TOOL_NAME,
         tool_version=TOOL_VERSION,
-        limitations=f"{limitations} {SYNTHETIC_CATALOGUE_LIMITATION}",
+        limitations=f"{limitations} {catalogue_limitation}",
         timestamp=clock.now(),
         numeric_value=numeric_value,
         payload=payload or {},
@@ -341,6 +371,7 @@ def _triage_entry(
     mechanism: MechanismHypothesis,
     clock: Clock,
     citation: Citation,
+    catalogue_limitation: str,
 ) -> _Triaged:
     target_in_mechanism = check_target_in_mechanism(entry.target_node_id, mechanism)
     required = (
@@ -395,6 +426,7 @@ def _triage_entry(
         ordered=ordered,
         rationale=rationale,
         clock=clock,
+        catalogue_limitation=catalogue_limitation,
         citation=citation,
     )
     concern_ids = {
@@ -552,6 +584,7 @@ def _drug_evidence(
     rationale: str,
     clock: Clock,
     citation: Citation,
+    catalogue_limitation: str,
 ) -> tuple[EvidenceItem, ...]:
     """One evidence row per finding. GP-10: nothing below is asserted uncited."""
     items: list[EvidenceItem] = []
@@ -594,6 +627,7 @@ def _drug_evidence(
             ),
             limitations=direction_limits,
             clock=clock,
+            catalogue_limitation=catalogue_limitation,
             citation=citation,
             payload={
                 "required_direction": verdict.required.value,
@@ -619,6 +653,7 @@ def _drug_evidence(
                 "different indication says nothing about efficacy in this mechanism."
             ),
             clock=clock,
+            catalogue_limitation=catalogue_limitation,
             citation=citation,
             numeric_value=evidence_quality,
         )
@@ -645,6 +680,7 @@ def _drug_evidence(
                     "was consulted."
                 ),
                 clock=clock,
+                catalogue_limitation=catalogue_limitation,
                 citation=citation,
                 payload={
                     "concern_id": concern.concern_id,
@@ -683,6 +719,7 @@ def _drug_evidence(
                     "correction."
                 ),
                 clock=clock,
+                catalogue_limitation=catalogue_limitation,
                 citation=citation,
             )
         )
@@ -718,6 +755,7 @@ def _drug_evidence(
                 "be compared across mechanisms."
             ),
             clock=clock,
+            catalogue_limitation=catalogue_limitation,
             citation=None,
             numeric_value=score,
             payload={"rejected": rejected, "reasons": listed},

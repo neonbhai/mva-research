@@ -124,6 +124,21 @@ DANGER_BY_NODE_AND_DIRECTION: Final[dict[tuple[str, str], str]] = {
         "it. An unmeasured sign at the target node is not a detail outstanding: it is "
         "the entire question the hypothesis asks."
     ),
+    ("N3_bubr1", "context_dependent"): (
+        "It moves the therapeutic target in both directions at once. On this axis that "
+        "is the NAD+ precursor that is also a sirtuin product inhibitor: it feeds the "
+        "pool SIRT2 consumes and supplies the molecule that blocks SIRT2, in the same "
+        "cell at the same time, and which term dominates at a given intracellular "
+        "concentration has never been measured in any genotype. A context-dependent "
+        "sign is worse than a missing one for a first experiment, because it destroys "
+        "interpretability in both outcomes: a rise in BubR1 cannot distinguish NAD+ "
+        "supply from an off-axis effect, and a fall cannot distinguish a wrong "
+        "mechanism from having inhibited the enzyme the mechanism runs on. The only "
+        "direct measurement of this agent class on this endpoint runs the wrong way — "
+        "the sirtuin-inhibiting concentration lowered BubR1 protein — at an exposure "
+        "well above anything a patient reaches, which fixes the sign of the inhibitory "
+        "arm without fixing the dose at which it wins."
+    ),
 }
 
 _CIN_CLAUSE: Final[dict[str | None, str]] = {
@@ -227,7 +242,12 @@ def run_triage(repo_root: Path) -> tuple[MechanismHypothesis, tuple[DrugHypothes
     if mechanism is None:
         msg = f"{literature}/mechanisms.tsv carries no chain for BUB1B."
         raise RuntimeError(msg)
-    catalog = DrugCatalog.from_tsv(literature / "drug_catalog.tsv", version=LIBRARY_VERSION)
+    # synthetic=False is mandatory here: these rows are literature-curated (ADR 0022)
+    # and the default is True, so omitting it labels every evidence row this triage
+    # produces as describing fictional agents.
+    catalog = DrugCatalog.from_tsv(
+        literature / "drug_catalog.tsv", version=LIBRARY_VERSION, synthetic=False
+    )
     result = generate_drug_hypotheses(mechanism=mechanism, catalog=catalog, clock=demo_clock())
     return mechanism, result.rejected
 
@@ -402,7 +422,7 @@ def render(repo_root: Path) -> str:
         ),
         "",
         _para(
-            "The practical consequence is §5.2 of `docs/track2-hypothesis.md`: the "
+            "The practical consequence is §5 of `docs/track2-hypothesis.md`: the "
             "bottleneck in repurposing for chromosomal-instability disorders is not "
             "finding targets. It is that the safety question that matters most has not "
             "been asked of the candidate drugs."

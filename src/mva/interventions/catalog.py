@@ -125,11 +125,14 @@ class CatalogEntry:
 class DrugCatalog:
     """An immutable, versioned set of catalogue rows."""
 
-    def __init__(self, entries: Sequence[CatalogEntry], *, version: str) -> None:
+    def __init__(
+        self, entries: Sequence[CatalogEntry], *, version: str, synthetic: bool = True
+    ) -> None:
         if not version.strip():
             msg = "DrugCatalog requires a non-empty version string (GP-20, GP-31)."
             raise IngestionError(msg)
         self._version = version
+        self._synthetic = synthetic
         self._entries: tuple[CatalogEntry, ...] = tuple(
             sorted(entries, key=lambda entry: entry.drug_id)
         )
@@ -141,8 +144,14 @@ class DrugCatalog:
             seen.add(entry.drug_id)
 
     @classmethod
-    def from_tsv(cls, path: Path, *, version: str) -> DrugCatalog:
-        """Parse a `#`-commented TSV catalogue."""
+    def from_tsv(cls, path: Path, *, version: str, synthetic: bool = True) -> DrugCatalog:
+        """Parse a `#`-commented TSV catalogue.
+
+        ``synthetic`` defaults to True because GP-20 makes the fabricated case the
+        safe default: a caller that forgets to declare provenance gets the label
+        that overstates the caveat, never the one that overstates the evidence.
+        Literature-curated catalogues (ADR 0022) must pass ``synthetic=False``.
+        """
         if not path.is_file():
             msg = f"Drug catalogue not found: {path.name}"
             raise IngestionError(msg)
@@ -168,7 +177,7 @@ class DrugCatalog:
             _build_entry(row, index=index, ctx=f"{path.name} row {number}")
             for number, row in enumerate(rows[1:], start=1)
         ]
-        return cls(entries, version=version)
+        return cls(entries, version=version, synthetic=synthetic)
 
     def entries(self) -> tuple[CatalogEntry, ...]:
         """Every row, ordered by `drug_id` (GP-30)."""
@@ -187,6 +196,19 @@ class DrugCatalog:
     def version(self) -> str:
         """Version of the catalogue table behind this object."""
         return self._version
+
+    @property
+    def synthetic(self) -> bool:
+        """Whether these rows describe fabricated agents rather than real ones.
+
+        This is a *declared* property, not one inferred from the version string.
+        ADR 0022 made ``bub1b-literature-v1`` deliberately unlike ``synthetic-v0.0``
+        so a reader could tell the two apart, but a downstream module that has to
+        parse a string to decide what caveat to attach will eventually parse it
+        wrong — and the failure is silent in the direction that matters, because a
+        real catalogue mislabelled as fictional still reads as cautious.
+        """
+        return self._synthetic
 
     def __len__(self) -> int:
         return len(self._entries)

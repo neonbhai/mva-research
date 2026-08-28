@@ -554,3 +554,49 @@ def test_every_source_module_is_in_the_layer_map() -> None:
         + "\n\nA phantom entry makes the map look more complete than it is. "
         "Remove it, or add the module it was reserving a place for."
     )
+
+
+@pytest.mark.unit
+def test_every_catalogue_load_declares_its_provenance() -> None:
+    """`DrugCatalog.from_tsv` must be called with an explicit ``synthetic=``.
+
+    The parameter defaults to True so that a forgotten declaration overstates the
+    caveat rather than the evidence (GP-20). That default is the safe direction,
+    but it is silent: a literature catalogue loaded without ``synthetic=False``
+    stamps "describes fictional agents" onto every evidence row it produces, and
+    nothing at runtime complains.
+
+    That is not hypothetical. When the parameter was introduced, the two call
+    sites in `src/` and the Track 2 test module were updated and
+    `tools/track2/drugs_to_avoid.py` was missed -- it loaded the *literature*
+    catalogue with the synthetic default for as long as it took someone to grep.
+    A two-sided test of the labelling existed and passed the whole time, because
+    it tested the function rather than its callers.
+
+    So the rule is explicitness, not correctness: this cannot tell whether a
+    given call passed the right value, only that somebody chose one.
+    """
+    offenders: list[str] = []
+    repo_root = Path(__file__).resolve().parents[2]
+    roots = (SRC, repo_root / "tools")
+    files = sorted(f for root in roots for f in root.rglob("*.py"))
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "from_tsv"):
+                continue
+            if not (isinstance(func.value, ast.Name) and func.value.id == "DrugCatalog"):
+                continue
+            if not any(kw.arg == "synthetic" for kw in node.keywords):
+                offenders.append(f"{path.relative_to(repo_root)}:{node.lineno}")
+
+    assert not offenders, (
+        "DrugCatalog.from_tsv called without an explicit synthetic= at:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nRemediation: pass synthetic=False for anything under "
+        "knowledge/literature/ (ADR 0022), synthetic=True for the demo tables "
+        "under knowledge/public/. The default is True and silent."
+    )

@@ -43,6 +43,10 @@ from mva.interventions import (
     is_neurological_context,
     required_direction_for_node,
 )
+from mva.interventions.generate import (
+    LITERATURE_CATALOGUE_LIMITATION,
+    SYNTHETIC_CATALOGUE_LIMITATION,
+)
 from mva.mechanisms import MechanismLibrary, build_mechanism, mechanism_relevance_score
 from mva.models.drug import ApprovalStatus, DrugHypothesis, RejectionReason
 from mva.models.mechanism import (
@@ -91,7 +95,7 @@ def mechanism() -> MechanismHypothesis:
 
 @pytest.fixture(scope="module")
 def catalog() -> DrugCatalog:
-    return DrugCatalog.from_tsv(CATALOG_PATH, version=LIBRARY_VERSION)
+    return DrugCatalog.from_tsv(CATALOG_PATH, version=LIBRARY_VERSION, synthetic=False)
 
 
 @pytest.fixture(scope="module")
@@ -285,29 +289,69 @@ def test_cannot_determine_reaches_the_top_of_the_accepted_list(
 ) -> None:
     """ASSUMPTION-DRUG-02: `None` is not agreement, and it is not rejection either.
 
-    Nicotinamide is simultaneously an NAD+ precursor — which should support the
-    SIRT2-dependent deacetylation that slows BubR1 turnover — and a product
-    inhibitor of the same sirtuin. The two pull opposite ways on one node, so no
-    single sign can honestly be assigned. It ranks first anyway, carrying the flag,
-    because it is the only entry whose cancer-susceptibility question has any answer
-    at all.
+    Nobody has measured what nicotinic acid does to BubR1 abundance, so its sign at
+    the therapeutic target is `unknown` — not agreement, not disagreement. It ranks
+    first anyway, carrying the flag, because it is the only entry whose
+    cancer-susceptibility question has been asked *and answered* rather than merely
+    asked of an adjacent endpoint.
+
+    This assertion previously named nicotinamide, and the change was not made here.
+    It was made in `drug_catalog.tsv`: nicotinamide's `worsens_cin` cell had been
+    filled from a skin-cancer chemoprevention trial that measures no chromosome
+    number, and nicotinic acid's had been left blank although two randomised
+    malignancy tabulations and a human micronucleus assay exist. Correcting both
+    cells moved the ranking; nothing in this file or in `generate.py` was touched to
+    make it move.
     """
     accepted = [h for h in triage.values() if not h.rejected]
-    assert [h.drug_id for h in accepted] == ["DRUG-NAM"]
+    assert [h.drug_id for h in accepted] == ["DRUG-NA"]
     top = accepted[0]
     assert top.rank == 1
     assert top.directions_agree is None
-    assert top.observed_direction is EffectDirection.CONTEXT_DEPENDENT
+    assert top.observed_direction is EffectDirection.UNKNOWN
     assert top.observed_direction in UNSIGNED_DIRECTIONS
     assert RejectionReason.DIRECTION_UNKNOWN in top.concerns, (
         "An accepted candidate with an undetermined direction must carry the concern "
         "beside it. 'We accepted it despite X' is the sentence a reviewer needs."
     )
-    assert top.score < 0.5, (
-        "The top-ranked candidate scores below half. The ranking is telling the "
-        "reader there is no good answer yet; a report that presents it as a "
-        "recommendation is over-reading its own output."
+    assert top.score < 0.60, (
+        "The top-ranked candidate stays below the MODERATE evidence band. The ranking "
+        "is telling the reader there is no good answer yet; a report that presents it "
+        "as a recommendation is over-reading its own output."
     )
+    assert top.score < max(hypothesis.score for hypothesis in triage.values()), (
+        "The accepted candidate still does not top the raw score table. If it ever "
+        "does, check that a gate was not quietly demoted into a score term."
+    )
+
+
+def test_nicotinamide_is_rejected_once_its_own_liability_is_recorded(
+    triage: dict[str, DrugHypothesis],
+) -> None:
+    """GP-14, applied against the direction that flatters us.
+
+    Nicotinamide moves both arms of this mechanism at once: it feeds the NAD+ pool
+    SIRT2 consumes and supplies the product that inhibits SIRT2, and in the founding
+    paper for the axis it *lowered* BubR1 protein when used as the sirtuin inhibitor.
+    Its `worsens_cin` cell had nonetheless been recorded as assessed-and-negative on
+    a UV-driven skin-cancer trial that measures no chromosome number and that did not
+    replicate in a second phase 3 population. Withdrawing that entry leaves the cell
+    blank, which is the truth, and blank blocks in a chromosomal-instability disorder
+    (ADR 0011).
+
+    The point is not that nicotinamide is dangerous. It is that a gate cleared on
+    evidence orthogonal to the agent's own most plausible harm mechanism was never a
+    cleared gate.
+    """
+    nam = triage["DRUG-NAM"]
+    assert nam.worsens_chromosomal_instability is None, (
+        "Unassessed must stay unassessed. A 0 here asserts that somebody measured "
+        "chromosome missegregation under this agent, and nobody has."
+    )
+    assert nam.rejected
+    assert nam.rejection_reasons[0] is RejectionReason.ONCOGENIC_RISK
+    assert nam.directions_agree is None
+    assert nam.observed_direction is EffectDirection.CONTEXT_DEPENDENT
 
 
 def test_no_accepted_hypothesis_is_wrong_signed(triage: dict[str, DrugHypothesis]) -> None:
@@ -449,3 +493,68 @@ def test_every_reference_id_used_is_defined(catalog: DrugCatalog) -> None:
         "reference list padded with unused citations makes the sourcing look denser "
         "than it is."
     )
+
+
+# ------------------------------------------------- catalogue provenance labelling
+
+
+@pytest.mark.unit
+def test_literature_rows_are_not_labelled_as_fictional_agents(
+    mechanism: MechanismHypothesis, catalog: DrugCatalog
+) -> None:
+    """The BUB1B evidence must not claim to describe invented drugs.
+
+    `generate` appended ``SYNTHETIC_CATALOGUE_LIMITATION`` unconditionally, so all
+    89 rows of this literature-curated run carried "Derived from a SYNTHETIC drug
+    catalogue describing fictional agents" -- a false provenance claim in the field
+    whose only job is provenance, contradicting ADR 0022, the TSV headers and
+    `docs/maturity-ledger.md`.
+
+    It survived because nothing asserted the label in *either* direction. A judge
+    reproducing this run would have read "fictional agents" on every cited row.
+    """
+    result = generate_drug_hypotheses(mechanism=mechanism, catalog=catalog, clock=demo_clock())
+
+    offenders = [
+        item.evidence_id
+        for item in result.evidence
+        if SYNTHETIC_CATALOGUE_LIMITATION in (item.limitations or "")
+    ]
+    assert not offenders, (
+        f"{len(offenders)} literature-derived evidence row(s) are labelled synthetic.\n\n"
+        "Remediation: the catalogue's provenance is declared via "
+        "DrugCatalog(synthetic=...), not inferred from its version string. Pass "
+        "synthetic=False for anything under knowledge/literature/ (ADR 0022)."
+    )
+    assert all(
+        LITERATURE_CATALOGUE_LIMITATION in (item.limitations or "") for item in result.evidence
+    ), "every literature row must still carry its own caveat -- silence overstates it"
+
+
+@pytest.mark.unit
+def test_a_synthetic_catalogue_is_still_labelled_synthetic(
+    mechanism: MechanismHypothesis,
+) -> None:
+    """The other half of the same check (GP-20).
+
+    Without this, the fix above could be 'achieved' by deleting the synthetic label
+    everywhere, which is the more dangerous failure: a fabricated catalogue reading
+    as real pharmacology.
+    """
+    synthetic = DrugCatalog.from_tsv(CATALOG_PATH, version="synthetic-v0.0", synthetic=True)
+    result = generate_drug_hypotheses(mechanism=mechanism, catalog=synthetic, clock=demo_clock())
+
+    assert result.evidence, "the fixture must produce rows for this test to mean anything"
+    assert all(
+        SYNTHETIC_CATALOGUE_LIMITATION in (item.limitations or "") for item in result.evidence
+    )
+    assert not any(
+        LITERATURE_CATALOGUE_LIMITATION in (item.limitations or "") for item in result.evidence
+    )
+
+
+@pytest.mark.unit
+def test_provenance_defaults_to_synthetic_when_undeclared() -> None:
+    """A caller who forgets gets the caveat that overstates, never the one that
+    understates. Default-deny, as GP-20 requires."""
+    assert DrugCatalog.from_tsv(CATALOG_PATH, version="unspecified-v0").synthetic is True

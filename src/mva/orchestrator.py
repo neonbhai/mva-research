@@ -629,7 +629,7 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
 
     # ---------------------------------------------------------------- drugs
     catalog = DrugCatalog.from_tsv(
-        knowledge_root / "public" / "drug_catalog.tsv", version="synthetic-v0.0"
+        knowledge_root / "public" / "drug_catalog.tsv", version="synthetic-v0.0", synthetic=True
     )
     triage = generate_drug_hypotheses(mechanism=mechanism, catalog=catalog, clock=context.clock)
     ledger.extend(triage.evidence)
