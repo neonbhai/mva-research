@@ -1,5 +1,16 @@
 {
   "records": {
+    "10898945": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Sestini S",
+      "first_author_surname": "Sestini",
+      "journal": "Arch Biochem Biophys",
+      "pmid": "10898945",
+      "pubdate": "2000 Jul 15",
+      "title": "Enzyme activities leading to NAD synthesis in human lymphocytes.",
+      "year": 2000
+    },
     "11932988": {
       "epub_year": null,
       "epubdate": "",
@@ -9,6 +20,17 @@
       "pmid": "11932988",
       "pubdate": "2002 Apr 15",
       "title": "High risk of malignancy in mosaic variegated aneuploidy syndrome.",
+      "year": 2002
+    },
+    "12142092": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Bussink J",
+      "first_author_surname": "Bussink",
+      "journal": "Radiother Oncol",
+      "pmid": "12142092",
+      "pubdate": "2002 Jun",
+      "title": "Pharmacology and toxicity of nicotinamide combined with domperidone during fractionated radiotherapy.",
       "year": 2002
     },
     "12297502": {
@@ -21,6 +43,28 @@
       "pubdate": "2002 Nov 22",
       "title": "Inhibition of silencing and accelerated aging by nicotinamide, a putative negative regulator of yeast sir2 and human SIRT1.",
       "year": 2002
+    },
+    "12379464": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Spronck JC",
+      "first_author_surname": "Spronck",
+      "journal": "Mutat Res",
+      "pmid": "12379464",
+      "pubdate": "2002 Oct 31",
+      "title": "Niacin deficiency increases spontaneous and etoposide-induced chromosomal instability in rat bone marrow cells in vivo.",
+      "year": 2002
+    },
+    "14522996": {
+      "epub_year": 2003,
+      "epubdate": "2003 Sep 30",
+      "first_author": "Jackson MD",
+      "first_author_surname": "Jackson",
+      "journal": "J Biol Chem",
+      "pmid": "14522996",
+      "pubdate": "2003 Dec 19",
+      "title": "Mechanism of nicotinamide inhibition and transglycosidation by Sir2 histone/protein deacetylases.",
+      "year": 2003
     },
     "15043959": {
       "epub_year": null,
@@ -44,6 +88,28 @@
       "title": "BubR1 insufficiency causes early onset of aging-associated phenotypes and infertility in mice.",
       "year": 2004
     },
+    "15269219": {
+      "epub_year": 2004,
+      "epubdate": "2004 Jul 21",
+      "first_author": "Schmidt MT",
+      "first_author_surname": "Schmidt",
+      "journal": "J Biol Chem",
+      "pmid": "15269219",
+      "pubdate": "2004 Sep 17",
+      "title": "Coenzyme specificity of Sir2 protein deacetylases: implications for physiological regulation.",
+      "year": 2004
+    },
+    "15301953": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Marcotte PA",
+      "first_author_surname": "Marcotte",
+      "journal": "Anal Biochem",
+      "pmid": "15301953",
+      "pubdate": "2004 Sep 1",
+      "title": "Fluorescence assay of SIRT protein deacetylases using an acetylated peptide substrate and a secondary trypsin reaction.",
+      "year": 2004
+    },
     "15475955": {
       "epub_year": 2004,
       "epubdate": "2004 Oct 10",
@@ -64,6 +130,17 @@
       "pmid": "15592459",
       "pubdate": "2005 Jan",
       "title": "The human mitotic checkpoint protein BubR1 regulates chromosome-spindle attachments.",
+      "year": 2005
+    },
+    "15780941": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Avalos JL",
+      "first_author_surname": "Avalos",
+      "journal": "Mol Cell",
+      "pmid": "15780941",
+      "pubdate": "2005 Mar 18",
+      "title": "Mechanism of sirtuin inhibition by nicotinamide: altering the NAD(+) cosubstrate specificity of a Sir2 enzyme.",
       "year": 2005
     },
     "16182441": {
@@ -110,6 +187,17 @@
       "title": "Surveillance for Wilms tumour in at-risk children: pragmatic recommendations for best practice.",
       "year": 2006
     },
+    "17175568": {
+      "epub_year": 2006,
+      "epubdate": "2006 Dec 15",
+      "first_author": "Perel P",
+      "first_author_surname": "Perel",
+      "journal": "BMJ",
+      "pmid": "17175568",
+      "pubdate": "2007 Jan 27",
+      "title": "Comparison of treatment effects between animal experiments and clinical trials: systematic review.",
+      "year": 2007
+    },
     "17189715": {
       "epub_year": 2006,
       "epubdate": "2006 Dec 28",
@@ -132,6 +220,17 @@
       "title": "Aneuploidy acts both oncogenically and as a tumor suppressor.",
       "year": 2007
     },
+    "17604275": {
+      "epub_year": 2007,
+      "epubdate": "2007 Jun 29",
+      "first_author": "Hara N",
+      "first_author_surname": "Hara",
+      "journal": "J Biol Chem",
+      "pmid": "17604275",
+      "pubdate": "2007 Aug 24",
+      "title": "Elevation of cellular NAD levels by nicotinic acid and involvement of nicotinic acid phosphoribosyltransferase in human cells.",
+      "year": 2007
+    },
     "17616695": {
       "epub_year": null,
       "epubdate": "",
@@ -141,6 +240,17 @@
       "pmid": "17616695",
       "pubdate": "2007 Jul 1",
       "title": "Histone deacetylase inhibitors induce premature sister chromatid separation and override the mitotic spindle assembly checkpoint.",
+      "year": 2007
+    },
+    "17725178": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Menon RM",
+      "first_author_surname": "Menon",
+      "journal": "Int J Clin Pharmacol Ther",
+      "pmid": "17725178",
+      "pubdate": "2007 Aug",
+      "title": "Plasma and urine pharmacokinetics of niacin and its metabolites from an extended-release niacin formulation.",
       "year": 2007
     },
     "18516091": {
@@ -187,6 +297,17 @@
       "title": "BubR1 acetylation at prometaphase is required for modulating APC/C activity and timing of mitosis.",
       "year": 2009
     },
+    "19703994": {
+      "epub_year": 2009,
+      "epubdate": "2009 Aug 24",
+      "first_author": "Watson M",
+      "first_author_surname": "Watson",
+      "journal": "Mol Cell Biol",
+      "pmid": "19703994",
+      "pubdate": "2009 Nov",
+      "title": "The small molecule GMX1778 is a potent inhibitor of NAD+ biosynthesis: strategy for enhanced therapy in nicotinic acid phosphoribosyltransferase 1-deficient tumors.",
+      "year": 2009
+    },
     "20123995": {
       "epub_year": 2010,
       "epubdate": "2010 Feb 1",
@@ -207,6 +328,17 @@
       "pmid": "20516114",
       "pubdate": "2010 Jun 15",
       "title": "Molecular causes for BUBR1 dysfunction in the human cancer predisposition syndrome mosaic variegated aneuploidy.",
+      "year": 2010
+    },
+    "20599792": {
+      "epub_year": 2010,
+      "epubdate": "2010 Jun 25",
+      "first_author": "Weidele K",
+      "first_author_surname": "Weidele",
+      "journal": "Biochem Pharmacol",
+      "pmid": "20599792",
+      "pubdate": "2010 Oct 1",
+      "title": "Ex vivo supplementation with nicotinic acid enhances cellular poly(ADP-ribosyl)ation and improves cell viability in human peripheral blood mononuclear cells.",
       "year": 2010
     },
     "20606092": {
@@ -286,6 +418,17 @@
       "title": "Aggressive combination drug therapy in very early polyarticular juvenile idiopathic arthritis (ACUTE-JIA): a multicentre randomised open-label clinical trial.",
       "year": 2011
     },
+    "22014574": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Kim HS",
+      "first_author_surname": "Kim",
+      "journal": "Cancer Cell",
+      "pmid": "22014574",
+      "pubdate": "2011 Oct 18",
+      "title": "SIRT2 maintains genome integrity and suppresses tumorigenesis through regulating APC/C activity.",
+      "year": 2011
+    },
     "22048312": {
       "epub_year": 2011,
       "epubdate": "2011 Nov 2",
@@ -341,6 +484,17 @@
       "title": "Increased expression of BubR1 protects against aneuploidy and cancer and extends healthy lifespan.",
       "year": 2013
     },
+    "23300461": {
+      "epub_year": 2012,
+      "epubdate": "2012 Dec 27",
+      "first_author": "Wijshake T",
+      "first_author_surname": "Wijshake",
+      "journal": "PLoS Genet",
+      "pmid": "23300461",
+      "pubdate": "2012",
+      "title": "Reduced life- and healthspan in mice carrying a mono-allelic BubR1 MVA mutation.",
+      "year": 2012
+    },
     "23345399": {
       "epub_year": 2013,
       "epubdate": "2013 Jan 23",
@@ -361,6 +515,17 @@
       "pmid": "23554030",
       "pubdate": "2013 Sep",
       "title": "A pediatric phase 1 trial of vorinostat and temozolomide in relapsed or refractory primary brain or spinal cord tumors: a Children's Oncology Group phase 1 consortium study.",
+      "year": 2013
+    },
+    "24097869": {
+      "epub_year": 2013,
+      "epubdate": "2013 Oct 4",
+      "first_author": "Shames DS",
+      "first_author_surname": "Shames",
+      "journal": "Clin Cancer Res",
+      "pmid": "24097869",
+      "pubdate": "2013 Dec 15",
+      "title": "Loss of NAPRT1 expression by tumor-specific promoter methylation provides a novel predictive biomarker for NAMPT inhibitors.",
       "year": 2013
     },
     "24133140": {
@@ -407,6 +572,28 @@
       "title": "SIRT2 induces the checkpoint kinase BubR1 to increase lifespan.",
       "year": 2014
     },
+    "25014686": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Landray MJ",
+      "first_author_surname": "Landray",
+      "journal": "N Engl J Med",
+      "pmid": "25014686",
+      "pubdate": "2014 Jul 17",
+      "title": "Effects of extended-release niacin with laropiprant in high-risk patients.",
+      "year": 2014
+    },
+    "25014706": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Anderson TJ",
+      "first_author_surname": "Anderson",
+      "journal": "N Engl J Med",
+      "pmid": "25014706",
+      "pubdate": "2014 Jul 17",
+      "title": "Safety profile of extended-release niacin in the AIM-HIGH trial.",
+      "year": 2014
+    },
     "25205676": {
       "epub_year": 2014,
       "epubdate": "2014 Sep 9",
@@ -440,6 +627,17 @@
       "title": "Short- and long-term effects of chromosome mis-segregation and aneuploidy.",
       "year": 2015
     },
+    "26330291": {
+      "epub_year": 2015,
+      "epubdate": "2015 Sep 2",
+      "first_author": "Song TY",
+      "first_author_surname": "Song",
+      "journal": "Biogerontology",
+      "pmid": "26330291",
+      "pubdate": "2015 Dec",
+      "title": "A Nampt inhibitor FK866 mimics vitamin B3 deficiency by causing senescence of human fibroblastic Hs68 cells via attenuation of NAD(+)-SIRT1 signaling.",
+      "year": 2015
+    },
     "26404941": {
       "epub_year": 2015,
       "epubdate": "2015 Sep 24",
@@ -462,6 +660,28 @@
       "title": "A Phase 3 Randomized Trial of Nicotinamide for Skin-Cancer Chemoprevention.",
       "year": 2015
     },
+    "26675378": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Duarte-Pereira S",
+      "first_author_surname": "Duarte-Pereira",
+      "journal": "Oncotarget",
+      "pmid": "26675378",
+      "pubdate": "2016 Jan 12",
+      "title": "Extensive regulation of nicotinate phosphoribosyltransferase (NAPRT) expression in human tissues and tumors.",
+      "year": 2016
+    },
+    "26796034": {
+      "epub_year": 2016,
+      "epubdate": "2016 Jan 21",
+      "first_author": "Chiang YL",
+      "first_author_surname": "Chiang",
+      "journal": "Org Biomol Chem",
+      "pmid": "26796034",
+      "pubdate": "2016 Feb 21",
+      "title": "An improved fluorogenic assay for SIRT1, SIRT2, and SIRT3.",
+      "year": 2016
+    },
     "27721479": {
       "epub_year": 2016,
       "epubdate": "2016 Oct 10",
@@ -472,6 +692,17 @@
       "pubdate": "2016 Oct 10",
       "title": "Nicotinamide riboside is uniquely and orally bioavailable in mice and humans.",
       "year": 2016
+    },
+    "28216063": {
+      "epub_year": 2017,
+      "epubdate": "2017 Feb 13",
+      "first_author": "Weidele K",
+      "first_author_surname": "Weidele",
+      "journal": "DNA Repair (Amst)",
+      "pmid": "28216063",
+      "pubdate": "2017 Apr",
+      "title": "The NAD(+) precursor nicotinic acid improves genomic integrity in human peripheral blood mononuclear cells after X-irradiation.",
+      "year": 2017
     },
     "28553959": {
       "epub_year": 2017,
@@ -495,6 +726,28 @@
       "title": "Chromosome Mis-segregation Generates Cell-Cycle-Arrested Cells with Complex Karyotypes that Are Eliminated by the Immune System.",
       "year": 2017
     },
+    "29100430": {
+      "epub_year": 2017,
+      "epubdate": "2017 Sep 12",
+      "first_author": "Cole J",
+      "first_author_surname": "Cole",
+      "journal": "Oncotarget",
+      "pmid": "29100430",
+      "pubdate": "2017 Sep 29",
+      "title": "Novel NAPRT specific antibody identifies small cell lung cancer and neuronal cancers as promising clinical indications for a NAMPT inhibitor/niacin co-administration strategy.",
+      "year": 2017
+    },
+    "29394327": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Wong CH",
+      "first_author_surname": "Wong",
+      "journal": "Biostatistics",
+      "pmid": "29394327",
+      "pubdate": "2019 Apr 1",
+      "title": "Estimation of clinical trial success rates and related parameters.",
+      "year": 2019
+    },
     "29498925": {
       "epub_year": 2018,
       "epubdate": "2018 Mar 2",
@@ -504,6 +757,17 @@
       "pmid": "29498925",
       "pubdate": "2018 May 1",
       "title": "Dasatinib in Pediatric Patients With Chronic Myeloid Leukemia in Chronic Phase: Results From a Phase II Trial.",
+      "year": 2018
+    },
+    "29514072": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Mitchell SJ",
+      "first_author_surname": "Mitchell",
+      "journal": "Cell Metab",
+      "pmid": "29514072",
+      "pubdate": "2018 Mar 6",
+      "title": "Nicotinamide Improves Aspects of Healthspan, but Not Lifespan, in Mice.",
       "year": 2018
     },
     "29599478": {
@@ -516,6 +780,17 @@
       "pubdate": "2018 Mar 29",
       "title": "Chronic nicotinamide riboside supplementation is well-tolerated and elevates NAD(+) in healthy middle-aged and older adults.",
       "year": 2018
+    },
+    "30668728": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Simmons AJ",
+      "first_author_surname": "Simmons",
+      "journal": "Hum Mol Genet",
+      "pmid": "30668728",
+      "pubdate": "2019 Jun 1",
+      "title": "Nearly complete deletion of BubR1 causes microcephaly through shortened mitosis and massive cell death.",
+      "year": 2019
     },
     "30672136": {
       "epub_year": 2019,
@@ -537,6 +812,39 @@
       "pmid": "31121430",
       "pubdate": "2019 Aug 1",
       "title": "Molecular design and anticancer activities of small-molecule monopolar spindle 1 inhibitors: A Medicinal chemistry perspective.",
+      "year": 2019
+    },
+    "31738183": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Sieben CJ",
+      "first_author_surname": "Sieben",
+      "journal": "J Clin Invest",
+      "pmid": "31738183",
+      "pubdate": "2020 Jan 2",
+      "title": "BubR1 allelic effects drive phenotypic heterogeneity in mosaic-variegated aneuploidy progeria syndrome.",
+      "year": 2020
+    },
+    "31827124": {
+      "epub_year": 2019,
+      "epubdate": "2019 Dec 11",
+      "first_author": "Hingorani AD",
+      "first_author_surname": "Hingorani",
+      "journal": "Sci Rep",
+      "pmid": "31827124",
+      "pubdate": "2019 Dec 11",
+      "title": "Improving the odds of drug development success through human genomics: modelling study.",
+      "year": 2019
+    },
+    "31830040": {
+      "epub_year": 2019,
+      "epubdate": "2019 Dec 12",
+      "first_author": "King EA",
+      "first_author_surname": "King",
+      "journal": "PLoS Genet",
+      "pmid": "31830040",
+      "pubdate": "2019 Dec",
+      "title": "Are drug targets with genetic support twice as likely to be approved? Revised estimates of the impact of genetic support for drug mechanisms on the probability of drug approval.",
       "year": 2019
     },
     "32386566": {
@@ -561,6 +869,39 @@
       "title": "Spindle assembly checkpoint activation and silencing at kinetochores.",
       "year": 2021
     },
+    "36856616": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Allen NC",
+      "first_author_surname": "Allen",
+      "journal": "N Engl J Med",
+      "pmid": "36856616",
+      "pubdate": "2023 Mar 2",
+      "title": "Nicotinamide for Skin-Cancer Chemoprevention in Transplant Recipients.",
+      "year": 2023
+    },
+    "37108579": {
+      "epub_year": 2023,
+      "epubdate": "2023 Apr 18",
+      "first_author": "Zessin M",
+      "first_author_surname": "Zessin",
+      "journal": "Int J Mol Sci",
+      "pmid": "37108579",
+      "pubdate": "2023 Apr 18",
+      "title": "Continuous Fluorescent Sirtuin Activity Assay Based on Fatty Acylated Lysines.",
+      "year": 2023
+    },
+    "37353796": {
+      "epub_year": 2023,
+      "epubdate": "2023 Jun 23",
+      "first_author": "Fermaglich LJ",
+      "first_author_surname": "Fermaglich",
+      "journal": "Orphanet J Rare Dis",
+      "pmid": "37353796",
+      "pubdate": "2023 Jun 23",
+      "title": "A comprehensive study of the rare diseases and conditions targeted by orphan drug designations and approvals over the forty years of the Orphan Drug Act.",
+      "year": 2023
+    },
     "38366625": {
       "epub_year": null,
       "epubdate": "",
@@ -583,6 +924,17 @@
       "title": "Update on Surveillance for Wilms Tumor and Hepatoblastoma in Beckwith-Wiedemann Syndrome and Other Predisposition Syndromes.",
       "year": 2024
     },
+    "7607932": {
+      "epub_year": null,
+      "epubdate": "",
+      "first_author": "Hoskin PJ",
+      "first_author_surname": "Hoskin",
+      "journal": "Int J Radiat Oncol Biol Phys",
+      "pmid": "7607932",
+      "pubdate": "1995 Jul 15",
+      "title": "Administration of nicotinamide during chart: pharmacokinetics, dose escalation, and clinical toxicity.",
+      "year": 1995
+    },
     "8516088": {
       "epub_year": null,
       "epubdate": "",
@@ -595,7 +947,7 @@
       "year": 1993
     }
   },
-  "resolved_utc": "2026-08-28T13:42:04.224137Z",
+  "resolved_utc": "2026-08-28T20:01:31.824797Z",
   "schema": "mva.citations.ledger/1",
   "source": "NCBI E-utilities esummary (db=pubmed) via https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 }

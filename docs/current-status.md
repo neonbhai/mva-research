@@ -48,7 +48,7 @@ GRCh38 `2026-08-22` (185 MB), HPO `2026-06-23` (66 MB), gnomAD v4.1 constraint
   1 accepted, 12 rejected, 89 evidence rows; the MPS1 inhibitor ranks **last**
   with `WRONG_DIRECTION`, and the highest-scoring agent is rejected anyway. Case:
   `docs/track2-hypothesis.md`. Asserted by
-  `tests/unit/test_track2_bub1b.py` (22 tests), including a both-directions
+  `tests/unit/test_track2_bub1b.py` (26 tests), including a both-directions
   citation check over `SOURCES.md`. **Deliberately not wired into the composition
   root** — see ADR 0022.
 - 756 tests passing.

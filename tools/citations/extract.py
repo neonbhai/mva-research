@@ -73,8 +73,19 @@ __all__ = [
 #: gene-disease PMIDs with no written author/year/journal beside them, so only the
 #: existence half of this check could ever apply to it, at ~10x the request budget.
 #: That is a real uncovered surface and it is named here rather than left implicit.
+#: Every file whose written citations are checked against PubMed.
+#:
+#: A document left off this list is not "unchecked but fine" — it is unchecked and
+#: silent about it, which is the exact shape of the failure this whole tool exists
+#: to catch. The claims ledger and the quantified-uncertainty note were both added
+#: here after review found they carried PMIDs no gate had ever looked at.
+#:
+#: Adding a file is cheap. Leaving one off is invisible. Prefer over-inclusion.
 DOCUMENT_SOURCES: Final[tuple[str, ...]] = (
     "docs/track2-hypothesis.md",
+    "docs/track2-claims-ledger.md",
+    "docs/track2-quantified-uncertainty.md",
+    "docs/track2-drugs-to-avoid.md",
     "knowledge/literature/",
 )
 

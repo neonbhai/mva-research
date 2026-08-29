@@ -2,10 +2,16 @@
 
 Every row of `mechanisms.tsv`, `mechanism_meta.tsv` and `drug_catalog.tsv` is backed by
 one or more of the references below. Each reference was resolved against PubMed
-(title, authors, journal, volume, pages, PMID) before being written down; none is
-recalled from memory. Where a claim is **not** backed by a publication it is written
-into the table's `uncertainty` or `notes` cell as an inference and is graded
-`inference` rather than `literature_mechanism`.
+(title, authors, journal, volume, pages, PMID); none is recalled from memory. Where a
+claim is **not** backed by a publication it is written into the table's `uncertainty` or
+`notes` cell as an inference and is graded `inference` rather than
+`literature_mechanism`.
+
+Resolving a reference is an **identity** check: it establishes that the paper exists and
+is the one named. It does not establish that the paper supports the sentence attached to
+it. That second check was run separately and is recorded in
+`docs/track2-claims-ledger.md`; where it changed what a reference can carry, the note
+below says so.
 
 **Nothing here is medical advice.** These tables describe a *gene* and public
 pharmacology. They contain no patient data and were authored with no access to any
@@ -72,6 +78,32 @@ pharmacology. They contain no patient data and were authored with no access to a
 | R53 | European Medicines Agency. Translarna (ataluren) — EMA recommends non-renewal of authorisation. <https://www.ema.europa.eu/en/medicines/human/EPAR/translarna> (regulatory record; EU conditional marketing authorisation not renewed, European Commission decision effective 2025). |
 | R54 | Kalish JM, et al. (2024) Update on surveillance for Wilms tumor and hepatoblastoma in Beckwith-Wiedemann syndrome and other predisposition syndromes. *Clin Cancer Res* 30(23):5260-5269. PMID 39320341 |
 | R55 | Hummel TR, et al. (2013) A pediatric phase 1 trial of vorinostat and temozolomide in relapsed or refractory primary brain or spinal cord tumors: a Children's Oncology Group phase 1 consortium study. *Pediatr Blood Cancer* 60(9):1452-7. PMID 23554030 |
+| R56 | Avalos JL, Bever KM, Wolberger C (2005) Mechanism of sirtuin inhibition by nicotinamide: altering the NAD(+) cosubstrate specificity of a Sir2 enzyme. *Mol Cell* 17(6):855-68. PMID 15780941 |
+| R57 | Landray MJ, et al., for the HPS2-THRIVE Collaborative Group (2014) Effects of extended-release niacin with laropiprant in high-risk patients. *N Engl J Med* 371(3):203-12. PMID 25014686 |
+| R58 | Marcotte PA, et al. (2004) Fluorescence assay of SIRT protein deacetylases using an acetylated peptide substrate and a secondary trypsin reaction. *Anal Biochem* 332(1):90-9. PMID 15301953 |
+| R59 | Sieben CJ, et al. (2020) BubR1 allelic effects drive phenotypic heterogeneity in mosaic-variegated aneuploidy progeria syndrome. *J Clin Invest* 130(1):171-188. PMID 31738183 |
+| R60 | Simmons AJ, et al. (2019) Nearly complete deletion of BubR1 causes microcephaly through shortened mitosis and massive cell death. *Hum Mol Genet* 28(11):1822-1836. PMID 30668728 |
+| R61 | Wijshake T, et al. (2012) Reduced life- and healthspan in mice carrying a mono-allelic BubR1 MVA mutation. *PLoS Genet* 8(12):e1003138. PMID 23300461 |
+| R62 | Anderson TJ, et al. (2014) Safety profile of extended-release niacin in the AIM-HIGH trial. *N Engl J Med* 371(3):288-90. PMID 25014706 |
+| R63 | Weidele K, et al. (2017) The NAD(+) precursor nicotinic acid improves genomic integrity in human peripheral blood mononuclear cells after X-irradiation. *DNA Repair (Amst)* 52:12-23. PMID 28216063 |
+| R64 | Spronck JC, Kirkland JB (2002) Niacin deficiency increases spontaneous and etoposide-induced chromosomal instability in rat bone marrow cells in vivo. *Mutat Res* 508(1-2):83-97. PMID 12379464 |
+| R65 | Zessin M, et al. (2023) Continuous fluorescent sirtuin activity assay based on fatty acylated lysines. *Int J Mol Sci* 24(8):7416. PMID 37108579 |
+| R66 | Chiang YL, Lin H (2016) An improved fluorogenic assay for SIRT1, SIRT2, and SIRT3. *Org Biomol Chem* 14(7):2186-90. PMID 26796034 |
+| R67 | Allen NC, et al. (2023) Nicotinamide for skin-cancer chemoprevention in transplant recipients. *N Engl J Med* 388(9):804-812. PMID 36856616 |
+| R68 | Hoskin PJ, et al. (1995) Administration of nicotinamide during CHART: pharmacokinetics, dose escalation, and clinical toxicity. *Int J Radiat Oncol Biol Phys* 32(4):1111-9. PMID 7607932 |
+| R69 | Bussink J, et al. (2002) Pharmacology and toxicity of nicotinamide combined with domperidone during fractionated radiotherapy. *Radiother Oncol* 63(3):285-91. PMID 12142092 |
+| R70 | Menon RM, et al. (2007) Plasma and urine pharmacokinetics of niacin and its metabolites from an extended-release niacin formulation. *Int J Clin Pharmacol Ther* 45(8):448-54. PMID 17725178 |
+| R71 | Kim HS, et al. (2011) SIRT2 maintains genome integrity and suppresses tumorigenesis through regulating APC/C activity. *Cancer Cell* 20(4):487-99. PMID 22014574 |
+| R72 | Mitchell SJ, et al. (2018) Nicotinamide improves aspects of healthspan, but not lifespan, in mice. *Cell Metab* 27(3):667-676.e4. PMID 29514072 |
+| R73 | Hara N, et al. (2007) Elevation of cellular NAD levels by nicotinic acid and involvement of nicotinic acid phosphoribosyltransferase in human cells. *J Biol Chem* 282(34):24574-82. PMID 17604275 |
+| R74 | Duarte-Pereira S, et al. (2016) Extensive regulation of nicotinate phosphoribosyltransferase (NAPRT) expression in human tissues and tumors. *Oncotarget* 7(2):1973-83. PMID 26675378 |
+| R75 | Cole J, et al. (2017) Novel NAPRT specific antibody identifies small cell lung cancer and neuronal cancers as promising clinical indications for a NAMPT inhibitor/niacin co-administration strategy. *Oncotarget* 8(44):77846-77859. PMID 29100430 |
+| R76 | Shames DS, et al. (2013) Loss of NAPRT1 expression by tumor-specific promoter methylation provides a novel predictive biomarker for NAMPT inhibitors. *Clin Cancer Res* 19(24):6912-23. PMID 24097869 |
+| R77 | Weidele K, et al. (2010) Ex vivo supplementation with nicotinic acid enhances cellular poly(ADP-ribosyl)ation and improves cell viability in human peripheral blood mononuclear cells. *Biochem Pharmacol* 80(7):1103-12. PMID 20599792 |
+| R78 | Sestini S, et al. (2000) Enzyme activities leading to NAD synthesis in human lymphocytes. *Arch Biochem Biophys* 379(2):277-82. PMID 10898945 |
+| R79 | Song TY, et al. (2015) A Nampt inhibitor FK866 mimics vitamin B3 deficiency by causing senescence of human fibroblastic Hs68 cells via attenuation of NAD(+)-SIRT1 signaling. *Biogerontology* 16(6):789-800. PMID 26330291 |
+| R80 | Watson M, et al. (2009) The small molecule GMX1778 is a potent inhibitor of NAD+ biosynthesis: strategy for enhanced therapy in nicotinic acid phosphoribosyltransferase 1-deficient tumors. *Mol Cell Biol* 29(21):5872-88. PMID 19703994 |
+| R81 | GTEx Portal, GTEx Analysis v8 median gene expression across 54 tissues, gene *NAPRT* (ENSG00000147813). <https://gtexportal.org/home/gene/NAPRT> (database record, queried 2026-08-29; no PMID — the v8 companion paper carries a collective author only). |
 
 Ontology identifiers used in `mechanisms.tsv` were resolved live against their
 authorities: HGNC:1149 and UniProt O60566 and ENSG00000156970 (HGNC REST, gene BUB1B,
@@ -91,12 +123,12 @@ HP:0001511 *Intrauterine growth retardation*; HP:0002664 *Neoplasm*; MONDO:00097
 | L04 | The checkpoint complex restrains APC/C-Cdc20; failure permits premature anaphase | R13, R14 | demonstrated, strong |
 | L05 | BubR1 recruits PP2A-B56 to kinetochores to stabilise microtubule attachments — a route independent of the checkpoint | R09, R11, R12 | demonstrated, strong |
 | L06 | Checkpoint failure permits premature chromatid separation | R03, R04, R06 | demonstrated, strong |
-| L07 | Premature chromatid separation yields whole-chromosome missegregation; the two readouts appear at different residual-BubR1 levels | R04 | demonstrated, strong |
+| L07 | Premature chromatid separation yields whole-chromosome missegregation; the two readouts appear at different residual-BubR1 levels, and PCS is not a pure function of BubR1 level (R61: two mouse genotypes at the same residual wild-type BubR1 differ in PCS at the same aneuploidy rate) | R04, R61 | demonstrated, strong |
 | L08 | Destabilised attachments cause missegregation | R09, R12 | demonstrated, moderate |
 | L09 | Aneuploidy imposes proteotoxic and metabolic stress | R21, R22, R23, R24 | demonstrated, strong |
 | L10 | Missegregation triggers p53/p16 arrest, senescence and immune clearance; the response is both protective and pathological | R17, R18, R25, R26, R27 | demonstrated, strong (node flagged **compensatory**) |
 | L11 | Aneuploidy-associated stress contributes to the arrest/senescence response | — | **INFERRED** |
-| L12 | Progenitor attrition produces growth restriction and microcephaly | R15 (mouse phenotype), R20 (alternative ciliogenesis route) | **INFERRED — weakest link** |
+| L12 | Progenitor attrition produces growth restriction and microcephaly | R15 (mouse phenotype), R20 (alternative ciliogenesis route), R60 (mouse cortex tolerates ~1.8% residual BubR1 without microcephaly; only near-complete deletion produces it — a tissue-specific disanalogy with the human phenotype) | **INFERRED — weakest link** |
 | L13 | Aneuploidy raises the probability of an oncogenic karyotype; the relation is non-monotonic | R01, R02, R08, R28, R29 | demonstrated, moderate |
 
 ## Therapeutic direction — the load-bearing evidence
@@ -106,10 +138,11 @@ HP:0001511 *Intrauterine growth retardation*; HP:0002664 *Neoplasm*; MONDO:00097
 | Raising BubR1 in MVA **patient cells** restores checkpoint activity (ectopic expression rescue) | R03 |
 | Raising BubR1 in vivo reduces aneuploidy, reduces tumorigenesis and extends healthy lifespan | R16 |
 | Lowering BubR1 in vivo produces aneuploidy, progeroid phenotypes and shortened lifespan | R15 |
-| BubR1 function is dosage-dependent with a threshold near 50% residual protein | R04 |
+| BubR1 function is dosage-dependent, and the relationship is a graded dose-response rather than a step. No published experiment locates a threshold: R04 scored premature chromatid separation and accumulated aneuploidy in chronically depleted HeLa clones with no data point between 14% and 58% residual, while R03 scored per-division missegregation by live imaging in the same cell type and found ~13% residual had "virtually no impact", with gross missegregation only at ~6%. The two never measured the same quantity, so the apparent 4x disagreement is not evidence about where a threshold sits. MVA patient cells carry full-length BubR1 decreased 2-6 fold against healthy controls (roughly 17-50% residual, R03), which is the level an intervention has to move and sits inside the interval neither study sampled | R03, R04 |
 | MVA can be caused by a purely regulatory allele that only lowers BUB1B expression | R05 |
-| NAD+/SIRT2 holds BubR1 K668 deacetylated; NMN raises BubR1 abundance in vivo; SIRT2 overexpression extends lifespan in BubR1-hypomorphic mice | R19 |
+| NAD+/SIRT2 holds BubR1 K668 deacetylated; NMN raises BubR1 abundance in vivo (500 mg/kg/day i.p., 7 days, wild-type mice aged 3 and 30 months — a restoration of an age-related decline); SIRT2 overexpression extends median lifespan in BubR1-hypomorphic mice by 123% **in males only**, and the animals remained small | R19 |
 | Too much checkpoint protein is not automatically safe (Mad2 overexpression is tumorigenic), though BubR1 overexpression specifically was protective | R30, R16 |
+| Total BubR1 abundance is a floor and a target-engagement readout, not a severity predictor: two mouse genotypes with indistinguishable total BUBR1 and near-identical tissue aneuploidy differ 1.75-fold in median lifespan (343 vs 196 days), and the authors conclude that allelic effects beyond protein level and aneuploidy drive heterogeneity. The same paper still finds that level sets the regime (a 40-90% reduction gives tumour predisposition or mild premature ageing; greater than 90% gives progeroid phenotypes or early postnatal lethality) | R59 |
 
 ## Drug catalogue — row to reference
 
@@ -117,15 +150,15 @@ HP:0001511 *Intrauterine growth retardation*; HP:0002664 *Neoplasm*; MONDO:00097
 |---|---|---|---|
 | DRUG-NMN | R19 (NMN raises BubR1 in vivo) | none | unassessed |
 | DRUG-NR | R37, R38 (raises human NAD+); no BubR1 measurement exists | none | unassessed |
-| DRUG-NAM | R36 (sirtuin inhibition) vs R19 (NAD+/SIRT2 axis) — opposite signs | R41 (ENDIT) | R40 (phase 3, cancer-incidence endpoint, adults, UV-driven) |
-| DRUG-NA | R39 (raises human NAD+ several-fold); no BubR1 measurement exists | R42 | unassessed |
+| DRUG-NAM | R58 (nicotinamide inhibition of **human SIRT2** measured directly, alongside SIRT1) with R36 (the same inhibition against yeast Sir2 and human SIRT1) and R56 (the conserved nicotinamide-binding pocket that explains it) vs R19 (NAD+/SIRT2 axis) — opposite signs, and the *net* intracellular effect of raising NAD+ while supplying the product inhibitor is unmeasured. Numbers now attached to both sides: R65 and R66 give the measured SIRT2 IC50 range, R68 and R69 the peak plasma reached in humans, and R19's own Figure 1A/B has nicotinamide *lowering* BubR1 protein in HeLa at 20 mM for 16 h. R71 is why the inhibitory arm is not a bookkeeping concern in this disease: Sirt2-null mice develop centrosome amplification, aneuploidy and tumours. R72 is the counterweight, and it is real: chronic oral nicotinamide did not raise steady-state tissue nicotinamide in mice, and the one SIRT2 substrate read out went the *favourable* way | R41 (ENDIT) | **unassessed.** R40 (phase 3, cancer-incidence endpoint, adults, UV-driven) was withdrawn from this cell: it measures a different tumour biology, measures no chromosome number, and did not replicate in transplant recipients (R67). No micronucleus, chromosome-aberration or aneuploidy measurement of therapeutic nicotinamide was located in any species |
+| DRUG-NA | R39 (raises human NAD+ several-fold); R70 (2 g extended-release niacin peaks at ~76 µM parent, with the nicotinamide metabolite below that — an order of magnitude under the SIRT2 IC50 range in R65/R66); no BubR1 measurement exists | R42 | **assessed, negative in adults.** R57 with the posted ClinicalTrials.gov NCT00461630 neoplasm serious-AE counts (751/12,838 vs 749/12,835, mean 3.6 y) and R62 (72/1,718 vs 73/1,696, P = 0.87); on chromosomal instability specifically R63 (nicotinic acid *lowered* micronuclei in primary human PBMCs after X-irradiation) and R64 (rat bone marrow in vivo, micronucleus and SCE). R64 also carries the limit: pharmacological intakes were not further protective than adequate ones. Both megatrials enrolled zero participants aged 18 or under |
 | DRUG-ATA | R03 (no transcript from truncating alleles undercuts readthrough); R53 (regulatory status) | R53 | unassessed |
 | DRUG-GEN | R43 (readthrough in a different disorder); R03 (same NMD objection) | standard neonatal use | unassessed |
 | DRUG-MPS1 | R32 (reversine abrogates the checkpoint and causes missegregation); R33 (class in oncology development) | none | R32 — **increases** |
 | DRUG-HDAC | R34 (class overrides the SAC and induces PCS); R35 (the acetylation argument it defeats) | R44, R55 | R34 — **increases** |
-| DRUG-CQ | R31 (chloroquine is aneuploidy-selectively lethal); R23 (aneuploid cells depend on autophagy) | R48 | unassessed |
+| DRUG-CQ | R31 (**chloroquine**, not hydroxychloroquine, is aneuploidy-selectively lethal; direction carried across the class); R23 (aneuploid cells' autophagic degradation is already limited, which is why inhibiting it is selectively lethal) | R48 | unassessed |
 | DRUG-HSP90 | R31 (17-AAG aneuploidy-selective); R22 (aneuploid cells have impaired HSP90-dependent folding) | none | unassessed |
-| DRUG-SEN | R18 (senescent-cell clearance helps BubR1-hypomorphic mice); R46 (dasatinib as senolytic); R27 (the same response suppresses tumours) | R45 | unassessed |
+| DRUG-SEN | R18 (**genetic** senescent-cell clearance helps BubR1-hypomorphic mice — INK-ATTAC, a dimerizer-triggered transgene, not a senolytic drug); R46 (dasatinib as senolytic); R27 (the same response suppresses tumours) | R45 | unassessed |
 | DRUG-METF | R31 (AICAR is aneuploidy-selectively lethal; direction carried across the AMPK class) | standard paediatric type 2 diabetes use | unassessed |
 | DRUG-RAPA | R23, R24 (autophagy and stress in aneuploidy); no measurement of this agent in an aneuploid background | R47 | unassessed |
 
@@ -137,16 +170,21 @@ above. They are listed here so that every reference in this file is accounted fo
 
 | Ref | Where it is used |
 |---|---|
-| R07 | The clinical delineation of MVA subtypes, used for the phenotype description and for the statement that growth restriction and microcephaly are present at birth. |
-| R10 | BubR1 is a **pseudokinase**. This is why no agonist-style pharmacology exists for the protein itself: there is no catalytic activity to stimulate, which is a large part of why the therapeutic handle has to be abundance rather than activity. |
+| R07 | The clinical delineation of MVA subtypes, and the genotype-anchored tumour risk that puts *BUB1B*-MVA over the surveillance threshold: Wilms tumour in 7 of 8 patients with monoallelic *BUB1B* mutations. It does **not** support the statement that microcephaly is structural at birth — its two index patients are *BUB1B*-mutation-negative and lacked microcephaly — and `docs/track2-hypothesis.md` §7.2 no longer cites it for that. |
+| R10 | BubR1 is a **pseudokinase** — human BUBR1 retains the catalytic triad, but the paper shows its putative catalysis is *dispensable* for error-free segregation. This is why no agonist-style pharmacology exists for the protein itself: not that there is nothing to stimulate, but that stimulating it would not help, which is a large part of why the therapeutic handle has to be abundance rather than activity. |
 | R50 | CEP57 causes MVA2 through a centrosomal mechanism, not a checkpoint one — the scalability argument that mechanism is resolved per gene and never per disease label (ASSUMPTION-MECHANISM-03). |
 | R51 | TRIP13 causes a third MVA form through checkpoint silencing. Same argument as R50: one clinical label, three mechanisms, and an agent that raises BubR1 abundance is irrelevant to two of them. |
+| R73 | The origin of the "NAPRT is restricted to gut, liver and kidney" claim, cited in `docs/track2-hypothesis.md` §4.5 for what it actually says: NAPRT is *abundantly* expressed in small intestine, liver and kidney **in mice**, which is a statement about where expression is highest and not about human exclusivity. Also the source for the two facts that make the Preiss-Handler route attractive: nicotinic acid but not nicotinamide almost doubled cellular NAD⁺ in NAPRT-expressing cells and the effect was reversed by NAPRT knockdown, and NAPRT is insensitive to physiological NAD⁺ where NAMPT is not. |
+| R74, R75, R76 | The human answer to the same question (§4.5). R74: RT-PCR across a normal human tissue panel, "widely expressed under normal conditions". R75: the only cell-type-resolved NAPRT protein survey with a validated antibody — most normal tissues positive, lymphocytes strongly positive, cortical neurons and oligodendrocytes negative. R76: NAPRT loss is a **tumour** phenomenon caused by tumour-specific promoter methylation, which is why the oncology literature reads as though the enzyme were rare. |
+| R77, R78, R81 | Whether the MVA-relevant cell types can use nicotinic acid at all (§4.5). R77: 15 µM nicotinic acid raised NAD⁺ 2.1-fold in primary human PBMCs, 13 of 13 donors. R78: NAPRT enzyme activity measured directly in normal human lymphocytes. R81: transcript levels for the cell types this experiment would use — cultured primary fibroblasts 23.5 TPM and EBV-transformed lymphocytes 32.1 TPM against an all-tissue floor of 9.1, with brain at the bottom of the atlas. |
+| R79, R80 | The functional test for NAPRT competence, and the fibroblast evidence that rests on it (§4.5). R80 establishes that nicotinic acid rescues a NAMPT inhibitor **only** in NAPRT-expressing cells, and names glioblastoma and neuroblastoma among the NAPRT-deficient, non-rescuable types. R79 applies that assay to Hs68 human fibroblasts, where nicotinic acid antagonised FK866-induced NAD⁺ depletion and senescence — indirect evidence of functional NAPRT in a human fibroblast, and the closest thing to a measurement in this cell type that exists. |
 
 ## Considered and left out of the tables
 
 | Agent / class | Why it is not a row |
 |---|---|
 | N-acetylcysteine and other antioxidants | The oxidative-stress node is not separately represented in this chain, and the strongest relevant finding points the wrong way for a cancer-predisposed child: antioxidants accelerated tumour progression in mice (R52). Recording it as a scored candidate would have implied a node the chain does not model. |
-| Tumour-directed cancer surveillance (renal ultrasound and clinical review) | It is not a drug, and forcing it into a drug catalogue produces a category error: surveillance does not move any node on this chain, it changes stage at diagnosis. Discussed in `docs/track2-hypothesis.md` as the non-pharmacological arm, with R08, R49 and R54. |
-| proTAME / apcin (APC/C inhibitors) | Direction-correct in principle and never administered to humans; they would add a third row saying only `NOT_APPROVED`, which DRUG-MPS1 and DRUG-HSP90 already demonstrate. |
+| Tumour-directed cancer surveillance (renal ultrasound and clinical review) | It is not a drug, and forcing it into a drug catalogue produces a category error: surveillance does not move any node on this chain, it changes stage at diagnosis. Discussed in `docs/track2-hypothesis.md` §7.1 as the non-pharmacological arm, on R49's operative rule (>5% Wilms risk → renal ultrasonography every 3–4 months) with the risk figures from R03, R07 and R08. |
+| R54 — Kalish 2024, the updated Wilms/hepatoblastoma surveillance guideline | Considered as the current protocol and **left out**. Its text covers Beckwith-Wiedemann, WAGR, *WT1*-related disorders, Simpson-Golabi-Behmel, Perlman, Bohring-Opitz, trisomy 18, osteopathia striata with cranial sclerosis, Mulibrey nanism, *PIK3CA*-related overgrowth, Sotos and Weaver; MVA, *BUB1B* and PCS syndrome appear nowhere in it. It cannot be cited for surveillance in this syndrome, and `docs/track2-hypothesis.md` no longer does. |
+| proTAME / apcin (APC/C inhibitors) | Direction-correct in principle and with no record of human administration — an inference from the absence of any registered trial or published clinical report, not a sourced negative; they would add a third row saying only `NOT_APPROVED`, which DRUG-MPS1 and DRUG-HSP90 already demonstrate. |
 | FTY720 / fingolimod as a PP2A activator | The BubR1 defect is failure to *recruit* PP2A-B56 to kinetochores (R09, R11), not a deficit in bulk PP2A activity, so a global activator does not address the lesion. Included here as a worked example of target proximity without mechanistic fit. |

@@ -36,9 +36,16 @@ HEADER = """\
 # Two deliberate uniformities. (1) Every concentration cell is blank, because no publication
 # reports an effective concentration at the BubR1-abundance node for any of these agents;
 # ASSUMPTION-DRUG-05 therefore fires on every candidate, which is the honest state of the field.
+# Measured peak plasma figures DO exist for nicotinamide and they are recorded in that row's
+# `notes` with their citations rather than in `achievable_plasma_um`: the column pair exists to
+# compute whether a THERAPEUTIC concentration is reachable, and 790-1400 uM is the exposure at
+# which nicotinamide's counter-arm, SIRT2 inhibition, engages. Filling half the pair would move
+# no computation and would read as a therapeutic-reachability claim nobody has earned.
 # (2) `worsens_cin` is blank wherever the question has not actually been asked of the agent.
 # Blank is unassessed, and in a chromosomal-instability disorder unassessed BLOCKS (ADR 0011,
 # ASSUMPTION-DRUG-07). It is not a clean bill of health and must never be filled in optimistically.
+# The converse is equally strict: a `0` must name the assay that asked the question and found
+# nothing, not the absence of a trial that reported something bad.
 #
 # GENERATED from tools/build_knowledge/bub1b_catalog.py. Edit that file, not this one.
 """
@@ -126,21 +133,43 @@ ROWS: list[dict[str, str]] = [
         "youngest_age_studied": "children (five-year randomised exposure at 1.2 g/m2 daily)",
         "pediatric_indication": "Type 1 diabetes prevention trial; pellagra",
         "route": "oral",
-        "worsens_cin": "0",
         "validation_experiment": (
             "Resolve the SIGN before anything else. Dose-response measurement of intracellular "
             "NAD+, SIRT2 activity, BubR1 K668 acetylation and total BubR1 in BUB1B-MVA patient "
             "fibroblasts, across the plasma range achieved by the doses already given to children, "
-            "with blinded premature-chromatid-separation scoring as the phenotypic readout."
+            "with blinded premature-chromatid-separation scoring as the phenotypic readout. Run "
+            "the high-dose arm as a deliberate NEGATIVE control: at an exposure above the measured "
+            "SIRT2 IC50 range the mechanism predicts BubR1 should FALL, and a fall would confirm "
+            "the axis while disqualifying this agent as the therapy. Separately, and before any "
+            "chronic-use question, run the micronucleus and aneuploidy assays that have never been "
+            "run on this agent."
         ),
         "notes": (
             "Direction CANNOT BE DETERMINED and must not be rounded to agreement. Nicotinamide is "
             "both an NAD+ precursor and an inhibitor of the very sirtuin the mechanism depends on, "
-            "so the net sign at the BubR1 node is genuinely bidirectional. worsens_cin is recorded "
-            "as assessed-and-negative on the strength of a phase 3 randomised trial with a "
-            "cancer-incidence endpoint, which found fewer cancers; that trial was in adults with "
-            "UV-driven skin cancer and does not transfer to a germline chromosomal-instability "
-            "population."
+            "so the net sign at the BubR1 node is genuinely bidirectional. The inhibition is "
+            "measured rather than inferred: IC50 against human SIRT2 spans 12-600 uM across nine "
+            "substrate conditions on a single enzyme preparation (Zessin et al., *Int J Mol Sci* "
+            "2023, PMID 37108579) with 138 uM from an independent laboratory (Chiang and Lin, *Org "
+            "Biomol Chem* 2016, PMID 26796034); the 50-fold substrate dependence is why no single "
+            "number transfers, and BubR1-K668 has never been the substrate in such an assay. Peak "
+            "plasma nicotinamide after 60-80 mg/kg oral is 790-1400 uM (Hoskin et al., *Int J "
+            "Radiat Oncol Biol Phys* 1995, PMID 7607932; Bussink et al., *Radiother Oncol* 2002, "
+            "PMID 12142092), above every one of those values. In the founding paper for this "
+            "mechanism, nicotinamide at 20 mM for 16 h was the sirtuin inhibitor and BubR1 protein "
+            "FELL in HeLa cells (North et al., *EMBO J* 2014, PMID 24825348, Figure 1A and 1B) -- "
+            "at a concentration 14-25x above achievable plasma, so it fixes the direction of the "
+            "inhibitory arm and not the dose at which it wins. worsens_cin was previously recorded "
+            "as assessed-and-negative on one phase 3 skin-cancer chemoprevention trial; that entry "
+            "is WITHDRAWN. The trial measured UV-driven keratinocyte carcinoma in sun-damaged "
+            "adults, measured no chromosome number or missegregation, and did not replicate in "
+            "transplant recipients (Allen et al., *N Engl J Med* 2023, PMID 36856616; rate ratio "
+            "1.0, 95 percent CI 0.8-1.3). No micronucleus, chromosome-aberration, "
+            "sister-chromatid-exchange or aneuploidy measurement of therapeutic nicotinamide was "
+            "located in any species, so the cell is blank: unassessed, not negative (GP-14). The "
+            "searches that failed to find one are listed in docs/research/r4-niacin-safety.md "
+            "section 9 (queries S21, S22, S23) and docs/research/r2-nicotinamide-sirt2.md; this "
+            "is a not-found, not a demonstrated absence."
         ),
     },
     {
@@ -152,9 +181,12 @@ ROWS: list[dict[str, str]] = [
         "target": "NAD+ pool via the Preiss-Handler pathway",
         "target_node_id": "N3_bubr1",
         "mechanism_of_action": (
-            "Raises the NAD+ pool through the Preiss-Handler pathway. In adults with mitochondrial "
-            "myopathy it raised blood NAD+ several-fold and improved muscle performance. It has no "
-            "sirtuin-inhibiting liability. Its effect on BubR1 abundance has never been measured."
+            "Raises the NAD+ pool through the Preiss-Handler pathway, whose entry enzyme NAPRT is "
+            "not feedback-inhibited by NAD+ and whose substrate is not a sirtuin reaction product. "
+            "In adults with mitochondrial myopathy it raised blood NAD+ several-fold and improved "
+            "muscle performance. No sirtuin product inhibition has been measured for it, which is "
+            "an absence of evidence of inhibition rather than a measured absence. Its effect on "
+            "BubR1 abundance has never been measured."
         ),
         "observed_direction": "unknown",
         "is_direct_evidence": "0",
@@ -163,17 +195,38 @@ ROWS: list[dict[str, str]] = [
         "youngest_age_studied": "children",
         "pediatric_indication": "Familial hypercholesterolaemia",
         "route": "oral",
+        "worsens_cin": "0",
         "validation_experiment": (
-            "Measure BubR1 abundance and missegregation in patient cells at the plasma NAD+ "
-            "elevations already documented in humans; separately, interrogate the existing large "
-            "niacin cardiovascular outcome datasets for cancer incidence, which would close the "
-            "blocking oncogenic-risk gap without a new study."
+            "Confirm NAPRT expression in the target cell type FIRST, by immunoblot or targeted "
+            "mass spectrometry against an NAPRT-null control, because nicotinic acid cannot reach "
+            "the NAD+ pool of a cell that lacks the Preiss-Handler entry enzyme and a null result "
+            "downstream would then be uninterpretable. Then measure intracellular NAD+, BubR1 K668 "
+            "acetylation, total BubR1 and the blinded missegregation rate in BUB1B-MVA patient "
+            "fibroblasts across the plasma NAD+ elevations already documented in humans, with a "
+            "SIRT2-knockdown arm for mechanism specificity, an ectopic-BubR1 arm as the ceiling, "
+            "and a high-dose nicotinamide arm as the counter-directional control. Micronucleus "
+            "frequency in a BUB1B-deficient background remains unmeasured for this agent and is a "
+            "readout of the same experiment, not a separate study."
         ),
         "notes": (
             "The only approved agent here with a clean mechanistic story and no known "
-            "counter-direction. It is nonetheless rejected, because whether it changes aneuploidy "
-            "or cancer susceptibility has never been asked. That gap is blocking in this disease "
-            "context by design, and it is unusually cheap to close."
+            "counter-direction, and the oncogenic-risk question HAS been asked of it. Malignancy "
+            "counts by randomised arm are public for both large modern niacin trials: neoplasm "
+            "serious adverse events 751 of 12,838 on extended-release niacin-laropiprant against "
+            "749 of 12,835 on placebo over a mean 3.6 years (ClinicalTrials.gov NCT00461630 posted "
+            "results, the trial reported by Landray et al., *N Engl J Med* 2014, PMID 25014686), "
+            "and 72 of 1,718 against 73 of 1,696, P = 0.87 (Anderson et al., *N Engl J Med* 2014, "
+            "PMID 25014706). On chromosomal instability specifically, nicotinic acid LOWERED "
+            "micronucleus frequency in primary human peripheral blood mononuclear cells after "
+            "X-irradiation (Weidele et al., *DNA Repair (Amst)* 2017, PMID 28216063), and it has "
+            "been through micronucleus and sister-chromatid-exchange assays in rat bone marrow in "
+            "vivo (Spronck and Kirkland, *Mutat Res* 2002, PMID 12379464). Three limits travel "
+            "with the 0 and none is optional. Spronck and Kirkland conclude that pharmacological "
+            "intakes of niacin do not appear to be further protective compared with adequate "
+            "intakes, so above adequacy more bought nothing. Both niacin megatrials enrolled ZERO "
+            "participants aged 18 or under, mean age 64.9 and 63.7 years. And neither agent has "
+            "been measured in a chromosomal-instability background at all, so this cell reads "
+            "assessed-and-negative in adults, never cleared for a child with germline aneuploidy."
         ),
     },
     {

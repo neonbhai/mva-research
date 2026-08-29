@@ -46,7 +46,7 @@ bad:
 `oncogenic_risk` label for a measured positive as it does for a blank cell, so this page
 separates them: the label is identical and the epistemic status is opposite.
 
-The practical consequence is §5.2 of `docs/track2-hypothesis.md`: the bottleneck in
+The practical consequence is §5 of `docs/track2-hypothesis.md`: the bottleneck in
 repurposing for chromosomal-instability disorders is not finding targets. It is that the
 safety question that matters most has not been asked of the candidate drugs.
 
@@ -58,10 +58,10 @@ safety question that matters most has not been asked of the candidate drugs.
 |---|---|---|---|---|---|---|---|
 | Nicotinamide mononucleotide | `N3_bubr1` | `increase` | `increase` | agrees (measured) | **never measured** | `oncogenic_risk` | 0.605 |
 | Gentamicin | `N3_bubr1` | `increase` | `unknown` | cannot determine (unsigned) | **never measured** | `oncogenic_risk` | 0.420 |
-| Nicotinic acid | `N3_bubr1` | `increase` | `unknown` | cannot determine (unsigned) | **never measured** | `oncogenic_risk` | 0.410 |
 | Dasatinib | `N10_clearance` | `unknown` | `decrease` | cannot determine (unsigned) | **never measured** | `oncogenic_risk` | 0.348 |
 | Nicotinamide riboside | `N3_bubr1` | `increase` | `unknown` | cannot determine (unsigned) | **never measured** | `oncogenic_risk` | 0.345 |
 | Sirolimus | `N9_stress` | `decrease` | `unknown` | cannot determine (unsigned) | **never measured** | `oncogenic_risk` | 0.303 |
+| Nicotinamide | `N3_bubr1` | `increase` | `context_dependent` | cannot determine (unsigned) | **never measured** | `oncogenic_risk` | 0.275 |
 | Ataluren | `N3_bubr1` | `increase` | `unknown` | cannot determine (unsigned) | **never measured** | `oncogenic_risk` | 0.203 |
 | Hydroxychloroquine | `N9_stress` | `decrease` | `increase` | **OPPOSES** | **never measured** | `wrong_direction` | 0.163 |
 | Metformin | `N9_stress` | `decrease` | `increase` | **OPPOSES** | **never measured** | `wrong_direction` | 0.163 |
@@ -216,21 +216,6 @@ candidate scores lower.
   nobody has measured which way it moves it. An unmeasured sign at the target node is
   not a detail outstanding: it is the entire question the hypothesis asks.
 
-#### Nicotinic acid — `DRUG-NA`
-
-- **Node acted on:** `N3_bubr1` — BubR1 protein abundance
-- **Required correction:** `increase` — **observed:** `unknown` — **verdict:** cannot
-  determine (unsigned)
-- **Chromosomal-instability question:** **never measured**. The chromosomal-instability
-  question has **never been asked of this agent**. GP-14: that is not a clean bill of
-  health and must never be filled in optimistically. In a chromosomal-instability
-  disorder it blocks (ADR 0011, ASSUMPTION-DRUG-07).
-- **Rejected for:** `oncogenic_risk` (all reasons: `oncogenic_risk`,
-  `pharmacokinetic_barrier`, `direction_unknown`)
-- **Why it is dangerous here specifically:** It acts on the therapeutic target and
-  nobody has measured which way it moves it. An unmeasured sign at the target node is
-  not a detail outstanding: it is the entire question the hypothesis asks.
-
 #### Dasatinib — `DRUG-SEN`
 
 - **Node acted on:** `N10_clearance` — p53- and p16-dependent arrest, senescence and
@@ -284,6 +269,30 @@ candidate scores lower.
   opposite ways: lowering translational load could relieve the burden, or removing the
   survival programme could kill the cells carrying it. Until that sign exists there is
   nothing here to weigh.
+
+#### Nicotinamide — `DRUG-NAM`
+
+- **Node acted on:** `N3_bubr1` — BubR1 protein abundance
+- **Required correction:** `increase` — **observed:** `context_dependent` — **verdict:**
+  cannot determine (unsigned)
+- **Chromosomal-instability question:** **never measured**. The chromosomal-instability
+  question has **never been asked of this agent**. GP-14: that is not a clean bill of
+  health and must never be filled in optimistically. In a chromosomal-instability
+  disorder it blocks (ADR 0011, ASSUMPTION-DRUG-07).
+- **Rejected for:** `oncogenic_risk` (all reasons: `oncogenic_risk`,
+  `pharmacokinetic_barrier`, `insufficient_evidence`, `direction_unknown`)
+- **Why it is dangerous here specifically:** It moves the therapeutic target in both
+  directions at once. On this axis that is the NAD+ precursor that is also a sirtuin
+  product inhibitor: it feeds the pool SIRT2 consumes and supplies the molecule that
+  blocks SIRT2, in the same cell at the same time, and which term dominates at a given
+  intracellular concentration has never been measured in any genotype. A
+  context-dependent sign is worse than a missing one for a first experiment, because it
+  destroys interpretability in both outcomes: a rise in BubR1 cannot distinguish NAD+
+  supply from an off-axis effect, and a fall cannot distinguish a wrong mechanism from
+  having inhibited the enzyme the mechanism runs on. The only direct measurement of this
+  agent class on this endpoint runs the wrong way — the sirtuin-inhibiting concentration
+  lowered BubR1 protein — at an exposure well above anything a patient reaches, which
+  fixes the sign of the inhibitory arm without fixing the dose at which it wins.
 
 #### Ataluren — `DRUG-ATA`
 

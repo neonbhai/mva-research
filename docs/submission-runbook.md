@@ -5,28 +5,29 @@ time pressure. This is an operator's checklist, not a pipeline component —
 nothing in this file runs automatically and nothing in it should be scripted
 into `src/`.
 
-**Source of truth for the contract:** `docs/references/track1-submission-contract.md`.
-Re-read it before a real submission — it is vendored precisely because the
-challenge Space is gated and mutable and a rushed re-derivation is exactly
-how the chr-prefix mistake happens. This runbook assumes that contract is
-current; if you have any doubt, re-verify against the Space's raw source files
-the way that document describes, before trusting the checklist below.
+**Source of truth for the contract:** `docs/references/track1-submission-contract.md`
+for Track 1 and `docs/references/track2-submission-contract.md` for Track 2.
+Re-read the relevant one before a real submission — they are vendored precisely
+because the challenge Space is mutable and a rushed re-derivation is exactly how
+the chr-prefix mistake happens. This runbook assumes those contracts are current;
+if you have any doubt, re-verify against the Space's raw source files the way
+those documents describe, before trusting the checklist below.
 
-**Two repos, both gated, both need accepted terms before anything else works:**
+**Two repos. Only one of them is gated:**
 
-| Name | Type | Repo ID |
-|---|---|---|
-| Challenge Space (submit + leaderboard) | Space | `SageBio/rare-disease-real-kid-mva-hackathon-2026` |
-| Challenge data | Dataset (gated) | `SageBio/mva-hackathon-2026-data` |
+| Name | Type | Repo ID | Access |
+|---|---|---|---|
+| Challenge Space (submit + leaderboard) | Space | `SageBio/rare-disease-real-kid-mva-hackathon-2026` | sign-in only |
+| Challenge data | Dataset | `SageBio/mva-hackathon-2026-data` | **gated — accept terms** |
 
-Visit each URL on huggingface.co while logged in, and accept the gated terms
-on both:
-- `https://huggingface.co/spaces/SageBio/rare-disease-real-kid-mva-hackathon-2026`
+The HF API reports `"gated": false` for the Space; an earlier version of this
+file claimed both were gated and sent operators looking for a terms click that
+does not exist. Visit the dataset URL while logged in and accept its terms:
 - `https://huggingface.co/datasets/SageBio/mva-hackathon-2026-data`
 
-Access is per-HF-account. If a teammate hits a 403/"gated" error, it means
-*their* account has not clicked through the terms yet — that's an individual
-step, not a one-time team step.
+Access is per-HF-account. If a teammate hits a 403/"gated" error on the
+*dataset*, it means *their* account has not clicked through the terms yet —
+that's an individual step, not a one-time team step.
 
 ---
 
@@ -243,24 +244,73 @@ cost; nothing about submitting early forecloses a better attempt #2–6 later.
 
 ## 5. Submitting — Track 2
 
-Track 2 requires:
-- A **report** (PDF or Markdown).
-- A **public GitHub URL**.
-- A **3-minute video URL**.
+Verified against the Space's own source on 2026-08-28. Full detail, with file
+and line for every claim, is in `docs/references/track2-submission-contract.md`.
+Judged on Scientific Rigor (35%), Potential Impact (25%), Innovation (25%),
+Scalability (15%).
 
-Only **one** attempt is allowed for Track 2 — there is no resubmission if it
-goes in wrong, so double-check all three artifacts (report renders cleanly,
-GitHub URL is actually public/reachable in a private browser window, video URL
-plays and is within time) before submitting. Judged on Scientific Rigor (35%),
-Potential Impact (25%), Innovation (25%), Scalability (15%).
+### The five fields, in the order the form declares them
 
-This runbook was written from the vendored contract's stated Track 2
-requirements; the exact submission-tab mechanics on the Space were not
-re-fetched in this pass (only Track 1's `submit_track1.py` was verified — see
-`docs/references/track1-submission-contract.md`). Expect an analogous
-"Submit - Track 2" tab on the same Space, same HF sign-in. If its layout
-differs from that expectation, that's a contract-doc gap to close before
-relying on this section, not a reason to guess.
+| # | Field | Required | What actually validates |
+|---|---|---|---|
+| 1 | Team / Display Name | optional | none — **but blank publishes your slugified HF username** instead of the team name |
+| 2 | GitHub repo URL | **yes** | `startswith("https://github.com/")` — exact, case-sensitive |
+| 3 | Pitch video URL | **yes** | non-empty after strip. That is the whole test |
+| 4 | Notes for judges | optional | none |
+| 5 | Report file | **yes** | suffix in `{.pdf, .md}`. No size limit in the source |
+
+Fields 1 and 4 are easy to miss; neither appeared in the earlier version of this
+section.
+
+### What is not checked, and therefore must be checked by a human
+
+- **That the GitHub URL is public and resolves.** Only the prefix is tested. A
+  private repo, a 404, or a bare `https://github.com/` all pass. Open it in a
+  private browser window.
+- **That the video URL is a video, plays, or is within three minutes.** Nothing
+  in the code looks at it. "YouTube or Vimeo" appears only in instruction text.
+- `http://`, `www.github.com`, `GitHub.com` and SSH URLs are **rejected** — the
+  prefix test is case-sensitive.
+
+### The methods description — the largest single requirement
+
+The tab serves `static/templates/methods_description_form.xlsx`. Its **"Track 2
+methods"** sheet asks ten questions and states that submissions without a methods
+description "may be judged less favorably on the **Scientific Rigor and
+Innovation** criteria" — **60% of the rubric**. There is no upload slot for the
+workbook, so the answers must be **inside the report**. Question 10 is a
+**≤500-word method abstract including strengths and limitations** — the only word
+limit anywhere in the submission.
+
+The report must also characterize the variant mechanism; that is a stated content
+requirement, not a stylistic suggestion.
+
+### Attempt mechanics — the parts that decide whether one click is fatal
+
+- **One attempt, genuinely enforced**, keyed **per HF username** — not per team,
+  despite the workbook saying "one final submission per team".
+- **A rejected submit does not burn the attempt.** Validation failures are free;
+  only a fully valid payload consumes it. Deliberately failing validation first
+  is therefore a safe way to smoke-test the form.
+- **The guard fails open** on an HF API error, so a transient failure could let a
+  second submission through. Do not rely on it to protect you.
+- **The write is not atomic.** Metadata commits *before* the report uploads, with
+  no rollback. A failed report upload leaves you at 1/1 **with no report
+  attached**. Upload on a stable connection; this is the worst failure mode here.
+- **The report filename is stored verbatim** as a git path component — Track 1
+  sanitises, Track 2 does not. Use plain ASCII, no spaces, and embed the team or
+  HF username in it.
+- **The `0 / 1` status card does not refresh after a successful submit.** The
+  confirmation block is the only receipt. Do not read the stale card as a failure
+  and resubmit.
+
+### There is no deadline in the code
+
+`CHALLENGE_ACTIVE` is a hand-flipped boolean in `config.py`. `datetime.now()`
+appears twice in the Space and both are `strftime` stamps — never compared to
+anything. The published "October 24 (23:59 UTC)" is display text in `about.py`,
+two lines under "Dates are subject to change". **Treat the date as an upper bound
+that may move earlier, not a countdown to run down.**
 
 ---
 
@@ -268,9 +318,9 @@ relying on this section, not a reason to guess.
 
 | Item | Value |
 |---|---|
-| Submissions close | **2026-10-24 23:59 UTC** |
-| Track 1 attempts | 6 (best score counts) |
-| Track 2 attempts | 1 (no resubmission) |
+| Submissions close | **2026-10-24 23:59 UTC — display text only, see §5.** The real gate is a hand-flipped `CHALLENGE_ACTIVE` boolean and no code compares a date. Upper bound, not a countdown. |
+| Track 1 attempts | 6 (best score counts), per HF username |
+| Track 2 attempts | 1 (no resubmission), per HF username |
 | Accepted `proband_id` | `PROBAND01` only |
 | Row limit (Track 1 CSV) | 10 |
 | Genome build | GRCh38, `chr`-prefixed contigs |
