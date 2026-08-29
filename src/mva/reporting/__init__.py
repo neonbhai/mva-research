@@ -23,6 +23,13 @@ from mva.reporting.render import (
     markdown_table,
     render_template,
 )
+from mva.reporting.reproduction import (
+    ReproductionReport,
+    ReproductionVerdict,
+    TopKAgreement,
+    compare_rankings,
+    compare_submission_files,
+)
 from mva.reporting.track1 import (
     ACCEPTED_PROBAND_ID,
     EPCR_CEILING,
@@ -64,14 +71,19 @@ __all__ = [
     "UNCALIBRATED_WEIGHTS",
     "Assertion",
     "AssertionChecker",
+    "ReproductionReport",
+    "ReproductionVerdict",
     "SubmissionComposition",
     "SubmissionRow",
+    "TopKAgreement",
     "build_candidate_dossier",
     "build_drug_report",
     "build_mechanism_report",
     "build_rejection_record",
     "build_submission_rows",
     "build_track2_report",
+    "compare_rankings",
+    "compare_submission_files",
     "compose_submission",
     "composite_to_epcr",
     "format_cell",

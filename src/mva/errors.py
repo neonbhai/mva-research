@@ -93,6 +93,23 @@ class ReportCompletenessError(MvaError):
     """
 
 
+class SubmissionFormatError(MvaError):
+    """A file offered as a Track 1 submission cannot be read as one.
+
+    Raised by :mod:`mva.reporting.reproduction`, which compares two submissions
+    that are both lists of one child's variant coordinates. The message therefore
+    names the file's ROLE, its basename, a line NUMBER and counts — never a field,
+    never a row (PRIV-09, GP-41). Anything raised while parsing is re-raised
+    ``from None``: a chained :class:`UnicodeDecodeError` carries the offending
+    bytes in its own message, and a chained ``csv.Error`` can carry a field.
+
+    Distinct from the error list :func:`~mva.reporting.track1.validate_submission`
+    returns, which *does* quote coordinates. That is correct there — it validates a
+    file we are about to publish, for a human about to upload it — and wrong here,
+    where the reader is an agent (ADR 0008).
+    """
+
+
 class PrivacyViolationError(MvaError):
     """A privacy boundary would be crossed. Always fail closed."""
 

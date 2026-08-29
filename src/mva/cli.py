@@ -518,6 +518,69 @@ def verify_submission(
     raise typer.Exit(code=1)
 
 
+@verify_app.command("reproduces")
+def verify_reproduces(
+    submitted: Annotated[
+        Path, typer.Argument(help="The submission CSV that was uploaded.", exists=True)
+    ],
+    produced: Annotated[
+        Path, typer.Argument(help="The submission CSV a later run produced.", exists=True)
+    ],
+) -> None:
+    """Compare two Track 1 submissions. Agreement statistics only, never rows.
+
+    `docs/track1-method.md` §4 says the submitted ranking came from a scripted run
+    and that the library had never been executed end to end against the real
+    callset. This answers the one question that leaves: does the library's own
+    output rank the same candidates in the same order?
+
+    Both files are lists of one child's variant coordinates, so nothing printed
+    here is drawn from either of them. Every number below is a count, a flag or a
+    correlation; files are named by role and basename, and a malformed file is
+    reported as a line NUMBER (GP-41, GP-44, PRIV-09, ADR 0008). Exits 1 on
+    anything other than an exact reproduction, so it can gate CI.
+    """
+    from mva.reporting.reproduction import VERDICT_MEANINGS, compare_submission_files
+
+    try:
+        report = compare_submission_files(submitted, produced)
+    except MvaError as exc:
+        _fail(str(exc))
+        return
+
+    table = Table(show_header=True, title="track 1 reproduction check")
+    table.add_column("statistic")
+    table.add_column("value", justify="right")
+    table.add_row("submitted rows", str(report.submitted_rows))
+    table.add_row("produced rows", str(report.produced_rows))
+    table.add_row("rows in both", str(report.intersection))
+    table.add_row("submitted only", str(report.submitted_only))
+    table.add_row("produced only", str(report.produced_only))
+    table.add_row("top-1 identical", "yes" if report.top1_identical else "no")
+    for agreement in report.top_k:
+        # Both windows are shown because "0 of 3" and "0 of 0" are different
+        # facts, and only the second one is not a disagreement (GP-14).
+        table.add_row(
+            f"top-{agreement.k} agreement",
+            f"{agreement.agreeing} of {agreement.produced_window} "
+            f"(submitted window {agreement.submitted_window})",
+        )
+    spearman = "undefined (<2 shared rows)" if report.spearman is None else f"{report.spearman:.4f}"
+    table.add_row("spearman rho", spearman)
+    console.print(table)
+
+    verdict = report.verdict
+    console.print(f"\n  verdict  [bold]{verdict.value}[/bold] — {VERDICT_MEANINGS[verdict]}")
+    if report.reproduced:
+        console.print("\n[green]ok[/green] the produced ranking reproduces the submitted one")
+        return
+    err_console.print(
+        "\n[bold red]NOT REPRODUCED[/bold red] the two rankings are not the same; "
+        "the counts above say how far apart they are. Row content is withheld (GP-41)."
+    )
+    raise typer.Exit(code=1)
+
+
 # ---------------------------------------------------------------------------
 # discards
 # ---------------------------------------------------------------------------

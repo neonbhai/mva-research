@@ -1091,7 +1091,7 @@ def validate_submission(csv_text: str) -> tuple[bool, tuple[str, ...]]:
             epcrs.append(float((row.get("epcr") or "").strip()))
         except ValueError:
             epcrs.append(math.nan)
-        key = _row_key(row)
+        key = submission_row_key(row)
         if key is not None:
             keyed.append((index, key))
             first_seen = seen_keys.setdefault(key, index)
@@ -1310,8 +1310,17 @@ def _validate_subset_inversions(
         )
 
 
-def _row_key(row: dict[str, str | None]) -> frozenset[tuple[str, int, str, str]] | None:
-    """The scorer's variant-key set for a parsed row, or ``None`` if unparseable."""
+def submission_row_key(row: dict[str, str | None]) -> frozenset[tuple[str, int, str, str]] | None:
+    """The scorer's variant-key set for a parsed row, or ``None`` if unparseable.
+
+    Public because :mod:`mva.reporting.reproduction` compares two rendered
+    submissions and has to key rows exactly the way the challenge scorer does —
+    ``(chrom.strip(), int(pos), ref.strip().upper(), alt.strip().upper())``, with
+    no chr-prefix normalisation on either side. A second copy of that rule in the
+    comparator is how two files that the scorer reads as identical come to be
+    reported as divergent, which is the same class of defect as the two
+    canonicalisation rules ADR 0018 was written about.
+    """
     try:
         keys = {
             (
@@ -1351,6 +1360,7 @@ __all__ = [
     # Deliberately module-level only: `mva.reporting` does not re-export it, so the
     # unvalidated path cannot be reached by `from mva.reporting import ...`.
     "render_submission_csv_unvalidated",
+    "submission_row_key",
     "truncation_notice",
     "validate_submission",
     "write_submission",
