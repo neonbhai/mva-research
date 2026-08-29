@@ -61,6 +61,15 @@ ARTIFACT_SENSITIVITY: dict[ArtifactKind, Sensitivity] = {
     ArtifactKind.DOSSIER: Sensitivity.SENSITIVE,
     # Aggregate counts only; no genotypes.
     ArtifactKind.QC_REPORT: Sensitivity.DERIVED_SAFE,
+    # Counts by reason and the thresholds that produced them, exactly like the
+    # selection report below. The identities of the variants the relevance bar set
+    # aside live in the discard ledger, which is SENSITIVE (ADR 0028, GP-41).
+    ArtifactKind.TRIAGE_REPORT: Sensitivity.DERIVED_SAFE,
+    # One build-qualified proband coordinate per row. It is the mechanism that
+    # discharges the amended GP-13 and it is the most coordinate-dense artifact the
+    # pipeline produces, so it is SENSITIVE and never leaves the workspace. A report
+    # states its COUNTS, which are in the triage and selection reports already.
+    ArtifactKind.DISCARD_LEDGER: Sensitivity.SENSITIVE,
     # Counts by reason and the thresholds that produced them. Same class as the
     # QC report: it says how many variants selection set aside and why, never
     # which ones (GP-41).
@@ -295,31 +304,49 @@ class JsonRowsSink:
     array framing, one row at a time (GP-30).
     """
 
-    __slots__ = ("_handle", "_written", "provenance")
+    __slots__ = ("_bytes", "_handle", "_written", "provenance")
 
     def __init__(self, handle: TextIO) -> None:
         self._handle = handle
         self._written = 0
+        #: Characters handed to the handle so far. Tracked here rather than read
+        #: back with `tell()` because the file is buffered — `tell()` on a buffered
+        #: text handle is not free and would be called once per record — and
+        #: because the pre-flight projection needs the number DURING the write, not
+        #: after it (ADR 0028). For the ASCII these artifacts are made of, one
+        #: character is one byte; canonical JSON escapes non-ASCII, so the count is
+        #: exact rather than approximate.
+        self._bytes = 0
         #: Set by :meth:`RunContext.open_json_rows_artifact` when the block exits,
         #: so the caller reads it from the sink rather than from
         #: ``context.artifacts[-1]`` -- which is correct only until something else
         #: registers an artifact.
         self.provenance: ArtifactProvenance | None = None
         handle.write("[")
+        self._bytes = 1
 
     def write(self, row: object) -> None:
         if self._written:
             self._handle.write(",")
-        self._handle.write(canonical_json(row))
+            self._bytes += 1
+        text = canonical_json(row)
+        self._handle.write(text)
+        self._bytes += len(text)
         self._written += 1
 
     @property
     def row_count(self) -> int:
         return self._written
 
+    @property
+    def bytes_written(self) -> int:
+        """Bytes handed to the handle so far, including the array framing."""
+        return self._bytes
+
     def close(self) -> None:
         """Terminate the array. Called by the context manager that opened it."""
         self._handle.write("]\n")
+        self._bytes += 2
 
 
 # ---------------------------------------------------------------------------

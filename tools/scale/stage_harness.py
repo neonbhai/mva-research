@@ -550,6 +550,131 @@ def run_pipeline(records: int, *, mode: str, out_dir: Path, cap: int) -> StageRe
     return result
 
 
+def run_triage(records: int, *, mode: str, out_dir: Path, cap: int) -> StageResult:
+    """The ADR 0028 partition, measured: the same pass with the bar on and off.
+
+    ``mode="off"`` is the pre-ADR-0028 pipeline exactly. ``mode="on"`` runs the
+    default bar. Everything else is held constant, including the phantom's seed,
+    so the two rows differ only in the partition.
+
+    **What this measures and what it does not.** The phantom's frequency and
+    clinical adapters are hash functions over a variant id: they have no tabix
+    index, no shard to open and no bytes to decompress. So the ratio printed here
+    is the cost of *evidence construction, model copying and JSON serialisation*
+    for the records the bar removes, and it is a LOWER BOUND on the real saving.
+    The part it cannot see is the one the measured run died of — a gnomAD region
+    query merges the spans of the ids it is given, so asking about 14 thousand
+    coordinates instead of 4.96 million collapses the decompressed byte count by
+    orders of magnitude rather than by the record ratio. Claiming the phantom's
+    number as the whole speedup would be claiming a measurement that was not made
+    (GP-20).
+    """
+    from mva.annotation.service import iter_annotated  # noqa: PLC0415
+    from mva.annotation.triage import VariantTriage  # noqa: PLC0415
+    from mva.clock import demo_clock  # noqa: PLC0415
+    from mva.config import (  # noqa: PLC0415
+        FrequencyThresholds,
+        QualityThresholds,
+        SelectionThresholds,
+        TriageThresholds,
+    )
+    from mva.evidence.discards import DiscardLedger  # noqa: PLC0415
+    from mva.evidence.ledger import EvidenceLedger  # noqa: PLC0415
+    from mva.models.genome import GenomeBuild  # noqa: PLC0415
+    from mva.pipeline import JsonRowsSink  # noqa: PLC0415
+    from mva.prioritization.filters import iter_hard_filtered, iter_soft_flagged  # noqa: PLC0415
+    from mva.prioritization.selection import iter_selected  # noqa: PLC0415
+
+    result = StageResult(subcommand="triage", mode=mode, records=records)
+    _install_watchdog(cap, result)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    artifact = out_dir / f"annotated-{mode}.json"
+    discard_path = out_dir / f"discards-{mode}.tsv"
+    clock = demo_clock()
+    ledger = EvidenceLedger(run_id="SCALE-TRIAGE", spill_dir=out_dir)
+    discards = DiscardLedger(discard_path)
+    triage = VariantTriage(TriageThresholds(enabled=mode == "on"))
+    gc.collect()
+    result.baseline_rss = current_rss_bytes()
+    start = time.perf_counter()
+
+    annotated = iter_annotated(
+        synthetic_records(records),
+        adapters=phantom_adapters(),
+        clock=clock,
+        triage=triage,
+        discards=discards,
+    )
+    with artifact.open("w", encoding="utf-8") as handle:
+        sink = JsonRowsSink(handle)
+        recorded = _record_and_emit(annotated, ledger, sink)
+        filtered = iter_hard_filtered(
+            recorded, expected_build=GenomeBuild.GRCH38, discards=discards
+        )
+        flagged = iter_soft_flagged(
+            filtered, frequency=FrequencyThresholds(), quality=QualityThresholds()
+        )
+        selection = iter_selected(
+            flagged,
+            frequency=FrequencyThresholds(),
+            thresholds=SelectionThresholds(),
+            clock=clock,
+            discards=discards,
+        )
+        selected = list(selection)
+        sink.close()
+
+    result.seconds = time.perf_counter() - start
+    result.records_per_second = records / result.seconds if result.seconds else 0.0
+    result.rss_after = current_rss_bytes()
+    result.peak_rss = peak_rss_bytes()
+    discards.close()
+
+    _triage_notes(
+        result,
+        annotated=annotated,
+        sink=sink,
+        artifact=artifact,
+        discards=discards,
+        discard_path=discard_path,
+        ledger=ledger,
+        selected=selected,
+        selection=selection,
+    )
+    ledger.close()
+    artifact.unlink(missing_ok=True)
+    discard_path.unlink(missing_ok=True)
+    return result
+
+
+def _triage_notes(
+    result: StageResult,
+    *,
+    annotated: Any,
+    sink: Any,
+    artifact: Path,
+    discards: Any,
+    discard_path: Path,
+    ledger: Any,
+    selected: Sequence[Any],
+    selection: Any,
+) -> None:
+    """Everything ``triage`` reports, gathered after the pass so the timer is clean."""
+    discard_bytes = discard_path.stat().st_size
+    result.notes["triage"] = annotated.triage_report().as_payload()
+    result.notes["artifact_rows"] = sink.row_count
+    result.notes["artifact_bytes"] = artifact.stat().st_size
+    result.notes["discard_rows"] = discards.row_count
+    result.notes["discard_bytes"] = discard_bytes
+    result.notes["discard_bytes_per_row"] = (
+        discard_bytes / discards.row_count if discards.row_count else 0.0
+    )
+    result.notes["discards_by_rule"] = dict(discards.counts())
+    result.notes["ledger_items"] = len(ledger)
+    result.notes["selected"] = len(selected)
+    result.notes["selection_report"] = selection.report().as_payload()
+
+
 def _record_and_emit(annotated: Any, ledger: Any, sink: Any) -> Iterator[VariantRecord]:
     """Ledger the evidence, write the artifact row, pass the record on."""
     for item in annotated:
@@ -720,7 +845,8 @@ def run_sweep(sizes: Sequence[int], *, cap: int, tmp: Path, timeout: float) -> l
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "subcommand", choices=("annotate", "ledger", "select", "pipeline", "digest", "sweep")
+        "subcommand",
+        choices=("annotate", "ledger", "select", "pipeline", "triage", "digest", "sweep"),
     )
     parser.add_argument("--records", type=int, default=100_000)
     parser.add_argument("--mode", default="stream")
@@ -756,6 +882,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = run_select(args.records, mode=args.mode, cap=cap)
     elif args.subcommand == "pipeline":
         result = run_pipeline(args.records, mode=args.mode, out_dir=tmp, cap=cap)
+    elif args.subcommand == "triage":
+        result = run_triage(args.records, mode=args.mode, out_dir=tmp, cap=cap)
     else:
         result = run_digest(args.records, cap=cap)
 

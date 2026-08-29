@@ -55,6 +55,42 @@ quality:
   # allele balance may be signal rather than artifact.
   mosaic_allele_balance_floor: 0.10
 
+# Annotation triage (ADR 0028). The relevance bar the STAGED annotation path
+# partitions on: consequence annotation runs over the whole callset, then only the
+# variants that clear this bar get a gnomAD lookup, a ClinVar lookup, a full
+# evidence set and a row in variants/annotated.json. Everything else gets one
+# ~75-byte row in the discard ledger.
+#
+# Why this is not a second `selection` block: it runs EARLIER, for a different
+# reason (cost, not plausibility), and it must be provably WIDER than `selection`
+# or the partition would change the answer. The composition root narrows it
+# automatically where it is not and reports every narrowing as a run warning.
+#
+# Measured: a whole-genome callset put 14,228 of 4,962,060 variants (0.284%) above
+# a HIGH/MODERATE bar. `min_impact: low` is deliberately looser than that, and
+# `retain_unassessed_impact` looser again, because the cost of being generous is
+# throughput and the cost of being tight is the answer.
+triage:
+  enabled: true
+  # HIGH, MODERATE and LOW all survive; only a variant that is MODIFIER on every
+  # transcript, with no coding or splice term and no SpliceAI signal, is dropped.
+  min_impact: low
+  # ADR 0016. `impact is None` is NOT ASSESSED, not a prediction of harmlessness.
+  retain_unassessed_impact: true
+  # False is provable rather than heuristic: pairing is gene-scoped, so a variant
+  # with no gene symbol forms no candidate pair under any configuration. ~55% of a
+  # whole-genome callset by volume.
+  retain_without_gene_assignment: false
+  # Identical to selection.min_splice_ai_delta below, and clamped to it if raised.
+  min_splice_ai_delta: 0.2
+  # Ask ClinVar about the WHOLE callset, before the bar, so a curated assertion can
+  # keep a variant the consequence rule would drop. Measured on the scale phantom:
+  # with this false the selected set went 3,616 -> 3,600, losing exactly the 16
+  # variants selection.retain_pathogenic_clinical would have rescued. ClinVar is one
+  # ~100 MB tabix file; gnomAD is 22 multi-gigabyte shards, and gnomAD stays behind
+  # the bar. This is the cheap half of the deferral and it is the one that was wrong.
+  clinical_before_bar: true
+
 # Candidate selection (ADR 0019). The ONE stage entitled to delete a valid
 # record, so its cut-points are stated apart from the ranking cut-points above:
 # `max_population_frequency` is deliberately LOOSER than

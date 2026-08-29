@@ -64,6 +64,7 @@ from typing import Final
 from mva.clock import Clock
 from mva.config import FrequencyThresholds, SelectionThresholds
 from mva.models.base import AssertionTier
+from mva.models.discard import DiscardRecord, DiscardSink, DiscardStage
 from mva.models.evidence import (
     EvidenceCategory,
     EvidenceDirection,
@@ -72,78 +73,30 @@ from mva.models.evidence import (
     EvidenceType,
     make_evidence_id,
 )
-from mva.models.variant import ConsequenceAnnotation, ImpactSeverity, VariantRecord
+from mva.models.variant import (
+    CODING_CONSEQUENCE_TERMS,
+    SELECTING_IMPACTS,
+    SPLICE_CONSEQUENCE_TERMS,
+    ConsequenceAnnotation,
+    VariantRecord,
+    consequence_is_selecting,
+)
 
 # ---------------------------------------------------------------------------
 # Consequence vocabulary
+#
+# CODING_CONSEQUENCE_TERMS, SPLICE_CONSEQUENCE_TERMS and SELECTING_IMPACTS now
+# live in `mva.models.variant` and are imported above. They moved down a layer
+# when `mva.annotation.triage` came to need the same rule (ADR 0028): triage
+# decides which variants are worth a frequency and clinical lookup, this stage
+# decides which reach pairing, and GP-03 forbids the two packages importing each
+# other. Two copies of a Sequence Ontology term list is how they come to
+# disagree, and a triage bar narrower than this rule deletes candidates this
+# stage would have kept.
+#
+# They are re-exported from this module's `__all__`, unchanged, so a reader who
+# arrives at the selection stage still finds them named where the stage is.
 # ---------------------------------------------------------------------------
-
-#: Sequence Ontology terms that alter the coding sequence.
-#:
-#: ``synonymous_variant`` is deliberately ABSENT. It is coding but does not alter
-#: the protein, and retaining it would roughly double the surviving set for no
-#: gain. A synonymous call that also carries a splice term is still retained,
-#: because matching is over a variant's whole term list across every transcript —
-#: which is the case ``prioritization.filters`` warns about when it declines to
-#: use predicted consequence at all.
-CODING_CONSEQUENCE_TERMS: Final[frozenset[str]] = frozenset(
-    {
-        "coding_sequence_variant",
-        "coding_transcript_variant",
-        "conservative_inframe_deletion",
-        "conservative_inframe_insertion",
-        "disruptive_inframe_deletion",
-        "disruptive_inframe_insertion",
-        "exon_loss_variant",
-        "feature_elongation",
-        "feature_truncation",
-        "frameshift_variant",
-        "incomplete_terminal_codon_variant",
-        "inframe_deletion",
-        "inframe_insertion",
-        "initiator_codon_variant",
-        "missense_variant",
-        "protein_altering_variant",
-        "protein_protein_contact",
-        "rare_amino_acid_variant",
-        "start_lost",
-        "start_retained_variant",
-        "stop_gained",
-        "stop_lost",
-        "stop_retained_variant",
-        "structural_interaction_variant",
-        "transcript_ablation",
-        "transcript_amplification",
-    }
-)
-
-#: Terms that implicate splicing, including the weak ones.
-#:
-#: ``splice_region_variant`` is a deliberately generous inclusion: it fires on
-#: synonymous and intronic calls near an exon boundary, which is precisely the
-#: class a naive coding-only rule loses.
-SPLICE_CONSEQUENCE_TERMS: Final[frozenset[str]] = frozenset(
-    {
-        "exonic_splice_region_variant",
-        "splice_acceptor_variant",
-        "splice_branch_variant",
-        "splice_donor_5th_base_variant",
-        "splice_donor_region_variant",
-        "splice_donor_variant",
-        "splice_polypyrimidine_tract_variant",
-        "splice_region_variant",
-        "splice_site_variant",
-    }
-)
-
-#: Impacts that retain a variant whatever its terms say.
-#:
-#: Fail-open on purpose: an unrecognised SO term with a HIGH impact must not be
-#: dropped because this module's vocabulary is out of date. A new annotation tool
-#: adds terms far more often than it adds impact classes.
-SELECTING_IMPACTS: Final[frozenset[ImpactSeverity]] = frozenset(
-    {ImpactSeverity.HIGH, ImpactSeverity.MODERATE}
-)
 
 # ---------------------------------------------------------------------------
 # Reason codes. Both sets partition their side of the decision exactly once, so
@@ -356,6 +309,7 @@ def iter_selected(
     frequency: FrequencyThresholds,
     thresholds: SelectionThresholds | None = None,
     clock: Clock,
+    discards: DiscardSink | None = None,
 ) -> SelectionStream:
     """Select plausible candidates from a stream, holding one record at a time.
 
@@ -371,6 +325,7 @@ def iter_selected(
         frequency=frequency,
         thresholds=thresholds or SelectionThresholds(),
         clock=clock,
+        discards=discards,
     )
 
 
@@ -381,6 +336,7 @@ class SelectionStream:
     """
 
     __slots__ = (
+        "_discards",
         "_dropped",
         "_exhausted",
         "_frequency",
@@ -400,7 +356,9 @@ class SelectionStream:
         frequency: FrequencyThresholds,
         thresholds: SelectionThresholds,
         clock: Clock,
+        discards: DiscardSink | None = None,
     ) -> None:
+        self._discards = discards
         self._source = variants
         self._frequency = frequency
         self._thresholds = thresholds
@@ -431,6 +389,7 @@ class SelectionStream:
         return self._drive()
 
     def _drive(self) -> Iterator[SelectionDecision]:
+        discards = self._discards
         for variant in self._source:
             self._input += 1
             decision = self._decide(variant)
@@ -438,6 +397,21 @@ class SelectionStream:
                 self._retained[decision.reason] += 1
             else:
                 self._dropped[decision.reason] += 1
+                if discards is not None:
+                    # ADR 0019 settled for per-reason counts because four million
+                    # EvidenceItems is not a thing this pipeline can hold, and said
+                    # so: "Per-variant rejection records for the dropped set remain
+                    # available by re-running with enabled: false, which is not the
+                    # same thing and is not claimed to be." ADR 0028 closes that
+                    # gap at ~75 bytes a row rather than ~13 KB.
+                    discards.record(
+                        DiscardRecord(
+                            variant_id=variant.variant_id,
+                            stage=DiscardStage.SELECTION,
+                            rule=decision.reason,
+                            value=_selection_value(variant, decision, self._frequency),
+                        )
+                    )
             for note in decision.notes:
                 self._notes[note] += 1
             yield decision
@@ -656,30 +630,37 @@ class SelectionStream:
 # ---------------------------------------------------------------------------
 
 
-def _terms(annotation: ConsequenceAnnotation) -> Iterator[str]:
-    """Individual SO terms, splitting the joined forms some tools emit.
-
-    SnpEff writes ``splice_region_variant&synonymous_variant`` in a single ANN
-    field, and a VEP-style adapter may pass ``+``-joined terms through. Matching
-    the joined string against a set of atomic terms silently fails to recognise
-    either, which for this stage means dropping a splice-region call as
-    non-coding.
-    """
-    for term in annotation.consequence_terms:
-        for token in term.replace("+", "&").split("&"):
-            cleaned = token.strip().lower()
-            if cleaned:
-                yield cleaned
-
-
 def _is_selecting(annotation: ConsequenceAnnotation) -> bool:
-    """Does this one transcript argue for keeping the variant?"""
-    if annotation.impact in SELECTING_IMPACTS:
-        return True
-    return any(
-        term in CODING_CONSEQUENCE_TERMS or term in SPLICE_CONSEQUENCE_TERMS
-        for term in _terms(annotation)
-    )
+    """Does this one transcript argue for keeping the variant?
+
+    :func:`mva.models.variant.consequence_is_selecting` verbatim. The rule is
+    shared with the triage bar rather than restated here, because a triage bar
+    that is narrower than this predicate deletes candidates this stage would have
+    kept, and two copies of a term list is exactly how that happens.
+    """
+    return consequence_is_selecting(annotation)
+
+
+def _selection_value(
+    variant: VariantRecord, decision: SelectionDecision, frequency: FrequencyThresholds
+) -> str:
+    """The observation the drop rule fired on, for the discard ledger.
+
+    Only the frequency rule rests on a measured number, and it is the only one
+    whose value is a number here. The consequence rules fire on the *absence* of a
+    coding or splice term across every transcript, and there is no single value
+    that summarises that — so the column carries the gene the variant was placed
+    in, which is what a reviewer asking "why isn't my BUB1B variant in the output"
+    needs, and an empty string when there was no gene at all (GP-14: an absence is
+    rendered as an absence, never as a zero).
+    """
+    if decision.reason == DROP_COMMON_IN_POPULATION:
+        observed = variant.max_allele_frequency(min_allele_number=frequency.min_allele_number)
+        return f"{observed.allele_frequency:.6g}" if observed is not None else ""
+    if decision.reason == DROP_NO_GENE_ASSIGNMENT:
+        return ""
+    genes = variant.gene_symbols
+    return genes[0] if genes else ""
 
 
 def _has_pathogenic_assertion(variant: VariantRecord) -> bool:

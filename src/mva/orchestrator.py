@@ -26,9 +26,11 @@ from mva.annotation.binding import (
 )
 from mva.annotation.local_tables import load_default_adapters
 from mva.annotation.service import iter_annotated
+from mva.annotation.triage import VariantTriage, narrow_to_selection, triage_warnings
 from mva.config import CaseConfig, NetworkProfile, Workspace
 from mva.determinism import canonical_json
 from mva.errors import ConfigError, ExportBlockedError
+from mva.evidence.discards import DiscardLedger
 from mva.evidence.ledger import AssertionResolver, EvidenceLedger
 from mva.evidence.store import EvidenceStore, GraphEdge
 from mva.ingestion.normalise import normalise_variants, open_reference_fasta
@@ -65,6 +67,7 @@ from mva.privacy.audit import run_audit
 from mva.privacy.export import PUBLIC_EXPORT_ALLOWLIST as _PUBLIC_EXPORT_ALLOWLIST
 from mva.privacy.export import gate_public_export
 from mva.privacy.netguard import OfflineProfile
+from mva.progress import StageMonitor, free_bytes_at
 from mva.reporting.dossier import build_candidate_dossier
 from mva.reporting.track1 import (
     compose_submission,
@@ -367,6 +370,11 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
     # `close()` in `_finish` unlinks it. Without a spill_dir the ledger keeps its
     # pre-existing all-in-memory behaviour, which is what every test gets.
     ledger = EvidenceLedger(run_id=context.run_id, spill_dir=workspace.tmp_dir)
+    # Opened before the first record is read, because the FIRST gate in the
+    # pipeline is inside `read_vcf` and an audit that starts after it is complete
+    # about everything except its largest single loss (ADR 0028). Closed in
+    # `_finish`, before the artifact is hashed.
+    discards = DiscardLedger(context.artifact_path("discards/discard_ledger.tsv"))
 
     # Resolved BEFORE the VCF is opened. A real case whose reference releases are
     # missing must fail before it has read one patient record, not after (ADR 0027).
@@ -385,6 +393,7 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
             workspace.path(config.inputs.vcf),
             expected_build=config.genome_build,
             source_artifact="input_vcf",
+            discards=discards,
         )
         normalised = normalise_variants(ingestion.variants, reference=reference)
         qc = assess_quality(normalised.variants, thresholds=config.quality, clock=context.clock)
@@ -392,12 +401,16 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         context.warnings.extend(ingestion.warnings)
         context.warnings.extend(normalised.warnings)
 
-        normalised_art = context.write_json_artifact(
+        # Streamed rather than built as one list of dicts. Byte-identical output
+        # (`JsonRowsSink` and `canonical_json(list(rows))` agree by construction and
+        # by test), and it removes a second full materialisation of the callset:
+        # the measured artifact is 2.6 GB, so the list comprehension this replaces
+        # was ~2.6 GB of transient Python dicts on top of the records themselves.
+        normalised_art = context.write_json_rows_artifact(
             "variants/normalised.json",
-            [v.model_dump(mode="json") for v in qc.variants],
+            (v.model_dump(mode="json") for v in qc.variants),
             kind=ArtifactKind.NORMALISED_VARIANTS,
             stage="ingest",
-            row_count=len(qc.variants),
         )
         context.write_json_artifact(
             "qc/qc_report.json",
@@ -416,7 +429,9 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
             upstream=[normalised_art.artifact_id],
         )
         if not _should_run("annotate", stop_after):
-            return _finish(context, repo_root=repo_root, ledger=ledger, ranked=[])
+            return _finish(
+                context, repo_root=repo_root, ledger=ledger, discards=discards, ranked=[]
+            )
 
         # ---------------------------------------------------------------- annotate
         bound = _bind_adapters(
@@ -426,7 +441,34 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
             reference=reference,
             stack=stack,
         )
-        annotated = iter_annotated(qc.variants, adapters=bound.adapters, clock=context.clock)
+        # ---------------------------------------------------- the relevance bar
+        # Narrowed against the selection stage FIRST, so the bar can never be
+        # tighter than the gate behind it and the partition cannot change which
+        # variants are rankable (ADR 0028, GP-30). The narrowings are warnings
+        # rather than a silent adjustment: a configured value that was not the
+        # value in force has to appear in the run report.
+        triage_thresholds, narrowings = narrow_to_selection(config.triage, config.selection)
+        context.warnings.extend(triage_warnings(triage_thresholds, config.selection, narrowings))
+        triage = VariantTriage(triage_thresholds)
+
+        annotated = iter_annotated(
+            qc.variants,
+            adapters=bound.adapters,
+            clock=context.clock,
+            triage=triage,
+            discards=discards,
+        )
+
+        # Projects total time and bytes from the first batch against free disk, and
+        # refuses to continue when the answer is "this cannot finish". The measured
+        # run that motivated all of this was killed at 7 h 30 m; every number needed
+        # to stop it in its first two minutes was available then and nothing was
+        # looking at them.
+        monitor = StageMonitor(
+            "annotate",
+            total_records=len(qc.variants),
+            free_bytes=free_bytes_at(context.run_dir),
+        )
 
         # ONE pass drives everything: annotation feeds the ledger and the artifact,
         # then the hard filter, the soft flags and selection. Nothing but the
@@ -434,9 +476,11 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         # than 4.5 M (docs/scale-report.md, docs/handoff-scale.md §1.3).
         #
         # The artifact is written from the point BEFORE hard filtering, so
-        # `variants/annotated.json` still holds every annotated record. That is why
-        # this uses the PUSH sink: a puller cannot both write every record and hand
-        # a filtered subset onward in the same pass.
+        # `variants/annotated.json` holds every record that CLEARED THE BAR. That
+        # is the change ADR 0028 makes and the reason the artifact stops being ~95
+        # GB: everything the bar dropped is one row in the discard ledger instead.
+        # This still uses the PUSH sink, because a puller cannot both write every
+        # surviving record and hand a filtered subset onward in the same pass.
         with context.open_json_rows_artifact(
             "variants/annotated.json",
             kind=ArtifactKind.ANNOTATED_VARIANTS,
@@ -447,10 +491,14 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
             def _recorded() -> Iterator[VariantRecord]:
                 for item in annotated:
                     ledger.extend(item.evidence)
+                    before = sink.bytes_written
                     sink.write(item.variant.model_dump(mode="json"))
+                    monitor.observe(bytes_written=sink.bytes_written - before)
                     yield item.variant
 
-            filtered = iter_hard_filtered(_recorded(), expected_build=config.genome_build)
+            filtered = iter_hard_filtered(
+                _recorded(), expected_build=config.genome_build, discards=discards
+            )
             flagged = iter_soft_flagged(
                 filtered, frequency=config.frequency, quality=config.quality
             )
@@ -459,9 +507,11 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
                 frequency=config.frequency,
                 thresholds=config.selection,
                 clock=context.clock,
+                discards=discards,
             )
             selected = list(selection)
 
+        monitor.finish()
         annotated_art = sink.provenance
         if annotated_art is None:  # pragma: no cover - set by the context manager
             msg = "The annotated-variants artifact was not registered on exit."
@@ -471,6 +521,41 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         # is read after the pass, not at bind time.
         context.warnings.extend(bound.run_warnings())
 
+        # The bar's own counts, alongside the selection report and classified the
+        # same way: counts and thresholds, never an id (GP-41).
+        annotation_triage_report = annotated.triage_report()
+        hard_filter_counts = filtered.counts()
+        # The funnel, in the terms published pipelines state theirs in, so the two
+        # are directly comparable without arithmetic. `raw_records` is the VCF's
+        # own data-line count; `normalised_records` is after multiallelic
+        # decomposition and after the reader's own gate, which is where the decoy
+        # and unplaced contigs go. Anyone reconciling our numbers against another
+        # pipeline's has to know which of those two is in play, so both are here.
+        funnel = {
+            "raw_records": len(qc.variants) + ingestion.skipped_count,
+            "skipped_at_ingest": ingestion.skipped_count,
+            "normalised_records": len(qc.variants),
+            "annotated_records": annotation_triage_report.input_count,
+            "cleared_relevance_bar": annotation_triage_report.retained_count,
+            "retained_by_hard_filter": hard_filter_counts["retained"],
+            "selected_for_pairing": selection.report().retained_count,
+        }
+        context.write_json_artifact(
+            "annotation/triage_report.json",
+            {
+                **annotation_triage_report.as_payload(),
+                "funnel": funnel,
+                "thresholds": triage_thresholds.as_payload(),
+                "narrowings": list(narrowings),
+                "discards_by_rule": discards.counts(),
+                "discards_by_stage": discards.counts_by_stage(),
+            },
+            kind=ArtifactKind.TRIAGE_REPORT,
+            stage="annotate",
+            upstream=[annotated_art.artifact_id],
+            row_count=annotation_triage_report.input_count,
+        )
+
         # ---------------------------------------------------------------- select
         selection_report = selection.report()
         ledger.extend(selection.evidence())
@@ -479,7 +564,7 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
             "selection/selection_report.json",
             {
                 **selection_report.as_payload(),
-                "hard_filter": filtered.counts(),
+                "hard_filter": hard_filter_counts,
             },
             kind=ArtifactKind.SELECTION_REPORT,
             stage="select",
@@ -488,7 +573,9 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         )
 
         if not _should_run("prioritise", stop_after):
-            return _finish(context, repo_root=repo_root, ledger=ledger, ranked=[])
+            return _finish(
+                context, repo_root=repo_root, ledger=ledger, discards=discards, ranked=[]
+            )
 
     # ---------------------------------------------------------------- phenotype
     profile = load_phenotype_profile(
@@ -600,7 +687,9 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
     )
 
     if not _should_run("mechanism", stop_after):
-        return _finish(context, repo_root=repo_root, ledger=ledger, ranked=ranked)
+        return _finish(
+            context, repo_root=repo_root, ledger=ledger, discards=discards, ranked=ranked
+        )
 
     # ---------------------------------------------------------------- mechanism
     mechanism_result = build_mechanism(
@@ -624,42 +713,49 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
 
     if mechanism is None or not _should_run("drugs", stop_after):
         return _finish(
-            context, repo_root=repo_root, ledger=ledger, ranked=ranked, mechanism=mechanism
+            context,
+            repo_root=repo_root,
+            ledger=ledger,
+            discards=discards,
+            ranked=ranked,
+            mechanism=mechanism,
         )
 
     # ---------------------------------------------------------------- drugs
     catalog = DrugCatalog.from_tsv(
         knowledge_root / "public" / "drug_catalog.tsv", version="synthetic-v0.0"
     )
-    triage = generate_drug_hypotheses(mechanism=mechanism, catalog=catalog, clock=context.clock)
-    ledger.extend(triage.evidence)
+    drug_triage = generate_drug_hypotheses(
+        mechanism=mechanism, catalog=catalog, clock=context.clock
+    )
+    ledger.extend(drug_triage.evidence)
 
     context.write_text_artifact(
         "reports/drug_hypotheses.md",
         build_drug_report(
-            triage.accepted,
-            triage.rejected,
+            drug_triage.accepted,
+            drug_triage.rejected,
             mechanism=mechanism,
             resolver=resolver,
             clock=context.clock,
         ),
         kind=ArtifactKind.DRUG_HYPOTHESES,
         stage="drugs",
-        row_count=len(triage.accepted),
+        row_count=len(drug_triage.accepted),
     )
     context.write_text_artifact(
         "reports/rejection_record.md",
-        build_rejection_record(triage.rejected, clock=context.clock),
+        build_rejection_record(drug_triage.rejected, clock=context.clock),
         kind=ArtifactKind.REJECTION_RECORD,
         stage="drugs",
-        row_count=len(triage.rejected),
+        row_count=len(drug_triage.rejected),
     )
     context.write_text_artifact(
         "reports/track2_report.md",
         build_track2_report(
             mechanism,
-            triage.accepted,
-            triage.rejected,
+            drug_triage.accepted,
+            drug_triage.rejected,
             pair=ranked[0] if ranked else None,
             resolver=resolver,
             clock=context.clock,
@@ -672,10 +768,11 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         context,
         repo_root=repo_root,
         ledger=ledger,
+        discards=discards,
         ranked=ranked,
         mechanism=mechanism,
-        accepted=list(triage.accepted),
-        rejected=list(triage.rejected),
+        accepted=list(drug_triage.accepted),
+        rejected=list(drug_triage.rejected),
         profile=profile,
     )
 
@@ -685,6 +782,7 @@ def _finish(
     *,
     repo_root: Path,
     ledger: EvidenceLedger,
+    discards: DiscardLedger,
     ranked: list[CandidatePair] | tuple[CandidatePair, ...],
     mechanism: MechanismHypothesis | None = None,
     accepted: list[object] | None = None,
@@ -702,6 +800,23 @@ def _finish(
         accepted=accepted,
         rejected=rejected,
         profile=profile,
+    )
+
+    # Closed and registered BEFORE the privacy audit and the provenance manifest,
+    # so the audit scans the finished file and `content_hash` covers all of it. A
+    # ledger left open would be hashed mid-write and the manifest would record a
+    # digest of a file that no longer exists in that form.
+    discards.close()
+    context.register_artifact(
+        kind=ArtifactKind.DISCARD_LEDGER,
+        path=discards.path,
+        stage="report",
+        row_count=discards.row_count,
+        notes=(
+            "One row per dropped variant, by id, with the rule and the value that "
+            "dropped it (GP-13 as amended, ADR 0028). SENSITIVE: every row is a "
+            "build-qualified proband coordinate."
+        ),
     )
 
     _write_privacy_audit(context, repo_root=repo_root)

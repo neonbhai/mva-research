@@ -65,6 +65,7 @@ from pydantic import ValidationError
 
 from mva.errors import AdapterUnavailableError, GenomeBuildMismatchError, IngestionError
 from mva.models.base import error_token
+from mva.models.discard import DiscardRecord, DiscardSink, DiscardStage
 from mva.models.genome import (
     CANONICAL_CONTIGS,
     GenomeBuild,
@@ -249,14 +250,47 @@ class _VcfHeader:
 
 @dataclass(slots=True)
 class _Tally:
-    """Accumulator for privacy-safe aggregate reporting."""
+    """Accumulator for privacy-safe aggregate reporting, and the discard sink.
+
+    The sink is here rather than threaded separately because the tally is already
+    threaded through every function that can refuse a record, and a second
+    parameter beside it would be a second thing to forget at a new skip site.
+    ``skip`` is the only way to record one, so the count and the ledger row cannot
+    come apart.
+    """
 
     warnings: Counter[str]
     skipped: Counter[str]
+    discards: DiscardSink | None = None
 
     @classmethod
-    def empty(cls) -> _Tally:
-        return cls(warnings=Counter(), skipped=Counter())
+    def empty(cls, discards: DiscardSink | None = None) -> _Tally:
+        return cls(warnings=Counter(), skipped=Counter(), discards=discards)
+
+    def skip(self, reason: str, *, variant_id: str, value: str = "", count: int = 1) -> None:
+        """Count a refused record and, if a ledger is open, name it.
+
+        This is the FIRST gate in the pipeline and the largest single loss in it:
+        116,485 decoy and unplaced records on the measured callset, against 14,228
+        variants that survive to the end. An audit that starts downstream of it is
+        complete about everything except the biggest thing (ADR 0028).
+
+        ``variant_id`` is the best handle that exists rather than a guaranteed
+        canonical id — forming a canonical id is sometimes the thing that failed.
+        ``count`` covers the one site that refuses a whole multiallelic site at
+        once; the ledger then carries one row naming the site, not one per ALT,
+        because the ALTs were never separated.
+        """
+        self.skipped[reason] += count
+        if self.discards is not None:
+            self.discards.record(
+                DiscardRecord(
+                    variant_id=variant_id,
+                    stage=DiscardStage.INGEST,
+                    rule=reason,
+                    value=value,
+                )
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +367,7 @@ def read_vcf(
     expected_build: GenomeBuild,
     source_artifact: str,
     backend: str = BACKEND_AUTO,
+    discards: DiscardSink | None = None,
 ) -> IngestionResult:
     """Read a VCF into sorted, build-anchored variant records, all at once.
 
@@ -354,6 +389,11 @@ def read_vcf(
         IngestionError: the file is absent, unreadable, or the backend token is
             unknown.
         AdapterUnavailableError: ``backend="cyvcf2"`` was demanded but is missing.
+
+    ``discards``, when given, receives one row per record this reader refuses —
+    the first gate in the pipeline, and until ADR 0028 the one whose casualties
+    were a bare count in ``qc_report.json``. It changes nothing about which
+    records are returned.
     """
     stream = iter_vcf(
         path,
@@ -361,6 +401,7 @@ def read_vcf(
         source_artifact=source_artifact,
         backend=backend,
         streaming=False,
+        discards=discards,
     )
     variants = tuple(stream)
     summary = stream.summary()
@@ -382,6 +423,7 @@ def iter_vcf(
     source_artifact: str,
     backend: str = BACKEND_AUTO,
     streaming: bool = True,
+    discards: DiscardSink | None = None,
 ) -> VcfStream:
     """Open a VCF for streaming reads. Header now, records on demand.
 
@@ -430,7 +472,7 @@ def iter_vcf(
         raise IngestionError(msg)
 
     header = _read_header(path)
-    tally = _Tally.empty()
+    tally = _Tally.empty(discards)
     _check_declared_build(header, expected_build, tally)
     sample_id = _resolve_sample(header, tally)
 
@@ -967,7 +1009,9 @@ def _iter_raw_text(
     for index, line in enumerate(_text_lines(path, contigs)):
         raw = _raw_from_text_line(line, index)
         if raw is None:
-            tally.skipped[SKIP_MALFORMED_RECORD] += 1
+            # No coordinate parsed, so there is no id to give. The line index is
+            # the only handle that exists and is enough to find the line again.
+            tally.skip(SKIP_MALFORMED_RECORD, variant_id=f"line:{index}")
         else:
             yield raw
 
@@ -1167,11 +1211,19 @@ def _records_from_raw(
     """Decompose one VCF line into zero or more biallelic ``VariantRecord``s."""
     contig = _canonical_contig(raw.contig)
     if contig is None:
-        tally.skipped[SKIP_NON_CANONICAL_CONTIG] += len(raw.alts) or 1
+        # The contig is exactly what the rule read, and it is a scaffold name
+        # rather than a proband coordinate on its own — but the row as a whole is
+        # SENSITIVE, which is why the ledger is (GP-40).
+        tally.skip(
+            SKIP_NON_CANONICAL_CONTIG,
+            variant_id=_raw_handle(raw, build),
+            value=raw.contig,
+            count=len(raw.alts) or 1,
+        )
         return []
 
     if not raw.alts:
-        tally.skipped[SKIP_MISSING_ALT] += 1
+        tally.skip(SKIP_MISSING_ALT, variant_id=_raw_handle(raw, build, contig=contig))
         return []
     if raw.genotype_string is None:
         tally.warnings[WARN_MISSING_GENOTYPE] += 1
@@ -1186,7 +1238,11 @@ def _records_from_raw(
         allele_index = offset + 1
         reason = _unusable_allele_reason(alt)
         if reason is not None:
-            tally.skipped[reason] += 1
+            tally.skip(
+                reason,
+                variant_id=_raw_handle(raw, build, contig=contig, alt=alt),
+                value=alt.strip().upper(),
+            )
             continue
         record = _build_record(
             raw,
@@ -1199,10 +1255,35 @@ def _records_from_raw(
             tally=tally,
         )
         if record is None:
-            tally.skipped[SKIP_INVALID_COORDINATE] += 1
+            tally.skip(
+                SKIP_INVALID_COORDINATE,
+                variant_id=_raw_handle(raw, build, contig=contig, alt=alt),
+                value=str(raw.position),
+            )
             continue
         records.append(record)
     return records
+
+
+def _raw_handle(
+    raw: _RawRecord,
+    build: GenomeBuild,
+    *,
+    contig: str | None = None,
+    alt: str | None = None,
+) -> str:
+    """The best identifier a refused raw record has, for the discard ledger.
+
+    Shaped like a canonical variant id — ``{build}:{contig}:{pos}:{ref}:{alt}`` —
+    but built from the raw fields, so for a non-canonical contig it carries the
+    scaffold name the file used rather than a name this pipeline recognises. That
+    is deliberate: the row has to be findable in the SOURCE file, and rewriting
+    the contig to something canonical would make it unfindable in the one place a
+    reviewer will look. Where there is no single ALT it renders the whole ALT
+    list, because the site was refused as a site.
+    """
+    alleles = alt.strip().upper() if alt is not None else ",".join(raw.alts) or "."
+    return f"{build}:{contig or raw.contig}:{raw.position}:{raw.ref}:{alleles}"
 
 
 def _unusable_allele_reason(alt: str) -> str | None:

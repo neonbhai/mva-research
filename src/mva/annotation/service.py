@@ -41,9 +41,22 @@ from mva.annotation.base import (
     AdapterDescriptor,
     AdapterSet,
 )
+from mva.annotation.triage import (
+    DROP_REASONS as TRIAGE_DROP_REASONS,
+)
+from mva.annotation.triage import (
+    KEEP_REASONS as TRIAGE_KEEP_REASONS,
+)
+from mva.annotation.triage import (
+    KEEP_TRIAGE_DISABLED,
+    TriageReport,
+    TriageVerdict,
+    VariantTriage,
+)
 from mva.clock import Clock
 from mva.errors import AnnotationError
 from mva.models.base import AssertionTier
+from mva.models.discard import DiscardSink
 from mva.models.evidence import (
     Citation,
     EvidenceCategory,
@@ -217,6 +230,8 @@ def iter_annotated(
     adapters: AdapterSet,
     clock: Clock,
     batch_size: int | None = DEFAULT_ANNOTATION_BATCH_SIZE,
+    triage: VariantTriage | None = None,
+    discards: DiscardSink | None = None,
 ) -> AnnotationStream:
     """Annotate a stream of records without holding the callset.
 
@@ -243,8 +258,22 @@ def iter_annotated(
     can share an ID — that is exactly the global deduplication the batch path does.
     An unsorted stream with far-apart duplicates would count a repeat twice, which
     can only *understate* coverage; it can never invent it.
+
+    **``triage`` partitions the pass (ADR 0028).** With a bar bound, the consequence
+    adapter is still asked about every record, and the frequency and clinical
+    adapters are asked only about the records that clear it. Records that do not
+    are yielded to ``discards`` instead of being yielded to the caller: no evidence,
+    no artifact row, no lookup. Without a bar this is exactly the pre-ADR-0028 pass,
+    which is what every existing caller gets.
     """
-    return AnnotationStream(variants, adapters=adapters, clock=clock, batch_size=batch_size)
+    return AnnotationStream(
+        variants,
+        adapters=adapters,
+        clock=clock,
+        batch_size=batch_size,
+        triage=triage,
+        discards=discards,
+    )
 
 
 class AnnotationStream:
@@ -256,11 +285,14 @@ class AnnotationStream:
 
     __slots__ = (
         "_adapters",
+        "_asked",
         "_batch_size",
         "_carry",
+        "_clinical_before_bar",
         "_clinical_desc",
         "_consequence_desc",
         "_descriptors",
+        "_discards",
         "_distinct",
         "_exhausted",
         "_frequency_desc",
@@ -270,6 +302,9 @@ class AnnotationStream:
         "_source",
         "_started",
         "_timestamp",
+        "_triage",
+        "_triage_dropped",
+        "_triage_kept",
     )
 
     def __init__(
@@ -279,6 +314,8 @@ class AnnotationStream:
         adapters: AdapterSet,
         clock: Clock,
         batch_size: int | None,
+        triage: VariantTriage | None = None,
+        discards: DiscardSink | None = None,
     ) -> None:
         if batch_size is not None and batch_size < 1:
             msg = (
@@ -306,6 +343,19 @@ class AnnotationStream:
         self._carry: str | None = None
         self._started = False
         self._exhausted = False
+        # A bar that is present but disabled is treated as absent, so the two
+        # spellings of "off" cannot diverge and the hot path has one branch.
+        self._triage = triage if (triage is not None and triage.enabled) else None
+        self._clinical_before_bar = triage.clinical_before_bar if triage is not None else True
+        self._discards = discards
+        self._triage_kept: dict[str, int] = dict.fromkeys(TRIAGE_KEEP_REASONS, 0)
+        self._triage_dropped: dict[str, int] = dict.fromkeys(TRIAGE_DROP_REASONS, 0)
+        #: Distinct IDs each adapter was ASKED about. Equal to `_distinct` for the
+        #: consequence adapter always, and for the other two only when no bar is
+        #: bound — which is why coverage divides by this and not by `_distinct`.
+        #: Dividing a triaged run's frequency hits by the whole callset would
+        #: report a coverage collapse that never happened.
+        self._asked = [0, 0, 0]
 
     # ------------------------------------------------------------------ driving
 
@@ -323,15 +373,54 @@ class AnnotationStream:
     def _drive(self) -> Iterator[AnnotatedVariant]:
         adapters = self._adapters
         clinical_adapter = adapters.clinical
+        triage = self._triage
         for batch in self._batches():
             variant_ids = _unique_ids(record.variant_id for record in batch)
+            # The consequence adapter always sees the whole batch. It is one JVM
+            # launch per batch and a streaming pass, it is what makes the bar
+            # answerable, and it is not the cost this partition exists to avoid.
             consequence_index = adapters.consequence.annotate(variant_ids)
-            frequency_index = adapters.frequency.frequencies(variant_ids)
-            clinical_index: Mapping[str, tuple[ClinicalAssertion, ...]] = (
-                clinical_adapter.assertions(variant_ids) if clinical_adapter is not None else {}
+
+            # The clinical adapter runs BEFORE the bar by default, over the whole
+            # batch, and its answer is an input to the verdict. Without that, a
+            # curated pathogenic assertion cannot rescue a variant the consequence
+            # rule drops, because the rescue needs the lookup the bar skipped —
+            # measured on the scale phantom as 16 of 3,616 selected variants lost.
+            # ClinVar is one tabix file of ~100 MB against gnomAD's 22 multi-gigabyte
+            # shards, so this is the cheap half of what was deferred and the
+            # frequency lookup, which is the expensive half, stays behind the bar.
+            clinical_upfront = (
+                clinical_adapter is not None and triage is not None and self._clinical_before_bar
             )
+            early_clinical: Mapping[str, tuple[ClinicalAssertion, ...]] = (
+                clinical_adapter.assertions(variant_ids)
+                if clinical_upfront and clinical_adapter is not None
+                else {}
+            )
+
+            verdicts = self._triage_batch(batch, variant_ids, consequence_index, early_clinical)
+            # The ONLY ids that reach the frequency and clinical adapters. This is
+            # the line the whole of ADR 0028 is about: a gnomAD lookup is a region
+            # query against a multi-gigabyte shard, and asking it about 14 thousand
+            # coordinates instead of 4.96 million collapses the merged span count
+            # by three orders of magnitude.
+            lookup_ids = (
+                variant_ids
+                if triage is None
+                else tuple(vid for vid in variant_ids if verdicts[vid].retained)
+            )
+
+            frequency_index = adapters.frequency.frequencies(lookup_ids)
+            if clinical_upfront:
+                clinical_index: Mapping[str, tuple[ClinicalAssertion, ...]] = early_clinical
+            else:
+                clinical_index = (
+                    clinical_adapter.assertions(lookup_ids) if clinical_adapter is not None else {}
+                )
             self._observe_batch(
                 variant_ids,
+                lookup_ids,
+                clinical_ids=variant_ids if clinical_upfront else lookup_ids,
                 consequence_index=consequence_index,
                 frequency_index=frequency_index,
                 clinical_index=clinical_index,
@@ -344,6 +433,15 @@ class AnnotationStream:
                     or record.clinical_assertions
                 ):
                     self._pre_annotated += 1
+                if triage is not None:
+                    verdict = verdicts[record.variant_id]
+                    if not verdict.retained:
+                        # Accounted for, not retained (GP-13 as amended, ADR 0028).
+                        # One ~75-byte row instead of ~6 KB of JSON and three
+                        # EvidenceItems, and the variant stays answerable by id.
+                        if self._discards is not None:
+                            self._discards.record(verdict.as_discard(record.variant_id))
+                        continue
                 yield self._annotate(
                     record,
                     consequence_index=consequence_index,
@@ -351,6 +449,46 @@ class AnnotationStream:
                     clinical_index=clinical_index,
                 )
         self._exhausted = True
+
+    def _triage_batch(
+        self,
+        batch: Sequence[VariantRecord],
+        variant_ids: Sequence[str],
+        consequence_index: Mapping[str, tuple[ConsequenceAnnotation, ...]],
+        early_clinical: Mapping[str, tuple[ClinicalAssertion, ...]],
+    ) -> dict[str, TriageVerdict]:
+        """One verdict per DISTINCT id in the batch, and the running counts.
+
+        Keyed by id rather than computed per record so that two records sharing an
+        id — the only way a coordinate-sorted stream repeats — get one verdict and
+        are counted once, exactly as coverage deduplicates them. Returns an empty
+        mapping when no bar is bound, which is the allocation the disabled path
+        must not pay.
+        """
+        triage = self._triage
+        if triage is None:
+            return {}
+        # Assertions the ADAPTER just returned, plus any the input record already
+        # carried. Both are curated-assertion evidence and either is enough to keep
+        # a variant, which makes the bar's clinical test at least as wide as
+        # selection's `retain_pathogenic_clinical` — that one fires on PATHOGENIC
+        # assertions only, so keeping on any assertion is a strict superset.
+        assertions_by_id: dict[str, tuple[ClinicalAssertion, ...]] = dict(early_clinical)
+        for record in batch:
+            if record.clinical_assertions:
+                assertions_by_id.setdefault(record.variant_id, record.clinical_assertions)
+        verdicts: dict[str, TriageVerdict] = {}
+        for variant_id in variant_ids:
+            verdict = triage.verdict(
+                consequence_index.get(variant_id, ()),
+                clinical_assertions=assertions_by_id.get(variant_id, ()),
+            )
+            verdicts[variant_id] = verdict
+            if verdict.retained:
+                self._triage_kept[verdict.reason] += 1
+            else:
+                self._triage_dropped[verdict.reason] += 1
+        return verdicts
 
     def _batches(self) -> Iterator[list[VariantRecord]]:
         """Successive record batches. ``batch_size=None`` yields exactly one.
@@ -370,12 +508,26 @@ class AnnotationStream:
     def _observe_batch(
         self,
         variant_ids: Sequence[str],
+        lookup_ids: Sequence[str],
         *,
+        clinical_ids: Sequence[str],
         consequence_index: Mapping[str, Sequence[object]],
         frequency_index: Mapping[str, Sequence[object]],
         clinical_index: Mapping[str, Sequence[object]],
     ) -> None:
-        """Fold this batch into the running coverage counters."""
+        """Fold this batch into the running coverage counters.
+
+        Two denominators, not one. ``_distinct`` counts every id the batch held and
+        is the denominator for the consequence adapter, which saw all of them.
+        ``_asked`` counts the ids each adapter was actually given, which for the
+        frequency and clinical adapters under a triage bar is the surviving subset.
+
+        Dividing a triaged run's frequency hits by the whole callset would report
+        that gnomAD coverage collapsed by 350x on the day the bar was switched on.
+        It did not: the same fraction of the variants that were *asked about* came
+        back. A coverage figure whose denominator is a population the adapter was
+        never shown is not a measurement of the adapter (GP-14).
+        """
         carry = self._carry
         for variant_id in variant_ids:
             if variant_id == carry:
@@ -383,13 +535,25 @@ class AnnotationStream:
                 # inflate the denominator and understate coverage.
                 continue
             self._distinct += 1
+            self._asked[0] += 1
             if consequence_index.get(variant_id):
                 self._hits[0] += 1
+        for variant_id in lookup_ids:
+            if variant_id == carry:
+                continue
+            self._asked[1] += 1
             if frequency_index.get(variant_id):
                 self._hits[1] += 1
+        for variant_id in clinical_ids:
+            if variant_id == carry:
+                continue
+            self._asked[2] += 1
             if clinical_index.get(variant_id):
                 self._hits[2] += 1
         if variant_ids:
+            # The carry is the last id of the batch, whether or not it was looked
+            # up: it is the tail-deduplication handle for the NEXT batch, and a
+            # triaged-out id can still be the one that repeats across the boundary.
             self._carry = variant_ids[-1]
 
     def _annotate(
@@ -451,18 +615,48 @@ class AnnotationStream:
         return self._exhausted
 
     def coverage(self) -> dict[str, float]:
-        """Fraction of distinct input variants each adapter returned data for.
+        """Fraction of the variants each adapter was ASKED about that it answered for.
 
         Reported even when it is 0.0, because "we asked and got nothing" is a
         finding. Meaningful only once the stream has been consumed; a caller that
         stops early gets the coverage of the prefix it read, and
         :meth:`warnings` says so in words.
+
+        The denominator is per adapter (see :meth:`_observe_batch`). Without a
+        triage bar all three denominators are the distinct input count, which is
+        the pre-ADR-0028 definition exactly. With one, the frequency and clinical
+        denominators are the surviving subset — because a coverage number computed
+        over variants an adapter was never shown says nothing about the adapter.
+        :meth:`triage_report` carries how many that was.
         """
-        total = self._distinct
         return {
-            descriptor.name: (self._hits[index] / total) if total else 0.0
+            descriptor.name: (self._hits[index] / self._asked[index]) if self._asked[index] else 0.0
             for index, descriptor in enumerate(self._descriptors)
         }
+
+    def triage_report(self) -> TriageReport:
+        """What the relevance bar did, in counts. Counts only — never an id (GP-41).
+
+        Meaningful once the stream is drained, like every other counter here. With
+        no bar bound the report says so: input equals retained, and the single
+        keep reason is ``kept_triage_disabled``.
+        """
+        kept = sum(self._triage_kept.values())
+        dropped = sum(self._triage_dropped.values())
+        if self._triage is None:
+            return TriageReport(
+                input_count=self._records,
+                retained_count=self._records,
+                retained_by_reason={KEEP_TRIAGE_DISABLED: self._records},
+                dropped_by_reason=dict.fromkeys(TRIAGE_DROP_REASONS, 0),
+                thresholds={"enabled": False},
+            )
+        return TriageReport(
+            input_count=kept + dropped,
+            retained_count=kept,
+            retained_by_reason=dict(self._triage_kept),
+            dropped_by_reason=dict(self._triage_dropped),
+        )
 
     def warnings(self) -> tuple[str, ...]:
         """Run-level caveats, in a fixed order. These belong in the report, not a log."""
@@ -492,13 +686,39 @@ class AnnotationStream:
                 "than dropped (GP-13); an unannotated variant is not a benign variant."
             )
 
-        missing_frequencies = total - self._hits[1]
+        asked_frequency = self._asked[1]
+        missing_frequencies = asked_frequency - self._hits[1]
         if missing_frequencies:
             warnings.append(
-                f"{missing_frequencies}/{total} variants have no population-frequency data "
-                f"from '{self._frequency_desc.name}'. Their frequencies are recorded as empty "
-                "with a neutral no-data evidence item; they must not be scored as allele "
+                f"{missing_frequencies}/{asked_frequency} variants have no population-frequency "
+                f"data from '{self._frequency_desc.name}'. Their frequencies are recorded as "
+                "empty with a neutral no-data evidence item; they must not be scored as allele "
                 "frequency 0 (GP-14)."
+            )
+
+        # Emitted only when the bar actually removed something. A bar that ran and
+        # dropped nothing is a non-event, and `annotation/triage_report.json` says
+        # so unconditionally for anyone who wants to check. The clinical-rescue
+        # caveat is NOT repeated here: it depends on `selection.retain_pathogenic_
+        # clinical`, which this stage cannot see, so `triage.triage_warnings` owns
+        # it at the composition root and states it once.
+        dropped = sum(self._triage_dropped.values())
+        if self._triage is not None and dropped:
+            kept = sum(self._triage_kept.values())
+            breakdown = ", ".join(
+                f"{reason}={self._triage_dropped[reason]}"
+                for reason in TRIAGE_DROP_REASONS
+                if self._triage_dropped[reason]
+            )
+            warnings.append(
+                f"Annotation triage sent {kept}/{kept + dropped} variants to the frequency and "
+                f"clinical adapters and set {dropped} aside on consequence alone"
+                + (f" ({breakdown})" if breakdown else "")
+                + ". Every one of those is in the discard ledger by id with the rule and the "
+                "value that dropped it — accounted for, not retained (GP-13 as amended, "
+                "ADR 0028). A variant this bar drops has no frequency lookup, no clinical "
+                "lookup and no row in the variants artifact, so absence of any of those for it "
+                "is a statement about this pipeline and not about the variant (GP-14)."
             )
 
         clinical = self._adapters.clinical
@@ -510,8 +730,8 @@ class AnnotationStream:
         elif self._hits[2] == 0:
             warnings.append(
                 f"Clinical adapter '{clinical.name}' returned no assertions for any of "
-                f"the {total} variants. Absence of a curated assertion is not evidence of "
-                "benignity (GP-14)."
+                f"the {self._asked[2]} variants it was asked about. Absence of a curated "
+                "assertion is not evidence of benignity (GP-14)."
             )
 
         if self._pre_annotated:

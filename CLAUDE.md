@@ -19,7 +19,10 @@ Full list with IDs: `docs/golden-principles.md`. The ones you will hit first:
 
 1. **GP-11** A genomic coordinate without a genome build is invalid.
 2. **GP-13** Filtering ≠ ranking. Hard filters remove only invalid/impossible
-   records. Weak candidates are flagged and down-ranked, never deleted.
+   records. Weak candidates are flagged and down-ranked. Where a stage does drop a
+   valid record — selection and the annotation relevance bar, and only those — it
+   writes one row to the discard ledger naming the variant, the rule and the
+   value. Accounted for, not retained (ADR 0028).
 3. **GP-14** Absence of information is not negative information. `NOT_ASSESSED`
    ≠ `EXCLUDED`. No frequency data ≠ rare.
 4. **GP-15** Phase is never assumed. `UNKNOWN` survives end to end.

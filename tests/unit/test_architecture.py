@@ -28,6 +28,12 @@ LAYERS: dict[str, int] = {
     # rule is what let equivalent variants fail to join — which looks exactly
     # like "novel and ultra-rare" (ADR 0018).
     "alleles": 1,
+    # Throughput, ETA and the pre-flight disk refusal (ADR 0028). Layer 1 because
+    # it is a pure instrument: it imports `errors` to raise one thing and nothing
+    # else, it knows no stage, and every stage that uses it is handed one by the
+    # composition root. Mapped rather than left out — an unmapped owner is skipped
+    # by BOTH layer tests, which is how the orchestrator was silently exempt.
+    "progress": 1,
     "config": 2,
     # Out-of-repo reference releases: root resolution, the read side of
     # knowledge/manifests/resources.yaml, and the tiered integrity check (ADR 0020).
