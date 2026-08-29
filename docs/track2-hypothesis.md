@@ -137,7 +137,9 @@ reversine scores 0.110, last of 13.
 
 The same inversion catches three approved drugs, which is the harder case. Tang et al.,
 *Cell* 2011, PMID 21315436 found AICAR, 17-AAG and chloroquine selectively lethal to
-aneuploid cells, because aneuploid cells' autophagic capacity is already limited
+aneuploid cells — demonstrated in mouse embryonic fibroblasts trisomic for chromosome 1,
+13, 16 or 19, which is a closer model for constitutional aneuploidy than a transformed
+line is — because aneuploid cells' autophagic capacity is already limited
 (Santaguida et al., *Genes Dev* 2015, PMID 26404941) and their HSP90-dependent folding
 already impaired (Donnelly et al., *EMBO J* 2014, PMID 25205676). Against an MVA-associated
 embryonal tumour that is attractive; in the soma it spares no compartment.

@@ -56,6 +56,22 @@ Six of the seventy-seven carry **no citation and no inference label**, which the
 > the molecule, and which molecule the experiment uses), §4.5 (Does niacin reach the cell?
 > NAPRT, and a claim that turned out to be wrong), §5.1 (The gate that should not have been
 > open) and §5.2 (The gate that should not have been shut) of the hypothesis document.
+>
+> **Status of the corrections queue, re-checked 2026-08-29.** Every correction C-1 to C-16
+> in §7 was read back against `docs/track2-hypothesis.md` as it now stands, and the queue is
+> almost closed. **Thirteen are applied** — C-1 (in the corrected form the W-1 CORRECTION
+> describes, not the wording quoted in the entry), C-2, C-3, C-5, C-6, C-7, C-9, C-10, C-12,
+> C-13, C-14, C-15 and C-16. **Two are overtaken** by later rewrites of the sections they
+> targeted, C-4 and C-11, and are marked as such. **One is partial, C-8**, and it is the only
+> item a reader should still chase: §3 (Direction of effect) now rejects hydroxychloroquine
+> and metformin on the evidence that recommends their *analogues*, which was the half that
+> mattered, but it still does not name the model system, and the primary demonstration in
+> **trisomic mouse embryonic fibroblasts** is a point in the hypothesis's favour, since
+> constitutional trisomy is the better model for MVA than a transformed line. The
+> "Label, don't rewrite" list at the end of §7 is also closed: all six claims that carried
+> neither a citation nor an inference label now carry one. Each entry in §7 carries its own
+> marker and the original text underneath it, because what was asked for is part of the
+> record.
 
 Three withdrawals and twenty-two weakenings out of seventy-seven is not a good result and
 is not meant to look like one. The document's *conclusions* survive every one of them —
@@ -720,10 +736,19 @@ where the full text was.**
 Exact edits, ordered by how badly they are needed. Nothing here has been applied — this
 ledger does not modify the hypothesis document.
 
+> **Applied since, noted 2026-08-29.** The sentence above was true on the day it was
+> written and is not true now. Most of this queue has been worked through in
+> `docs/track2-hypothesis.md`: thirteen applied, two overtaken, one partial. Each entry
+> below now opens with a status marker; the correction text underneath every marker is the
+> original and has not been rewritten. The counts, and the one item still worth acting on,
+> are in the status note in §0.
+
 ### Must fix — the three withdrawals
 
 **C-1 (§1, The answer; §4.4, The sign paradox at the molecule — W-1). SUPERSEDED — see the
-W-1 CORRECTION above.** The remedy below
+W-1 CORRECTION above; APPLIED in that corrected form, in §1 (The answer), §4.4 (The sign
+paradox at the molecule) and Appendix G.2 (Direction at the molecule, agent by agent) of
+the hypothesis document.** The remedy below
 was applied, and its second half was wrong: SIRT2 *has* been measured against nicotinamide
 (Marcotte 2004, PMID 15301953, R58). The wording actually now in the document is the
 corrected wording, not the wording quoted here. Kept for the record.
@@ -748,7 +773,9 @@ from measurement to class inference and add the supporting reference.
   inhibition by nicotinamide: altering the NAD(+) cosubstrate specificity of a Sir2 enzyme.
   Avalos et al., *Mol Cell* 2005, 17(6):855-68, PMID 15780941.
 
-**C-2 (Appendix C, The four objections, in full — second objection; W-2).** Replace the
+**C-2 (Appendix C, The four objections, in full — second objection; W-2). APPLIED** — the
+second objection in Appendix C now carries the five-allele split, R550Q, Q921H, Y155C, the
+paper's own conclusion and the misfolding version of the objection. Replace the
 objection and the answer:
 
 > **"Suijkerbuijk 2010 describes two mutation classes. Half of them are qualitative defects
@@ -763,7 +790,10 @@ objection and the answer:
 > (HSP90-dependent, proteasome-cleared), and whether K668 deacetylation can counteract
 > misfolding-driven turnover has never been tested.
 
-**C-3 (§7.1, What the model could not express; W-3).** In the tumour-surveillance bullet,
+**C-3 (§7.1, What the model could not express; W-3). APPLIED** — the Kalish citation is
+gone from the hypothesis document; §7.1 and Appendix E.1 carry the >5% rule with all three
+tumour rates; and `SOURCES.md` records R54 under "considered and left out".
+In the tumour-surveillance bullet,
 delete "updated in Kalish et al.,
 *Clin Cancer Res* 2024;30:5260-5269, PMID 39320341" — that guideline does not mention MVA,
 *BUB1B* or PCS syndrome. Replace the surveillance sentence with the operative rule and the
@@ -785,19 +815,19 @@ Update `SOURCES.md` R54 to "considered and left out" or delete it.
 
 | # | Where | Change |
 |---|---|---|
-| C-4 | §4 (The primary hypothesis) boxed hypothesis, Appendix A.1 (Demonstrated links) L03, §4.1 (There is no single threshold, because there is no single readout), §6.1 (The falsifying experiment) readout 3 | Replace "~50% residual threshold" with a range and a named uncertainty. Suggested: *"if it crosses the residual-BubR1 threshold — which published knockdown series place somewhere between roughly 10% and 60%, and do not agree on"*. Add to Appendix A.1 L03 that Bohers is a **HeLa shRNA series with no data point between 14% and 58%**, and that Suijkerbuijk 2010's own HeLa titration found ~13% residual had "virtually no impact on the fidelity of chromosome segregation". |
-| C-5 | §4.3 (Why the NAD⁺/SIRT2 axis, and where it runs out) and Appendix G.1 | "SIRT2 overexpression in **BubR1^H/H** hypomorphic animals increased median lifespan" → *"…increased median lifespan by 123% in males, with no change in females; the animals remained small."* |
-| C-6 | §4.3 (Why the NAD⁺/SIRT2 axis, and where it runs out) and Appendix G.1 | After "NMN increased BubR1 abundance in vivo", add *"(500 mg/kg/day i.p. for 7 days, in wild-type mice aged 3 and 30 months; the effect is framed as restoration of an age-related decline)"* — which is the headroom objection of Appendix C (The four objections, in full) made concrete at the point of the claim. |
-| C-7 | §7.2 (The weakest link) | "established in utero and are structural at birth (Hanks 2004; Bohers 2008; García-Castillo 2008)" → keep Bohers for intrauterine growth restriction; drop García-Castillo (its index patients are *BUB1B*-negative and lacked microcephaly); label the irreversibility of microcephaly as **inference**. Add the better evidence: SIRT2 overexpression in BubR1^H/H mice left the animals small (North 2014). |
-| C-8 | §3 (Direction of effect) | "Hydroxychloroquine and metformin … on the same evidence that recommends them for the tumour" → say that Tang 2011 tested **chloroquine and AICAR** and that the approved analogues carry the direction across by class. Add that the primary demonstration is in **trisomic mouse embryonic fibroblasts** — a point in the document's favour, since constitutional trisomy is the better model. |
-| C-9 | §3 (Direction of effect) | "Aneuploid cells depend on autophagic degradation to manage their protein burden (Santaguida 2015)" → *"Aneuploid cells accumulate autophagosomal cargo in lysosomes and compensate by activating TFEB; their autophagic degradation capacity is already limited (Santaguida 2015)"* — which is what the paper shows and a stronger argument for the same conclusion. |
-| C-10 | §2 (The mechanism) | "There is no catalytic activity to agonise" → *"Human BubR1 retains the catalytic triad but its catalysis is dispensable for error-free segregation (Suijkerbuijk 2012), so there is no activity worth agonising."* |
-| C-11 | §5.2 (The gate that should not have been shut) and §7.1 (What the model could not express) | The claim that nicotinic acid's cancer question is answerable "from existing data" needs a citation and a caveat: HPS2-THRIVE (Landray et al., *N Engl J Med* 2014, PMID 25014686; n=25,673, median 3.9 y) reports serious adverse events by body system and **no cancer endpoint**. It is a data request against existing safety capture, not a re-read of published tables. |
-| C-12 | Appendix B (The therapeutic classes considered), §6.2 (The confirming experiment) | "senolytic result" → "genetic senescent-cell clearance" for Baker 2011 (INK-ATTAC, not a senolytic drug). |
-| C-13 | Appendix G.2 (Direction at the molecule, agent by agent) | Nicotinic acid row: qualify "functional benefit in mitochondrial myopathy" as **open-label, no placebo arm, with strength rising in treated controls as well as patients**, and note the reported anaemia tendency. |
-| C-14 | §1 (The answer) direction table | "AGREES. Signed, demonstrated" → note that what is demonstrated is the direction at the node; the human rescue readout is checkpoint response, not missegregation. |
-| C-15 | Appendix C (The four objections, in full) | Add a fourth objection: BubR1 is **stabilised** by K250 acetylation (Choi 2009) and **destabilised** by K668 acetylation (North 2014). Nothing establishes that a global NAD⁺/sirtuin shift is site-selective for K668. See ledger §4.1. |
-| C-16 | §7.1 (What the model could not express) | Replace or supplement the sirolimus example of cross-node blindness with the tanespimycin one: HSP90 inhibition directly destroys mutant BubR1 in MVA patient-derived cells (Suijkerbuijk 2010 Fig. 3C), a `WRONG_DIRECTION` at `N3_bubr1` that single-node scoring routed around. See ledger §4.2. |
+| C-4 — **OVERTAKEN** | §4 (The primary hypothesis) boxed hypothesis, Appendix A.1 (Demonstrated links) L03, §4.1 (There is no single threshold, because there is no single readout), §6.1 (The falsifying experiment) readout 3 | Replace "~50% residual threshold" with a range and a named uncertainty. Suggested: *"if it crosses the residual-BubR1 threshold — which published knockdown series place somewhere between roughly 10% and 60%, and do not agree on"*. Add to Appendix A.1 L03 that Bohers is a **HeLa shRNA series with no data point between 14% and 58%**, and that Suijkerbuijk 2010's own HeLa titration found ~13% residual had "virtually no impact on the fidelity of chromosome segregation". **Overtaken, 2026-08-29:** the phrase "~50% residual threshold" no longer appears anywhere in the hypothesis document. §4.1 (There is no single threshold, because there is no single readout) replaced it with a dose–response whose position is stated as unmeasured; Appendix A.1 L03 now names the shRNA HeLa series and its transformed, already-aneuploid background; and Appendix A.3 (The dose–response, readout by readout) carries both the unsampled gap and the ~13% titration. |
+| C-5 — **APPLIED** | §4.3 (Why the NAD⁺/SIRT2 axis, and where it runs out) and Appendix G.1 | "SIRT2 overexpression in **BubR1^H/H** hypomorphic animals increased median lifespan" → *"…increased median lifespan by 123% in males, with no change in females; the animals remained small."* |
+| C-6 — **APPLIED** | §4.3 (Why the NAD⁺/SIRT2 axis, and where it runs out) and Appendix G.1 | After "NMN increased BubR1 abundance in vivo", add *"(500 mg/kg/day i.p. for 7 days, in wild-type mice aged 3 and 30 months; the effect is framed as restoration of an age-related decline)"* — which is the headroom objection of Appendix C (The four objections, in full) made concrete at the point of the claim. |
+| C-7 — **APPLIED** | §7.2 (The weakest link) | "established in utero and are structural at birth (Hanks 2004; Bohers 2008; García-Castillo 2008)" → keep Bohers for intrauterine growth restriction; drop García-Castillo (its index patients are *BUB1B*-negative and lacked microcephaly); label the irreversibility of microcephaly as **inference**. Add the better evidence: SIRT2 overexpression in BubR1^H/H mice left the animals small (North 2014). |
+| C-8 — **PARTIAL** | §3 (Direction of effect) | "Hydroxychloroquine and metformin … on the same evidence that recommends them for the tumour" → say that Tang 2011 tested **chloroquine and AICAR** and that the approved analogues carry the direction across by class. Add that the primary demonstration is in **trisomic mouse embryonic fibroblasts** — a point in the document's favour, since constitutional trisomy is the better model. **Partial, 2026-08-29:** the first half is applied — §3 rejects all three agents "on the evidence that recommends their analogues for the tumour arm", and Appendix B records hydroxychloroquine standing for chloroquine and metformin for AICAR. The second half is not: the model system is still unstated, and "trisomic" appears nowhere in the hypothesis document. |
+| C-9 — **APPLIED** | §3 (Direction of effect) | "Aneuploid cells depend on autophagic degradation to manage their protein burden (Santaguida 2015)" → *"Aneuploid cells accumulate autophagosomal cargo in lysosomes and compensate by activating TFEB; their autophagic degradation capacity is already limited (Santaguida 2015)"* — which is what the paper shows and a stronger argument for the same conclusion. |
+| C-10 — **APPLIED** | §2 (The mechanism) | "There is no catalytic activity to agonise" → *"Human BubR1 retains the catalytic triad but its catalysis is dispensable for error-free segregation (Suijkerbuijk 2012), so there is no activity worth agonising."* |
+| C-11 — **OVERTAKEN** | §5.2 (The gate that should not have been shut) and §7.1 (What the model could not express) | The claim that nicotinic acid's cancer question is answerable "from existing data" needs a citation and a caveat: HPS2-THRIVE (Landray et al., *N Engl J Med* 2014, PMID 25014686; n=25,673, median 3.9 y) reports serious adverse events by body system and **no cancer endpoint**. It is a data request against existing safety capture, not a re-read of published tables. **Overtaken, 2026-08-29:** §5.2 (The gate that should not have been shut) now cites HPS2-THRIVE and states the serious-adverse-event caveat this asks for, but reaches the opposite conclusion — the per-arm malignancy counts are posted and public, so it is no longer a data request. See the note on CL-63 in §0. |
+| C-12 — **APPLIED** | Appendix B (The therapeutic classes considered), §6.2 (The confirming experiment) | "senolytic result" → "genetic senescent-cell clearance" for Baker 2011 (INK-ATTAC, not a senolytic drug). |
+| C-13 — **APPLIED** | Appendix G.2 (Direction at the molecule, agent by agent) | Nicotinic acid row: qualify "functional benefit in mitochondrial myopathy" as **open-label, no placebo arm, with strength rising in treated controls as well as patients**, and note the reported anaemia tendency. |
+| C-14 — **APPLIED** | §1 (The answer) direction table | "AGREES. Signed, demonstrated" → note that what is demonstrated is the direction at the node; the human rescue readout is checkpoint response, not missegregation. |
+| C-15 — **APPLIED** | Appendix C (The four objections, in full) | Add a fourth objection: BubR1 is **stabilised** by K250 acetylation (Choi 2009) and **destabilised** by K668 acetylation (North 2014). Nothing establishes that a global NAD⁺/sirtuin shift is site-selective for K668. See ledger §4.1. |
+| C-16 — **APPLIED** | §7.1 (What the model could not express) | Replace or supplement the sirolimus example of cross-node blindness with the tanespimycin one: HSP90 inhibition directly destroys mutant BubR1 in MVA patient-derived cells (Suijkerbuijk 2010 Fig. 3C), a `WRONG_DIRECTION` at `N3_bubr1` that single-node scoring routed around. See ledger §4.2. |
 
 ### Label, don't rewrite
 
@@ -807,6 +837,12 @@ the citations guarantee) forbids: CL-60
 chronic toxicity), CL-76 (proTAME/apcin never given to humans), plus the in-vivo human
 immunosurveillance inference at CL-18/27/44 and the "highest expected-value intervention"
 judgement at CL-66. Each needs either a source or the word **inference**.
+
+> **APPLIED, all six, noted 2026-08-29.** In the hypothesis document CL-60, CL-69, CL-76 and
+> CL-66 are now labelled **inference** where they are stated; the immunosurveillance
+> extension is labelled at Appendix A.1 L10, in the sirolimus row of Appendix B and in
+> Appendix E.1; and CL-63 is sourced in §5.2, in the other direction, as the §0 status note
+> records.
 
 ---
 
