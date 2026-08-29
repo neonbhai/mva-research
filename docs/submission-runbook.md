@@ -242,6 +242,43 @@ cost; nothing about submitting early forecloses a better attempt #2–6 later.
 
 ---
 
+## 4a. Checking that the library reproduces a banked Track 1 result
+
+The organisers require "documented, reproducible code, including all scripts and
+configuration files necessary to reproduce your results" (V. Chung, Sage
+Bionetworks, Community tab). A banked score is not by itself evidence of that:
+`docs/track1-method.md` records that the submitted ranking came out of a scripted
+run. Once `mva run all` has been executed against the real callset, this is how
+you check the library agrees with what was uploaded.
+
+```
+mva verify reproduces <submitted.csv> <produced.csv>
+```
+
+Both arguments are patient data — each is a list of one child's variant
+coordinates — so run it on the case volume, and note that **nothing it prints
+comes from either file**. Every number is a count, a boolean, a correlation or a
+verdict from a fixed vocabulary; the files are named by role and basename with
+the directory withheld, and a malformed file is reported as a line *number*
+rather than a line (GP-41, GP-44, PRIV-09, ADR 0008). That is what makes it safe
+for an agent to run and to paste the output back.
+
+It prints submitted/produced row counts, the intersection, rows unique to each
+side, whether the top-1 is identical, top-k agreement at each window, and
+Spearman's rho, then a verdict. **It exits non-zero on anything short of an exact
+reproduction**, so it can gate CI.
+
+Two things it does not do. It does not tell you *which* rows differ — by
+construction, and deliberately. And it compares rankings, not scores: agreement
+here says the library proposes the same candidates in the same order, which is
+the reproducibility claim; it does not re-run `evaluation.py`.
+
+Ordering is the scorer's own, `sorted(enumerate(rows), key=(-epcr, file_index))`,
+so "same order" means the order the challenge would score rather than the order
+the bytes sit in.
+
+---
+
 ## 5. Submitting — Track 2
 
 Verified against the Space's own source on 2026-08-28. Full detail, with file

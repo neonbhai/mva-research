@@ -123,7 +123,20 @@ what the conclusion rests on.
 >
 > So a reader reproducing this should expect the same resources, the same
 > representation rule and the same ranking inputs, and should verify the ranking
-> itself rather than assuming it. The submitted CSV is **not in this repository
+> itself rather than assuming it.
+>
+> **How to verify it, without anyone reading either file.**
+> `mva verify reproduces <submitted.csv> <produced.csv>` compares the two
+> rankings and prints
+> agreement statistics only: row counts, the size of the intersection, whether the
+> top-1 is identical, top-k agreement at each window, and Spearman's rho. It exits
+> non-zero on anything short of an exact reproduction, so it can gate CI. Both
+> inputs are lists of one child's variant coordinates, so no byte read from either
+> file reaches a return value, a log record or an exception message; files are
+> named by role and basename, and a malformed file is reported as a line *number*
+> (GP-41, GP-44, PRIV-09, ADR 0008). Ordering is the scorer's own —
+> `sorted(enumerate(rows), key=(-epcr, file_index))` — so "same order" means the
+> order `evaluation.py` would score, not the order the bytes happen to sit in. The submitted CSV is **not in this repository
 > and will not be**: it is a list of one child's variant coordinates, which is
 > patient data (GP-40). It was uploaded directly to the challenge Space, and the
 > organisers can compare it against what this method produces. A reader without

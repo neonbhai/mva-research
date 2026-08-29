@@ -71,6 +71,15 @@ just clean-demo     # remove demo workspace
 `just verify` is the acceptance gate. Do not merge past a failure; determinism
 and privacy checks are blocking by design (see `docs/decisions/0009-*`).
 
+```bash
+mva verify reproduces <submitted.csv> <produced.csv>
+```
+
+Answers whether a run reproduces a banked Track 1 submission. Both arguments are
+patient data; it emits counts, flags and a correlation only, never a row, so it is
+safe for an agent to run under GP-44 and ADR 0008. Exits non-zero on anything
+short of an exact reproduction. See `docs/submission-runbook.md` §4a.
+
 ## Rules for changing things
 
 - **Scoring weights** are configuration (`config/default.yaml`), not code.
