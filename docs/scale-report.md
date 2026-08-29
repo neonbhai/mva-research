@@ -815,3 +815,72 @@ cited as one.
 
 Also still unmeasured: the real (non-phantom) adapters at scale, and the pairing
 stage downstream of selection.
+
+---
+
+## 10. The composition root, and what the real callset did to it
+
+**Appended, not substituted.** Sections 1–9 stand as written. This section closes
+§8.7's open bullets and records the one thing every earlier section is explicit
+about not having: a measurement of the real adapters against the real callset.
+
+### 10.1 §8.7's bullets, closed
+
+§8.7 said the orchestrator "has to adopt [the streaming API] before the real file
+will run" and left the diff in a handover. It was never applied. Four bullets,
+and where each now stands:
+
+| §8.7 bullet | Status |
+|---|---|
+| `orchestrator.py` holds three collections at once | **Closed** — `_ingest_stream` composes `iter_vcf` → `iter_normalised` → `iter_assessed`; `tests/unit/test_architecture.py::test_the_composition_root_never_materialises_the_callset` fails if any batch entry point returns |
+| `canonical_json` builds one 2.6 GB string | **Closed** — the artifact is written through `write_json_rows_artifact`, which streams per record into an open handle |
+| 4.5 M `EvidenceItem`s cannot go into `EvidenceLedger` | **Closed** — the ledger is constructed with `spill_dir`, and the orchestrator adds one item per record rather than `extend`ing a materialised sequence |
+| §5: no rarity/coding selection in front of pairing | **Closed by a different mechanism** — the relevance bar (ADR 0028) sits ahead of annotation rather than ahead of pairing. `gene_pair_cap_truncated`'s firing rate has not been re-measured, so §5's own finding is not confirmed resolved |
+
+The middle two were closed before this section was written; only the first was
+outstanding, and it was the one that decided whether the file ran.
+
+### 10.2 What the batch path did on the real callset
+
+Every measurement above §10 is against the phantom. This is the first with real
+SnpEff, real gnomAD v4.1 exomes, real ClinVar and the real 4,962,060-variant
+proband VCF, and it is a failure measurement: the run was on the batch path.
+
+| | |
+|---|---|
+| wall clock before it was killed | **10 h 53 m** |
+| CPU consumed in that time | 45 min (~7%) — the rest was blocked on paging |
+| swap growth | 3 GB → **20.4 GB**, on a 24 GB machine |
+| output in the final 3 h 00 m | **none** |
+| main-thread samples inside `gc_collect_main` | **100%** (two `sample` runs, 15 min apart) |
+| SnpEff, one 250,000-variant batch | **1 h 52 m** |
+
+The stack was `list(selection)` → per-record construction → allocation-triggered
+collection → `deduce_unreachable` → `dict_traverse`/`subtype_traverse`. The
+collector was walking an ~18 GB live set — 4,962,060 `VariantRecord`s at §2's
+measured 3,672 bytes — and faulting each object back off disk to do it.
+
+Two details are worth keeping because both misdirect:
+
+- **RSS read low the whole time**, 150–430 MB, while the machine held 20.4 GB of
+  swap. §8's "Why the full-file peak RSS reads low" says why, and it misdirects
+  exactly as well in the field as it did on the bench.
+- **The single SnpEff batch looked like an adapter problem.** 250,000 variants in
+  112 minutes is 37 variants/s against a marginal cost the adapter's own docstring
+  measures as indistinguishable from zero. The JVM was competing for memory with
+  the 18 GB of Python objects, not doing 112 minutes of work. Nothing about the
+  adapter or its batch size needed changing.
+
+The pre-flight projection printed at 5.0% sampled and said 2 h 30 m. It was
+honest about what it had measured and blind to two things it could not: SnpEff's
+batch pass had not started, and neither had the paging.
+
+### 10.3 Still not measured
+
+The streaming path has not yet completed a full run against the real callset.
+When it does, its wall clock, peak RSS and swap growth belong in this section
+beside §10.2's, measured the same way. Until then §9.2's 0.080 GiB is a phantom
+number and §10.2's 20.4 GB is the only real-adapter figure on record.
+
+§9.3's two gaps also stand: the spilled ledger has still never been run at 4.5 M,
+and the pairing stage downstream of selection is still unmeasured.
