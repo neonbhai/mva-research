@@ -648,6 +648,18 @@ curated, see harm at a node other than the one an agent targets, record agent-sp
 toxicity, distinguish soma from tumour (ASSUMPTION-DRUG-08), or score a non-drug. No model
 read patient data at any point, and Track 2 had none to read.
 
+*Which models, on what terms.* The organisers asked entrants to name "the provider, the plan
+or tier, and the relevant setting" for any hosted model, in this methods description
+(C. Suver, Sage Bionetworks, Community tab, 2026-08-26). Literature curation and drafting
+used Anthropic's Claude Code on Claude Opus 5. The adversarial reviews checked in under
+`prompts/` were run through OpenAI's Codex CLI on gpt-5.6, and literature sweeps used Exa's
+search API. **TODO before submission — account holder to complete:** the plan or tier for
+each, and whether training on submitted content is off. Suver flags two specific traps worth
+checking against the account rather than assumed: content rated or flagged for safety review
+may still be used, and credits or grant programmes can carry terms that override account
+defaults. Nothing sent to any of the three was patient-derived. The case volume is outside
+what these tools may read (ADR 0008, GP-40), and Track 2 starts from a gene symbol.
+
 **4. Please describe any manual literature review or expert curation in detail.** 61
 references in `knowledge/literature/bub1b/SOURCES.md`, each resolved against PubMed on
 title, authors, journal, volume, pages and PMID, none recalled from memory — an *identity*
