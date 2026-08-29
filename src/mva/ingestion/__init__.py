@@ -8,6 +8,8 @@ The stage's contract, in order:
    :func:`iter_assessed` is the streaming form of step 3.
 2. :func:`normalise_variants` trims to a parsimonious representation, left-aligns
    when a :class:`ReferenceLookup` is supplied, and flags REF disagreements.
+   :func:`iter_normalised` is the same work over ``VcfStream.chunks()``, with the
+   report readable once the stream drains rather than alongside the records.
 3. :func:`assess_quality` adds non-destructive QC flags and one analytical
    :class:`~mva.models.evidence.EvidenceItem` per variant.
 
@@ -21,7 +23,10 @@ from mva.ingestion.normalise import (
     OP_TRIM,
     REF_ALLELE_MISMATCH_FLAG,
     NormalisationResult,
+    NormalisationStream,
+    NormalisationSummary,
     ReferenceLookup,
+    iter_normalised,
     normalise_variants,
     split_multiallelic,
     trim_and_left_align,
@@ -91,6 +96,8 @@ __all__ = [
     "IngestionResult",
     "IngestionSummary",
     "NormalisationResult",
+    "NormalisationStream",
+    "NormalisationSummary",
     "QcResult",
     "QcStream",
     "ReferenceLookup",
@@ -100,6 +107,7 @@ __all__ = [
     "cyvcf2_available",
     "detect_backend",
     "iter_assessed",
+    "iter_normalised",
     "iter_vcf",
     "normalise_variants",
     "read_vcf",

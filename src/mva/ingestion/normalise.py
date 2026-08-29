@@ -30,12 +30,19 @@ What this module will and will not claim:
   variant. It is marked ``ref_allele_mismatch`` so :mod:`mva.ingestion.qc` can raise
   a contradicting evidence item, and it only becomes fatal under
   ``strict_reference=True``.
+
+:func:`normalise_variants` takes a ``Sequence`` and returns every record it made,
+which is ~3,672 bytes each and ~18 GB for a whole-genome callset
+(``docs/scale-report.md`` §2). :func:`iter_normalised` is the same work over a
+stream of chunks, holding one chunk at a time and handing back the report *after*
+the stream drains — the shape TD-28 asks for, and the middle of the composition
+``iter_vcf`` and ``iter_assessed`` already occupy on either side.
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Protocol, cast
@@ -54,7 +61,7 @@ from mva.alleles import (
     summarise_left_alignment,
     trim_parsimoniously,
 )
-from mva.errors import AdapterUnavailableError, ReferenceMismatchError
+from mva.errors import AdapterUnavailableError, IngestionError, ReferenceMismatchError
 from mva.models.base import error_token
 from mva.models.genome import GenomicCoordinate
 from mva.models.variant import (
@@ -81,9 +88,12 @@ __all__ = [
     "LeftAlignmentReport",
     "LeftAlignmentStatus",
     "NormalisationResult",
+    "NormalisationStream",
+    "NormalisationSummary",
     "ReferenceLookup",
     "ReferenceStatus",
     "canonicalise_allele",
+    "iter_normalised",
     "normalise_variants",
     "open_reference_fasta",
     "split_multiallelic",
@@ -157,6 +167,25 @@ class NormalisationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class NormalisationSummary:
+    """Everything :class:`NormalisationResult` reports, and none of what it reports on.
+
+    The three fields are exactly the ones a caller reads off a
+    :class:`NormalisationResult` to write ``qc_report.json``. The records are
+    deliberately absent: a summary that carried them would put the whole callset
+    back in memory and undo the only reason :func:`iter_normalised` exists.
+
+    It is a separate type rather than a ``NormalisationResult`` with an empty
+    ``variants`` tuple, because an empty tuple is a lie a consumer cannot detect —
+    indistinguishable from a run that normalised nothing.
+    """
+
+    operations_applied: dict[str, int]
+    warnings: tuple[str, ...]
+    left_alignment: LeftAlignmentReport
+
+
+@dataclass(frozen=True, slots=True)
 class _Outcome:
     """One record's normalisation, plus what the batch report needs to count."""
 
@@ -190,6 +219,11 @@ def normalise_variants(
     Order of work per record: resolve any multi-allele genotype, validate REF
     against the reference (when one is supplied), then trim and — only with a
     reference — left-align.
+
+    This holds every record it was given and every record it made, which is
+    ~3,672 bytes each and does not fit a whole-genome callset
+    (``docs/scale-report.md`` §2). It is the right shape at fixture scale and the
+    wrong one at genome scale; :func:`iter_normalised` is the same work, streamed.
 
     Args:
         variants: records to normalise. Not mutated; new records are returned.
@@ -305,6 +339,224 @@ def _normalise_one(
         reference_consulted=aligner is not None and status is not ReferenceStatus.UNUSABLE,
         shift_limited=status is ReferenceStatus.SHIFT_LIMIT_REACHED,
     )
+
+
+# ---------------------------------------------------------------------------
+# The stream
+# ---------------------------------------------------------------------------
+
+
+def iter_normalised(
+    chunks: Iterable[Sequence[VariantRecord]],
+    *,
+    reference: ReferenceLookup | None = None,
+    strict_reference: bool = False,
+) -> NormalisationStream:
+    """Normalise a stream of chunks without ever holding more than one of them.
+
+    The middle of the composition ``docs/scale-report.md`` §8.8 measured at
+    **261.9 MB through QC with zero page faults**, against a batch path projected
+    at ~32 GB on a 24 GB machine (§2). §8.8's own driver spells this stage as a
+    generator expression over ``normalise_variants(chunk).variants`` — which
+    streams correctly and throws the normalisation report away. The report is not
+    optional: ``left_alignment`` is the typed degraded state a run has to publish
+    when its indel join keys are unreliable (GP-14), and dropping it would make a
+    whole-genome run quieter than the fixture-scale one it replaces. This function
+    is that generator expression with the report kept, on the same
+    ``iter_vcf`` -> :meth:`~mva.ingestion.reader.VcfStream.summary` and
+    ``iter_assessed`` -> :meth:`~mva.ingestion.qc.QcStream.metrics` pattern.
+
+    **Sorting, which is the subtle part.** :func:`normalise_variants` sorts each
+    chunk it is given, and nothing here sorts across chunks — deliberately, because
+    a global sort is exactly the materialisation being removed.
+    :meth:`~mva.ingestion.reader.VcfStream.chunks` is what makes that safe: it cuts
+    only on a contig change or where the next record is more than
+    ``DEFAULT_CHUNK_BOUNDARY_GAP`` bases away, and that gap exceeds
+    :data:`~mva.alleles.MAX_SHIFT_BP`, so no chunk's normalised output can overtake
+    the next chunk's. Concatenating independently sorted chunks is then provably the
+    same sequence as sorting everything once, which is what
+    ``iter_assessed`` verifies rather than assumes downstream. Feed this
+    arbitrary chunks and that argument no longer holds.
+
+    Args:
+        chunks: batches of records in ``sort_key()`` order, cut at safe boundaries —
+            :meth:`~mva.ingestion.reader.VcfStream.chunks` is the intended source.
+        reference: as :func:`normalise_variants`.
+        strict_reference: as :func:`normalise_variants`, including the raise.
+
+    Raises:
+        ReferenceMismatchError: only under ``strict_reference=True``, from whichever
+            chunk holds the disagreeing record — so it surfaces part-way through the
+            stream rather than before it starts.
+    """
+    return NormalisationStream(chunks, reference=reference, strict_reference=strict_reference)
+
+
+class NormalisationStream:
+    """Normalised records one chunk at a time; the report once they have all gone by.
+
+    Iterate it once, to the end, then call :meth:`summary`. The per-chunk reports are
+    accumulated as counts rather than merged as objects, because a
+    :class:`~mva.alleles.LeftAlignmentReport` is a *derived* status over a
+    population, and merging two of them by hand is precisely the labelling
+    :func:`~mva.alleles.summarise_left_alignment` exists to take away from callers.
+
+    Construct via :func:`iter_normalised`.
+    """
+
+    __slots__ = (
+        "_chunks",
+        "_exhausted",
+        "_indel_counts",
+        "_operations",
+        "_reference",
+        "_started",
+        "_strict_reference",
+        "_unstructured_warnings",
+        "_warnings",
+    )
+
+    def __init__(
+        self,
+        chunks: Iterable[Sequence[VariantRecord]],
+        *,
+        reference: ReferenceLookup | None,
+        strict_reference: bool,
+    ) -> None:
+        self._chunks = chunks
+        self._reference = reference
+        self._strict_reference = strict_reference
+        self._operations: Counter[str] = Counter()
+        self._warnings: Counter[str] = Counter()
+        self._unstructured_warnings: list[str] = []
+        self._indel_counts: Counter[str] = Counter()
+        self._started = False
+        self._exhausted = False
+
+    @property
+    def exhausted(self) -> bool:
+        return self._exhausted
+
+    # ---------------------------------------------------------------- records
+
+    def __iter__(self) -> Iterator[VariantRecord]:
+        if self._started:
+            msg = (
+                "This normalisation stream has already been iterated. A stream is "
+                "single-pass, and re-iterating would double-count every operation and "
+                "every indel in the left-alignment report. Call iter_normalised() again "
+                "over a re-read source, or materialise with normalise_variants()."
+            )
+            raise IngestionError(msg)
+        self._started = True
+        return self._drive()
+
+    def _drive(self) -> Iterator[VariantRecord]:
+        reference = self._reference
+        strict_reference = self._strict_reference
+        for chunk in self._chunks:
+            result = normalise_variants(
+                chunk, reference=reference, strict_reference=strict_reference
+            )
+            self._absorb(result)
+            # The chunk's records go out here and the chunk goes out of scope on the
+            # next turn of the loop. Nothing above this line keeps a record alive.
+            yield from result.variants
+        self._exhausted = True
+
+    def _absorb(self, result: NormalisationResult) -> None:
+        """Fold one chunk's report into the running totals, records excluded."""
+        for operation, count in result.operations_applied.items():
+            self._operations[operation] += count
+
+        report = result.left_alignment
+        self._indel_counts["indel"] += report.indel_count
+        self._indel_counts["shifted"] += report.shifted_count
+        self._indel_counts["unaligned"] += report.unaligned_indel_count
+        self._indel_counts["shift_limited"] += report.shift_limited_count
+
+        # The chunk's own degraded sentence describes the chunk, not the run: with
+        # ten chunks it would be emitted ten times, each naming a tenth of the
+        # indels. It is dropped here and recomputed once from the totals in
+        # summary(). Recognised by re-deriving the exact string from the chunk's own
+        # report, so this cannot drift from how normalise_variants appends it.
+        sentence = report.describe() if report.is_degraded else None
+        for message in result.warnings:
+            if message == sentence:
+                continue
+            counted = _split_warning_count(message)
+            if counted is None:
+                # Not the ``code (n=N)`` shape, so it cannot be summed. Deduplicated
+                # in first-seen order instead, which at least keeps one chunk's prose
+                # from being repeated once per chunk.
+                if message not in self._unstructured_warnings:
+                    self._unstructured_warnings.append(message)
+                continue
+            code, count = counted
+            self._warnings[code] += count
+
+    # ---------------------------------------------------------------- tallies
+
+    def summary(self) -> NormalisationSummary:
+        """The operations, warnings and left-alignment report for the whole stream.
+
+        Raises:
+            IngestionError: the stream was not read to its end. Same refusal as
+                :meth:`mva.ingestion.reader.VcfStream.summary`, for the same reason:
+                a partial ``left_alignment`` would understate how many indels this
+                run cannot join on, and an unjoined indel is scored novel and
+                ultra-rare rather than reported as missing (GP-14).
+        """
+        if not self._exhausted:
+            msg = (
+                "The normalisation stream was not read to its end, so its operation "
+                "counts and its left-alignment report are incomplete. Reporting them as "
+                "final would understate how many indels this run cannot join against "
+                "ClinVar or gnomAD, and a failed join is read downstream as 'novel and "
+                "ultra-rare' rather than as missing information. Iterate the stream to "
+                "completion before asking for its summary."
+            )
+            raise IngestionError(msg)
+
+        counts = self._indel_counts
+        left_alignment = summarise_left_alignment(
+            indel_count=counts["indel"],
+            shifted_count=counts["shifted"],
+            unaligned_indel_count=counts["unaligned"],
+            shift_limited_count=counts["shift_limited"],
+            reference_available=self._reference is not None,
+        )
+        messages = [f"{code} (n={self._warnings[code]})" for code in sorted(self._warnings)]
+        messages.extend(self._unstructured_warnings)
+        if left_alignment.is_degraded:
+            messages.append(left_alignment.describe())
+        return NormalisationSummary(
+            operations_applied={key: self._operations[key] for key in sorted(self._operations)},
+            warnings=tuple(messages),
+            left_alignment=left_alignment,
+        )
+
+
+def _split_warning_count(message: str) -> tuple[str, int] | None:
+    """Read back the ``"code (n=N)"`` rendering :func:`normalise_variants` emits.
+
+    The only place in this package that parses a warning instead of emitting one,
+    and it is here because the per-chunk counts have to be *summed*: a code that
+    fires in three chunks is one warning with one total, not three warnings a
+    reader has to add up. The alternative was to widen ``_Outcome`` and
+    ``NormalisationResult`` so the counts came out structured, which would change
+    a type every existing caller receives for the benefit of one new one.
+
+    Returns ``None`` for anything that is not that shape, which the caller then
+    carries through verbatim rather than mangling into a count it does not have.
+    """
+    code, separator, tail = message.rpartition(" (n=")
+    if not separator or not tail.endswith(")"):
+        return None
+    digits = tail[:-1]
+    if not digits.isdigit():
+        return None
+    return code, int(digits)
 
 
 # ---------------------------------------------------------------------------

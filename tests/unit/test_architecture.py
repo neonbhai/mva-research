@@ -643,3 +643,47 @@ def test_the_annotation_stream_is_driven_with_a_record_counter() -> None:
         "so progress and the disk projection would both be measured over survivors "
         "only: " + ", ".join(offenders)
     )
+
+
+def test_the_composition_root_never_materialises_the_callset() -> None:
+    """`orchestrator.py` must not call the batch ingest functions.
+
+    `read_vcf`, `normalise_variants` and `assess_quality` each return every record
+    at once. They are correct, they are what the fixture-scale callers and most of
+    the test suite use, and calling all three in sequence holds three collections
+    of `VariantRecord` simultaneously — measured at 7.13 kB a record against the
+    streaming path's 4.20 kB, or ~32.5 GB through QC (`docs/scale-report.md` §8.1).
+
+    On 2026-08-29 that composition took a 24 GB machine 20.4 GB into swap on the
+    real 4,962,060-variant callset. The run was killed at 10 h 53 m having written
+    nothing for its last three hours; a stack sample found 100% of the main thread
+    inside `gc_collect_main`, the collector walking an 18 GB live set and faulting
+    every object back off disk. `docs/scale-report.md` §8.7 had already recorded
+    that the orchestrator "has to adopt [the streaming API] before the real file
+    will run", and §9.1 had already measured batch annotation at 4.5 M as KILLED
+    against a 12 GiB watchdog while the streaming path held 0.080 GiB.
+
+    The regression is silent: the batch call is one word shorter, it type-checks,
+    and every test in this suite passes with it, because no fixture is large enough
+    to exhaust memory. Only the real callset fails, and it fails after hours.
+    """
+    batch_only = {"read_vcf", "normalise_variants", "assess_quality"}
+    repo_root = Path(__file__).resolve().parents[2]
+    path = SRC / "orchestrator.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    offenders = [
+        f"{path.relative_to(repo_root)}:{node.lineno} calls {node.func.id}()"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in batch_only
+    ]
+
+    assert not offenders, (
+        "the composition root materialises the whole callset at:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nRemediation: use the streaming siblings — iter_vcf(), "
+        "iter_normalised() over VcfStream.chunks(), and iter_assessed(). "
+        "See `_ingest_stream` in orchestrator.py and docs/scale-report.md §8.8."
+    )

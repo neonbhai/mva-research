@@ -27,20 +27,26 @@ from mva.annotation.binding import (
 from mva.annotation.local_tables import load_default_adapters
 from mva.annotation.service import iter_annotated
 from mva.annotation.triage import VariantTriage, narrow_to_selection, triage_warnings
+from mva.clock import Clock
 from mva.config import CaseConfig, NetworkProfile, Workspace
 from mva.determinism import canonical_json
-from mva.errors import ConfigError, ExportBlockedError
+from mva.errors import ConfigError, ExportBlockedError, IngestionError
 from mva.evidence.discards import DiscardLedger
 from mva.evidence.ledger import AssertionResolver, EvidenceLedger
 from mva.evidence.store import EvidenceStore, GraphEdge
-from mva.ingestion.normalise import normalise_variants, open_reference_fasta
-from mva.ingestion.qc import assess_quality
-from mva.ingestion.reader import read_vcf
+from mva.ingestion.normalise import (
+    NormalisationStream,
+    iter_normalised,
+    open_reference_fasta,
+)
+from mva.ingestion.qc import QcStream, iter_assessed
+from mva.ingestion.reader import VcfStream, iter_vcf
 from mva.interventions.catalog import DrugCatalog
 from mva.interventions.generate import generate_drug_hypotheses
 from mva.mechanisms.builder import build_mechanism, mechanism_relevance_score
 from mva.mechanisms.library import MechanismLibrary
 from mva.models.base import Sensitivity
+from mva.models.discard import DiscardSink
 from mva.models.drug import DrugHypothesis
 from mva.models.evidence import EvidenceItem
 from mva.models.mechanism import MechanismHypothesis
@@ -289,6 +295,93 @@ def _bind_adapters(
     return bound
 
 
+@dataclass(frozen=True, slots=True)
+class _IngestStream:
+    """One streaming read of the callset, and the two reports it will produce.
+
+    The three objects are returned together because none of them is valid without
+    the others: ``vcf.summary()`` and ``normalisation.summary()`` both refuse until
+    ``assessed`` has been iterated to its end, since a partial skip tally
+    understates how many records were discarded.
+    """
+
+    vcf: VcfStream
+    normalisation: NormalisationStream
+    assessed: QcStream
+
+
+def _ingest_stream(
+    config: CaseConfig,
+    workspace: Workspace,
+    *,
+    reference: ReferenceLookup | None,
+    clock: Clock,
+    discards: DiscardSink | None,
+) -> _IngestStream:
+    """VCF -> normalise -> QC as one stream, holding a chunk rather than a callset.
+
+    This composition is the one `docs/scale-report.md` §8.8 was written to hand
+    over, and §8.7 recorded that the composition root had not adopted it. Until it
+    did, `mva run all` called `read_vcf`, `normalise_variants` and `assess_quality`
+    and held three collections of `VariantRecord` at once: measured at 7.13 kB a
+    record against read's 4.20 kB, or ~32.5 GB through QC on a 24 GB machine.
+
+    That is not a projection. A run of the real 4,962,060-variant callset on
+    2026-08-29 took the machine 20.4 GB into swap, and the stack sample that
+    diagnosed it found 100% of the main thread inside `gc_collect_main` -- the
+    collector walking an 18 GB live set and faulting every object back off disk.
+    It was killed after 10 h 53 m having written nothing for the last three.
+    §9.1 had already measured both paths at 4.5 M against a 12 GiB watchdog:
+    batch annotation KILLED, streaming annotation 316 s at 0.080 GiB.
+
+    ``discards`` is ``None`` on any pass after the first. The ledger is a record of
+    what the run threw away, and a variant discarded twice would be counted twice
+    (ADR 0028).
+    """
+    vcf = iter_vcf(
+        workspace.path(config.inputs.vcf),
+        expected_build=config.genome_build,
+        source_artifact="input_vcf",
+        discards=discards,
+    )
+    # `chunks()` cuts only at coordinate gaps wide enough that no chunk's
+    # normalised output can overtake the next chunk's, which is what makes
+    # "normalise each chunk, concatenate" equal to "normalise everything, sort
+    # once" -- and therefore what lets `iter_assessed` verify global sort order
+    # without anyone holding the callset to sort it (GP-30).
+    normalisation = iter_normalised(vcf.chunks(), reference=reference)
+    assessed = iter_assessed(normalisation, thresholds=config.quality, clock=clock)
+    return _IngestStream(vcf=vcf, normalisation=normalisation, assessed=assessed)
+
+
+def _require_agreement(ingested: int, annotated: int) -> None:
+    """Refuse a run whose two reads of the input disagreed about how many records it has.
+
+    The callset is read twice — once to write `normalised.json` and once to feed
+    annotation — because holding it between the two is what took a 24 GB machine
+    20.4 GB into swap. Determinism makes the two reads identical (same file, same
+    reference, same fixed clock; GP-30), so this can only fire if the input changed
+    underneath the run or if a stream silently truncated.
+
+    It is checked rather than trusted because the failure is invisible otherwise: a
+    short second pass annotates fewer variants than were ingested, and every count
+    downstream — the funnel, the triage report, the denominator under every
+    percentage — is quietly computed against a callset that was never fully read.
+    A run that ranked the wrong candidates would still exit zero.
+    """
+    if ingested == annotated:
+        return
+    msg = (
+        f"The two reads of the callset disagree: ingest counted {ingested:,} records "
+        f"and annotation saw {annotated:,}. They are reads of the same file under a "
+        "fixed clock and must be identical, so either the input changed while the run "
+        "was in progress or one of the streams stopped early. Every count downstream "
+        "of this point would be computed against a callset that was never fully read, "
+        "so the run stops here instead."
+    )
+    raise IngestionError(msg)
+
+
 def _should_run(stage: str, stop_after: str | None) -> bool:
     if stop_after is None:
         return True
@@ -371,7 +464,7 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
     # pre-existing all-in-memory behaviour, which is what every test gets.
     ledger = EvidenceLedger(run_id=context.run_id, spill_dir=workspace.tmp_dir)
     # Opened before the first record is read, because the FIRST gate in the
-    # pipeline is inside `read_vcf` and an audit that starts after it is complete
+    # pipeline is inside `iter_vcf` and an audit that starts after it is complete
     # about everything except its largest single loss (ADR 0028). Closed in
     # `_finish`, before the artifact is hashed.
     discards = DiscardLedger(context.artifact_path("discards/discard_ledger.tsv"))
@@ -389,17 +482,27 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         reference = _open_reference(config, workspace, resolved=resolved, stack=stack)
 
         # ---------------------------------------------------------------- ingest
-        ingestion = read_vcf(
-            workspace.path(config.inputs.vcf),
-            expected_build=config.genome_build,
-            source_artifact="input_vcf",
-            discards=discards,
+        ingest = _ingest_stream(
+            config, workspace, reference=reference, clock=context.clock, discards=discards
         )
-        normalised = normalise_variants(ingestion.variants, reference=reference)
-        qc = assess_quality(normalised.variants, thresholds=config.quality, clock=context.clock)
-        ledger.extend(qc.evidence)
-        context.warnings.extend(ingestion.warnings)
-        context.warnings.extend(normalised.warnings)
+        # Counted here because nothing downstream can count it. The callset is never
+        # a sized collection on this path, and `total_records` is what lets the
+        # annotate monitor project bytes against free disk and refuse a run that
+        # cannot finish. That refusal is the reason `mva.progress` exists, so the
+        # count is worth one pass to keep.
+        record_count = 0
+
+        def _ingested() -> Iterator[dict[str, object]]:
+            nonlocal record_count
+            for item in ingest.assessed:
+                # One item at a time rather than `extend(qc.evidence)`: at 4.96 M
+                # records the ledger is handed 4.96 M EvidenceItems, which is the
+                # third of scale-report §8.7's open bullets. `EvidenceLedger`
+                # spills to SQLite past its threshold, so the ceiling here is the
+                # spill buffer and not the callset.
+                ledger.add(item.evidence)
+                record_count += 1
+                yield item.variant.model_dump(mode="json")
 
         # Streamed rather than built as one list of dicts. Byte-identical output
         # (`JsonRowsSink` and `canonical_json(list(rows))` agree by construction and
@@ -408,14 +511,20 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         # was ~2.6 GB of transient Python dicts on top of the records themselves.
         normalised_art = context.write_json_rows_artifact(
             "variants/normalised.json",
-            (v.model_dump(mode="json") for v in qc.variants),
+            _ingested(),
             kind=ArtifactKind.NORMALISED_VARIANTS,
             stage="ingest",
         )
+        # Valid only now: both summaries refuse until their stream is drained, and
+        # `write_json_rows_artifact` is what drained it.
+        ingestion = ingest.vcf.summary()
+        normalised = ingest.normalisation.summary()
+        context.warnings.extend(ingestion.warnings)
+        context.warnings.extend(normalised.warnings)
         context.write_json_artifact(
             "qc/qc_report.json",
             {
-                "metrics": qc.metrics,
+                "metrics": ingest.assessed.metrics(),
                 "normalisation_operations": normalised.operations_applied,
                 # The typed degraded state, not only the prose in `warnings`. A
                 # reader deciding whether an absent ClinVar assertion means
@@ -456,9 +565,26 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         # run that motivated all of this was killed at 7 h 30 m; every number needed
         # to stop it in its first two minutes was available then and nothing was
         # looking at them.
+        # A SECOND streaming read of the same VCF, because the first one held
+        # nothing. `_ingested()` consumed the callset into `normalised.json` and
+        # dropped every record as it went, which is the entire point; re-reading
+        # costs one more read+normalise+QC pass (measured at 38.92 s per million
+        # records, so ~3 min here) and is what buys the flat memory profile.
+        #
+        # `discards=None`: the first pass already wrote a row for every record the
+        # reader skipped, and a variant discarded twice would be counted twice
+        # (ADR 0028). The evidence items this pass produces are dropped for the
+        # same reason -- the ledger already has them.
+        #
+        # The two passes must agree. Same file, same reference, same fixed clock,
+        # so the records are identical by construction, and `_require_agreement`
+        # below turns "by construction" into a checked fact rather than a belief.
+        annotate_pass = _ingest_stream(
+            config, workspace, reference=reference, clock=context.clock, discards=None
+        )
         monitor = StageMonitor(
             "annotate",
-            total_records=len(qc.variants),
+            total_records=record_count,
             free_bytes=free_bytes_at(context.run_dir),
         )
 
@@ -470,7 +596,7 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         # then refuse to start. It would also print nothing at all while the bar was
         # rejecting, which is the condition ADR 0028 was written to end.
         annotated = iter_annotated(
-            qc.variants,
+            (item.variant for item in annotate_pass.assessed),
             adapters=bound.adapters,
             clock=context.clock,
             triage=triage,
@@ -534,6 +660,7 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         # The bar's own counts, alongside the selection report and classified the
         # same way: counts and thresholds, never an id (GP-41).
         annotation_triage_report = annotated.triage_report()
+        _require_agreement(record_count, annotation_triage_report.input_count)
         hard_filter_counts = filtered.counts()
         # The funnel, in the terms published pipelines state theirs in, so the two
         # are directly comparable without arithmetic. `raw_records` is the VCF's
@@ -542,9 +669,9 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         # and unplaced contigs go. Anyone reconciling our numbers against another
         # pipeline's has to know which of those two is in play, so both are here.
         funnel = {
-            "raw_records": len(qc.variants) + ingestion.skipped_count,
+            "raw_records": record_count + ingestion.skipped_count,
             "skipped_at_ingest": ingestion.skipped_count,
-            "normalised_records": len(qc.variants),
+            "normalised_records": record_count,
             "annotated_records": annotation_triage_report.input_count,
             "cleared_relevance_bar": annotation_triage_report.retained_count,
             "retained_by_hard_filter": hard_filter_counts["retained"],

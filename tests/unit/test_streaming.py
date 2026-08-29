@@ -25,12 +25,17 @@ from pathlib import Path
 
 import pytest
 
-from mva.alleles import MAX_SHIFT_BP
+from mva.alleles import MAX_SHIFT_BP, LeftAlignmentStatus, ReferenceLookup
 from mva.clock import FixedClock
 from mva.config import QualityThresholds
 from mva.determinism import canonical_json
 from mva.errors import IngestionError
-from mva.ingestion.normalise import normalise_variants
+from mva.ingestion.normalise import (
+    WARN_NO_REFERENCE,
+    NormalisationSummary,
+    iter_normalised,
+    normalise_variants,
+)
 from mva.ingestion.qc import assess_quality, iter_assessed
 from mva.ingestion.reader import (
     BACKEND_CYVCF2,
@@ -135,6 +140,61 @@ def _write_indexed(directory: Path, rows: tuple[str, ...] = _ROWS, *, name: str 
 @pytest.fixture
 def indexed_vcf(tmp_path: Path) -> Path:
     return _write_indexed(tmp_path)
+
+
+#: A repeat tract, 1-based, at positions 100-105 of both contigs below: an ``A``
+#: anchor followed by five ``C``s. It is the shape that makes a single-C insertion
+#: ambiguous — legal anywhere from POS 100 to POS 105 — which is what gives the
+#: reference something to do. ``tests/unit/test_normalise_representation.py`` holds
+#: the same tract and the reasoning behind it.
+_TRACT_START = 100
+_TRACT = "ACCCCC"
+
+#: Two contigs, an SNV and a right-shifted insertion on each. One indel per contig
+#: is the point: chunking cuts on a contig change, so any target size puts the two
+#: indels in two different chunks, which is the arrangement that makes a per-chunk
+#: warning fire twice.
+_REPEAT_ROWS: tuple[str, ...] = (
+    "chr1\t50\t.\tT\tA\t500.0\tPASS\t.\tGT:DP:AD:GQ\t0/1:30:15,15:99",
+    "chr1\t105\t.\tC\tCC\t500.0\tPASS\t.\tGT:DP:AD:GQ\t0/1:30:15,15:99",
+    "chr2\t50\t.\tT\tG\t500.0\tPASS\t.\tGT:DP:AD:GQ\t0/1:30:15,15:99",
+    "chr2\t105\t.\tC\tCC\t500.0\tPASS\t.\tGT:DP:AD:GQ\t0/1:30:15,15:99",
+)
+
+
+class _TractReference:
+    """A ``ReferenceLookup`` over ``_REPEAT_ROWS``: the tract, and ``T`` elsewhere.
+
+    Stateless and a pure function of ``(contig, start, end)``, so the batch and the
+    streaming path cannot be handed different answers — which is the only way this
+    fixture could manufacture the agreement the tests are checking for.
+    """
+
+    def fetch(self, contig: str, start: int, end: int) -> str:
+        if contig not in {"chr1", "chr2"}:
+            raise KeyError(contig)
+        bases: list[str] = []
+        for position in range(start, end + 1):
+            offset = position - _TRACT_START
+            bases.append(_TRACT[offset] if 0 <= offset < len(_TRACT) else "T")
+        return "".join(bases)
+
+
+@pytest.fixture
+def repeat_vcf(tmp_path: Path) -> Path:
+    return _write_indexed(tmp_path, _REPEAT_ROWS, name="repeat")
+
+
+def _normalised_stream(
+    path: Path,
+    *,
+    target_size: int,
+    reference: ReferenceLookup | None = None,
+) -> tuple[list[VariantRecord], NormalisationSummary]:
+    """Read, chunk and normalise as a stream; return the records and the report."""
+    handle = iter_vcf(path, expected_build=BUILD, source_artifact=ARTIFACT)
+    stream = iter_normalised(handle.chunks(target_size=target_size), reference=reference)
+    return list(stream), stream.summary()
 
 
 def _stream(
@@ -392,6 +452,164 @@ def test_chunked_normalisation_equals_whole_callset_normalisation(indexed_vcf: P
     assert streamed == list(expected.variants)
 
 
+@pytest.mark.unit
+def test_iter_normalised_records_equal_whole_callset_normalisation(indexed_vcf: Path) -> None:
+    """The same composition as above, with the report kept instead of discarded.
+
+    ``docs/scale-report.md`` §8.8 spells this stage as a generator expression over
+    ``normalise_variants(chunk).variants``, which streams correctly and throws away
+    the normalisation report the run manifest needs. ``iter_normalised`` is that
+    expression plus the report, so the first thing to pin is that adding the report
+    changed none of the records.
+    """
+    batch = read_vcf(indexed_vcf, expected_build=BUILD, source_artifact=ARTIFACT)
+    expected = normalise_variants(batch.variants)
+
+    streamed, _ = _normalised_stream(indexed_vcf, target_size=2)
+
+    assert len(streamed) == len(expected.variants)
+    for index, (left, right) in enumerate(zip(streamed, expected.variants, strict=True)):
+        assert left == right, f"record {index} differs between the streamed and batch paths"
+    assert streamed == list(expected.variants)
+
+
+@pytest.mark.unit
+def test_iter_normalised_operations_equal_the_batch_path(indexed_vcf: Path) -> None:
+    """``operations_applied`` is a provenance manifest, so the totals must be totals.
+
+    Per-chunk counters that were reported rather than summed would give a run
+    manifest one line per chunk — 247 of them on the measured 1 M callset
+    (``docs/scale-report.md`` §8.3) — each naming a fraction of the work.
+    """
+    batch = read_vcf(indexed_vcf, expected_build=BUILD, source_artifact=ARTIFACT)
+    expected = normalise_variants(batch.variants)
+
+    _, summary = _normalised_stream(indexed_vcf, target_size=2)
+
+    assert summary.operations_applied == expected.operations_applied
+    # The fixture is only worth anything if something was actually applied.
+    assert summary.operations_applied
+
+
+@pytest.mark.unit
+def test_iter_normalised_states_a_repeated_warning_once_with_the_run_total(
+    repeat_vcf: Path,
+) -> None:
+    """A warning that fires in every chunk must not be reported once per chunk.
+
+    Constructed so it has to: one indel per contig, no reference, and chunks that
+    cut on a contig change — so ``no_reference_lookup_left_alignment_skipped`` and
+    the degraded left-alignment sentence are both produced by two separate
+    ``normalise_variants`` calls. Concatenating the per-chunk warnings would give a
+    manifest that says ``(n=1)`` twice where the run's answer is ``(n=2)``, and
+    deduplicating those strings would give ``(n=1)`` once, which is worse: a count
+    that is wrong and looks authoritative.
+    """
+    batch = read_vcf(repeat_vcf, expected_build=BUILD, source_artifact=ARTIFACT)
+    expected = normalise_variants(batch.variants)
+
+    chunks = list(
+        iter_vcf(repeat_vcf, expected_build=BUILD, source_artifact=ARTIFACT).chunks(target_size=1)
+    )
+    firing = [
+        chunk
+        for chunk in chunks
+        if any(w.startswith(WARN_NO_REFERENCE) for w in normalise_variants(chunk).warnings)
+    ]
+    assert len(firing) >= 2, "the fixture must make the same warning fire in more than one chunk"
+
+    stream = iter_normalised(chunks)
+    list(stream)
+    summary = stream.summary()
+
+    assert summary.warnings == expected.warnings
+    assert len(summary.warnings) == len(set(summary.warnings)), "a warning was emitted twice"
+    assert f"{WARN_NO_REFERENCE} (n=2)" in summary.warnings
+    # The prose statement of the degraded state, once, describing the whole run.
+    assert sum(1 for warning in summary.warnings if warning.startswith("DEGRADED")) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("reference", "expected_status"),
+    [
+        (None, LeftAlignmentStatus.UNAVAILABLE_NO_REFERENCE),
+        (_TractReference(), LeftAlignmentStatus.APPLIED),
+    ],
+    ids=["no-reference", "reference-with-indels"],
+)
+def test_iter_normalised_left_alignment_equals_the_batch_path(
+    repeat_vcf: Path,
+    reference: ReferenceLookup | None,
+    expected_status: LeftAlignmentStatus,
+) -> None:
+    """The degraded state (GP-14) must survive being computed over chunks.
+
+    ``status`` is derived from the counts by ``summarise_left_alignment``, which
+    exists so that no caller labels a batch by hand. A stream that merged per-chunk
+    :class:`LeftAlignmentReport`s would be doing exactly that, and the failure mode
+    is silent: the counts still add up while the label describes a chunk.
+    """
+    batch = read_vcf(repeat_vcf, expected_build=BUILD, source_artifact=ARTIFACT)
+    expected = normalise_variants(batch.variants, reference=reference)
+
+    _, summary = _normalised_stream(repeat_vcf, target_size=1, reference=reference)
+
+    assert summary.left_alignment == expected.left_alignment
+    assert summary.left_alignment.status is expected_status
+    assert summary.left_alignment.as_dict() == expected.left_alignment.as_dict()
+    # Both parametrisations must have had indels to reason about, or the report
+    # would read NOT_REQUIRED and prove nothing.
+    assert summary.left_alignment.indel_count == 2
+
+
+@pytest.mark.unit
+def test_iter_normalised_summary_refuses_before_the_stream_is_drained(
+    indexed_vcf: Path,
+) -> None:
+    """Same refusal as ``VcfStream.summary()``, for the same reason (GP-14).
+
+    A partial ``left_alignment`` understates how many indels this run cannot join
+    on, and an unjoined indel is scored novel and ultra-rare rather than reported
+    as missing.
+    """
+    handle = iter_vcf(indexed_vcf, expected_build=BUILD, source_artifact=ARTIFACT)
+    stream = iter_normalised(handle.chunks(target_size=2))
+    iterator = iter(stream)
+    next(iterator)
+
+    with pytest.raises(IngestionError, match="not read to its end"):
+        stream.summary()
+
+    list(iterator)
+    assert stream.summary().operations_applied
+    with pytest.raises(IngestionError, match="already been iterated"):
+        list(stream)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("target_size", [1, 2, 3, 7])
+def test_chunk_size_does_not_change_the_normalised_stream(
+    indexed_vcf: Path, target_size: int
+) -> None:
+    """GP-30: chunk size is a memory knob, and a memory knob may not move an output.
+
+    Chunk sizes are chosen by ``VcfStream.chunks`` from record density, so the same
+    callset read on a different machine or with a different target can be cut
+    differently. Records, operation counts and the left-alignment report must all be
+    invariant under that, or repeat runs are byte-identical only by luck.
+    """
+    batch = read_vcf(indexed_vcf, expected_build=BUILD, source_artifact=ARTIFACT)
+    expected = normalise_variants(batch.variants)
+
+    streamed, summary = _normalised_stream(indexed_vcf, target_size=target_size)
+
+    assert streamed == list(expected.variants)
+    assert summary.operations_applied == expected.operations_applied
+    assert summary.warnings == expected.warnings
+    assert summary.left_alignment == expected.left_alignment
+
+
 # ---------------------------------------------------------------------------
 # 4. Streaming QC
 # ---------------------------------------------------------------------------
@@ -508,6 +726,11 @@ def test_streaming_errors_never_echo_a_coordinate_or_a_genotype(indexed_vcf: Pat
     with pytest.raises(IngestionError) as premature:
         drained.summary()
     messages.append(str(premature.value))
+
+    undrained = iter_vcf(indexed_vcf, expected_build=BUILD, source_artifact=ARTIFACT)
+    with pytest.raises(IngestionError) as unnormalised:
+        iter_normalised(undrained.chunks()).summary()
+    messages.append(str(unnormalised.value))
 
     for message in messages:
         for token in forbidden:
