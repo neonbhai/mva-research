@@ -574,6 +574,57 @@ asserted by a test at all, and `docs/track2-claims-ledger.md` — the record of 
 the papers instead — failed 25 times out of 77. A table can be fully cited and still be wrong
 in a quarter of its sentences, and no amount of green CI will say so.
 
+### 7.4 The misfolding half of the turnover problem
+
+The mechanism in §4.3 stabilises protein that already exists: SIRT2 holds K668
+deacetylated, and deacetylation "is only able to stabilize the protein that is present"
+(North et al., *EMBO J* 2014, PMID 24825348). That is a claim about how fast a folded BubR1
+molecule is degraded, and it is not the only reason the abundance-lowering alleles are
+scarce. The kinase-domain substitutions behave as HSP90 clients — their levels are severely
+decreased within five hours of HSP90 inhibition, and cycloheximide and geldanamycin
+together remove virtually all mutant protein while wild-type shows only minor changes
+(Suijkerbuijk et al., *Cancer Res* 2010, PMID 20516114) — which is the signature of
+chaperone-dependent triage rather than of a folded protein being tagged too fast.
+
+Nothing establishes that holding K668 deacetylated counteracts misfolding-driven turnover.
+No study measuring BubR1 or BUB1B protein abundance under proteostasis, autophagy, mTOR or
+mitochondrial manipulation was found in any species
+(`docs/research/r8-proteostasis-axis.md` §8), and that is a not-found rather than a
+demonstrated absence (GP-14). So the proposal may be acting on one route of a two-route
+turnover problem in the exact allele class it selects for, and §6.1 already names the result
+that would expose it: NAD⁺ rises, K668 acetylation falls, total BubR1 does not.
+
+Stating this does not move the proposal onto the proteostasis axis, and it is not an
+argument that the axis should be the target instead. Appendix E.1 records why: if the
+substitution mutants are cleared because they misfold, the agents that would act there are
+chaperone-supporting or proteasome-sparing, and no approved agent obviously fills that
+space.
+
+### 7.5 Nobody has measured NAD⁺ in an aneuploid cell
+
+SIRT2 is an NAD⁺-dependent deacetylase, so the axis in §4.3 can only run as fast as the
+NAD⁺ supply in the cells it has to act on. Those cells are aneuploid, and their NAD⁺
+concentration has not been measured. A PubMed sweep of `aneuploidy AND "NAD+" AND cells`
+returned 70 records, none of which, on title screening, reports an NAD⁺ measurement in an
+aneuploid or chromosomally unstable background (`docs/research/r8-proteostasis-axis.md` §8,
+Q14). That is a not-found and not a demonstrated absence (GP-14): it is not evidence that
+NAD⁺ in those cells is normal, and it is not evidence that it is low.
+
+What makes the gap worth stating is the mitochondrial finding beside it. In a *Drosophila*
+model of MVA-driven microcephaly, neuroblasts made chromosomally unstable showed compromised
+mitophagy and reduced mitochondrial-genome transcription
+(González-Blanco et al., *Nat Commun* 2026, PMID 41820377). If mitochondrial dysfunction of
+that kind lowers NAD⁺ in the cells this hypothesis most wants to treat, SIRT2 activity falls
+with it and the axis is weakest in the compartment that needs it most. Nothing joins those
+two statements in one experiment: that model induces instability by depleting *bub3* or
+*rod*, and it measures neither NAD⁺ nor BubR1, so the connection is an **inference**.
+
+The two NAD⁺ questions in this document point in opposite directions, and the first
+experiment settles which one applies. Appendix C's strongest objection is that a young child
+has not lost NAD⁺, so a precursor has nothing to push against; this one is that the
+aneuploid cells may have lost it through mitochondrial dysfunction. Readout 1 of §6.1
+measures intracellular NAD⁺ in the patient lines before anything else.
+
 ---
 
 ## 8. Scalability
@@ -919,7 +970,7 @@ metformin for AICAR through AMPK activation. Only the tanespimycin row is exact,
 |---|---|---|---|---|---|---|
 | **Restore BubR1 abundance** (NAD⁺/SIRT2 axis) | NMN, nicotinamide riboside, nicotinamide, nicotinic acid | BubR1 abundance | ↑ (NMN measured); unmeasured or bidirectional for the rest | **Yes** | **Yes** | **Primary hypothesis.** Best agent is unapproved; approved agents have undetermined sign. |
 | **Readthrough / restore full-length protein** | Ataluren, gentamicin | BubR1 abundance | ↑ *if* a nonsense allele produces a transcript | Yes, conditionally | Yes | Rejected. Genotype-conditional and mechanistically undercut: truncating *BUB1B* alleles yield no transcript (Suijkerbuijk 2010), so NMD removes the substrate before the ribosome reaches the stop codon. Ataluren's EU authorisation was also not renewed (EMA; EC decision effective 2025). |
-| **Reduce aneuploidy consequences — proteostasis** | Sirolimus | Proteotoxic stress | Unknown in an aneuploid background | Unclear | Unclear | Rejected. Also anti-growth in a growth-restricted child and immunosuppressive in a child whose aneuploid cells are partly held in check by immune clearance — that last step is an **inference**: Santaguida 2017 demonstrates pro-inflammatory signalling and NK-cell killing of missegregating cells in co-culture, and the extension to in-vivo human immunosurveillance is ours, not the paper's. Two objections at *other* nodes, which single-node scoring cannot express. |
+| **Reduce aneuploidy consequences — proteostasis** | Sirolimus | Proteotoxic stress | Unsigned at the node, but no longer untested in an aneuploid background: neuroblast number rescued, brain size not | Unclear | Unclear | Rejected, and now on a measured negative rather than a missing measurement. Rapamycin at 40 µM, fed to larvae whose neuroblasts had been made chromosomally unstable, rescued the number of aneuploid neuroblasts and rescued neither progeny cell number nor larval brain size, the microcephaly endpoint the paper is named for; the authors read TOR inhibition as a possible harm to the proliferative capacity of highly aneuploid stem cells (González-Blanco et al., *Nat Commun* 2026, PMID 41820377). That model depletes *bub3* or *rod* in fly neuroblasts rather than the BubR1 orthologue and measures no BubR1, so it bears on MVA-class instability and not on *BUB1B* dosage. Also anti-growth in a growth-restricted child and immunosuppressive in a child whose aneuploid cells are partly held in check by immune clearance — that last step is an **inference**: Santaguida 2017 demonstrates pro-inflammatory signalling and NK-cell killing of missegregating cells in co-culture, and the extension to in-vivo human immunosurveillance is ours, not the paper's. Two objections at *other* nodes, which single-node scoring cannot express. |
 | **Aneuploidy-selective antiproliferatives** | Hydroxychloroquine, tanespimycin (17-AAG), metformin | Proteotoxic / metabolic stress | ↑ stress (kills aneuploid cells) | **No — catastrophic** | **Yes** | Rejected for the soma with `WRONG_DIRECTION`. Retained in the record as tumour-arm candidates requiring a therapeutic-index study. |
 | **Cell-cycle / checkpoint modulation** | Reversine (MPS1i) | SAC | ↓ checkpoint | **No — pushes the disease mechanism** | Yes | Rejected, lowest score of all. The naive top hit. |
 | **Mitotic timing — restrain APC/C directly** | proTAME, apcin | SAC / APC/C | ↑ restraint on APC/C-Cdc20 | Yes, in principle | — | Not modelled, and the one class whose direction is right and whose absence is purely regulatory. Partial APC/C inhibition substitutes for the restraint the failing checkpoint cannot supply. Both are tool compounds with no record of human administration — an **inference** from the absence of any registered trial or published clinical report, not a sourced negative — so under ASSUMPTION-DRUG-03 they are research probes; they would add a third row saying only `NOT_APPROVED`, which reversine and tanespimycin already demonstrate. Recorded in `SOURCES.md` under "considered and left out". The obvious objection is a therapeutic window: too much APC/C restraint is mitotic arrest and slippage, which generates aneuploidy of its own. |

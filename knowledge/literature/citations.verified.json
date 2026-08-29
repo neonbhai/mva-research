@@ -924,6 +924,17 @@
       "title": "Update on Surveillance for Wilms Tumor and Hepatoblastoma in Beckwith-Wiedemann Syndrome and Other Predisposition Syndromes.",
       "year": 2024
     },
+    "41820377": {
+      "epub_year": 2026,
+      "epubdate": "2026 Mar 12",
+      "first_author": "González-Blanco A",
+      "first_author_surname": "González-Blanco",
+      "journal": "Nat Commun",
+      "pmid": "41820377",
+      "pubdate": "2026 Mar 12",
+      "title": "Proteostasis failure and mitochondrial dysfunction contribute to chromosomal instability-induced microcephaly.",
+      "year": 2026
+    },
     "7607932": {
       "epub_year": null,
       "epubdate": "",
@@ -947,7 +958,7 @@
       "year": 1993
     }
   },
-  "resolved_utc": "2026-08-28T20:01:31.824797Z",
+  "resolved_utc": "2026-08-29T15:47:16.261127Z",
   "schema": "mva.citations.ledger/1",
   "source": "NCBI E-utilities esummary (db=pubmed) via https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 }
