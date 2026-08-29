@@ -41,9 +41,15 @@ app = typer.Typer(
 run_app = typer.Typer(name="run", help="Execute pipeline stages.", no_args_is_help=True)
 privacy_app = typer.Typer(name="privacy", help="Privacy boundary tooling.", no_args_is_help=True)
 verify_app = typer.Typer(name="verify", help="Verification checks.", no_args_is_help=True)
+discards_app = typer.Typer(
+    name="discards",
+    help="Ask a run's discard ledger why a variant is not in the output (ADR 0028).",
+    no_args_is_help=True,
+)
 app.add_typer(run_app)
 app.add_typer(privacy_app)
 app.add_typer(verify_app)
+app.add_typer(discards_app)
 
 console = Console(stderr=False)
 err_console = Console(stderr=True)
@@ -510,6 +516,76 @@ def verify_submission(
     for error in errors:
         err_console.print(f"  {error}")
     raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# discards
+# ---------------------------------------------------------------------------
+
+
+@discards_app.command("explain")
+def discards_explain(
+    ledger: Annotated[
+        Path, typer.Argument(help="Path to a run's discards/discard_ledger.tsv.", exists=True)
+    ],
+    variant_id: Annotated[
+        str, typer.Argument(help="Canonical variant id, e.g. GRCh38:chr15:40200000:C:T.")
+    ],
+) -> None:
+    """Say why one variant is not in a run's output, or that it was never dropped.
+
+    The reviewer-facing half of GP-13 as amended (ADR 0028). "It was filtered" is
+    not an answer; "the hard filter removed it because its genotype is hom_ref" is.
+
+    An empty result is deliberately reported as AMBIGUOUS rather than as good news.
+    The ledger records removals, not a census: a variant absent from it either
+    survived to the output or was never in the input at all, and those are
+    different facts that this file cannot tell apart (GP-14).
+    """
+    from mva.evidence.discards import explain_variant
+
+    rows = explain_variant(ledger, variant_id)
+    if not rows:
+        console.print(
+            f"[yellow]no discard record[/yellow] for {variant_id}\n"
+            "  This means one of two things and the ledger cannot distinguish them:\n"
+            "  (a) the variant survived every gate and is in variants/annotated.json, or\n"
+            "  (b) it was never in the input callset at all.\n"
+            "  Check the annotated-variants artifact to tell them apart (GP-14)."
+        )
+        return
+    console.print(f"[bold]{variant_id}[/bold] was dropped:")
+    for row in rows:
+        value = f" (value: {row.value})" if row.value else ""
+        console.print(f"  stage [bold]{row.stage}[/bold] · rule [bold]{row.rule}[/bold]{value}")
+
+
+@discards_app.command("summary")
+def discards_summary(
+    ledger: Annotated[
+        Path, typer.Argument(help="Path to a run's discards/discard_ledger.tsv.", exists=True)
+    ],
+) -> None:
+    """Counts by stage and rule, recomputed from the file's bytes.
+
+    Recomputed rather than read from `annotation/triage_report.json`, so the two
+    disagreeing is detectable: a mismatch means the ledger was truncated, which is
+    exactly what happens when the disk fills, and is the one condition under which
+    the report's counts describe a file that no longer says what they say.
+
+    Counts only. No coordinate is printed (GP-41, GP-44).
+    """
+    from mva.evidence.discards import count_discards
+
+    counts = count_discards(ledger)
+    if not counts:
+        console.print("no discards recorded in this run")
+        return
+    total = sum(counts.values())
+    console.print(f"[bold]{total}[/bold] discarded variant(s)")
+    for key, count in counts.items():
+        stage, rule = key.split("/", 1)
+        console.print(f"  {stage:<12} {rule:<32} {count}")
 
 
 def main() -> None:

@@ -704,6 +704,24 @@ def render_input_vcf(sites: Iterable[SnpEffSite]) -> str:
 
 
 def _vcf_unescape(value: str) -> str:
+    """Undo VCF INFO percent-escaping. Identical output, one scan in the common case.
+
+    The guard is not a micro-optimisation, it is the difference between two
+    passes and eighty over a whole-genome callset. This runs on five ANN fields
+    per entry, SnpEff emits tens of entries per variant with no ``-canon``, and
+    the loop below is eight unconditional ``str.replace`` calls — so an
+    unguarded version does ~40 full string scans per ANN entry and on the order of
+    4x10^9 across 4.96 M variants, essentially all of them finding nothing.
+    Percent-escapes are rare in gene symbols, feature ids and HGVS strings; a
+    single ``in`` test settles the whole thing.
+
+    ``%`` cannot be produced by unescaping anything but ``%25``, and ``%25`` itself
+    contains a ``%``, so a value with no ``%`` cannot need any of the eight
+    substitutions. The two paths therefore return the same string for every input,
+    which ``test_vcf_unescape_guard_is_transparent`` holds them to.
+    """
+    if "%" not in value:
+        return value
     for escape, literal in _VCF_UNESCAPE:
         value = value.replace(escape, literal)
     return value

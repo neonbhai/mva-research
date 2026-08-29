@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Self
@@ -110,6 +111,134 @@ class ImpactSeverity(StrEnum):
     MODERATE = "moderate"
     LOW = "low"
     MODIFIER = "modifier"
+
+
+#: Most severe first. The one place the ordinal in "ordinal impact class" is
+#: written down, so a comparison between two impacts is a lookup rather than a
+#: re-derivation. ``None`` (NOT ASSESSED, ADR 0016) is deliberately absent: it has
+#: no position on this scale, and giving it one is the collapse the field exists
+#: to prevent.
+IMPACT_ORDER: Final[tuple[ImpactSeverity, ...]] = (
+    ImpactSeverity.HIGH,
+    ImpactSeverity.MODERATE,
+    ImpactSeverity.LOW,
+    ImpactSeverity.MODIFIER,
+)
+
+
+def impact_rank(impact: ImpactSeverity) -> int:
+    """Position on :data:`IMPACT_ORDER`. Lower is more severe."""
+    return IMPACT_ORDER.index(impact)
+
+
+def impact_at_least(impact: ImpactSeverity | None, floor: ImpactSeverity) -> bool:
+    """Whether ``impact`` is at least as severe as ``floor``.
+
+    ``None`` is False, and that is the whole point: NOT ASSESSED is not a severity,
+    so it can neither clear a bar nor fail one. A caller that wants to keep
+    unassessed records asks for them by name (ADR 0016).
+    """
+    if impact is None:
+        return False
+    return impact_rank(impact) <= impact_rank(floor)
+
+
+# ---------------------------------------------------------------------------
+# Consequence vocabulary
+#
+# Lives here, not in the stage that first needed it, for the reason the block at
+# the top of this file gives: `mva.annotation` triages on it and
+# `mva.prioritization` selects on it, and GP-03 forbids either importing the
+# other. Two copies of a Sequence Ontology term list is how the two stages come
+# to disagree about what "coding" means — and a triage bar that is narrower than
+# the selection rule behind it deletes candidates the selection stage would have
+# kept, which is the one failure the staged annotation path may not have
+# (ADR 0028). `mva.prioritization.selection` re-exports all three names, so a
+# reader who arrives at the selection stage still finds them there.
+# ---------------------------------------------------------------------------
+
+#: Sequence Ontology terms that alter the coding sequence.
+#:
+#: ``synonymous_variant`` is deliberately ABSENT. It is coding but does not alter
+#: the protein, and retaining it would roughly double the surviving set for no
+#: gain. A synonymous call that also carries a splice term is still retained,
+#: because matching is over a variant's whole term list across every transcript —
+#: which is the case ``prioritization.filters`` warns about when it declines to
+#: use predicted consequence at all.
+CODING_CONSEQUENCE_TERMS: Final[frozenset[str]] = frozenset(
+    {
+        "coding_sequence_variant",
+        "coding_transcript_variant",
+        "conservative_inframe_deletion",
+        "conservative_inframe_insertion",
+        "disruptive_inframe_deletion",
+        "disruptive_inframe_insertion",
+        "exon_loss_variant",
+        "feature_elongation",
+        "feature_truncation",
+        "frameshift_variant",
+        "incomplete_terminal_codon_variant",
+        "inframe_deletion",
+        "inframe_insertion",
+        "initiator_codon_variant",
+        "missense_variant",
+        "protein_altering_variant",
+        "protein_protein_contact",
+        "rare_amino_acid_variant",
+        "start_lost",
+        "start_retained_variant",
+        "stop_gained",
+        "stop_lost",
+        "stop_retained_variant",
+        "structural_interaction_variant",
+        "transcript_ablation",
+        "transcript_amplification",
+    }
+)
+
+#: Terms that implicate splicing, including the weak ones.
+#:
+#: ``splice_region_variant`` is a deliberately generous inclusion: it fires on
+#: synonymous and intronic calls near an exon boundary, which is precisely the
+#: class a naive coding-only rule loses.
+SPLICE_CONSEQUENCE_TERMS: Final[frozenset[str]] = frozenset(
+    {
+        "exonic_splice_region_variant",
+        "splice_acceptor_variant",
+        "splice_branch_variant",
+        "splice_donor_5th_base_variant",
+        "splice_donor_region_variant",
+        "splice_donor_variant",
+        "splice_polypyrimidine_tract_variant",
+        "splice_region_variant",
+        "splice_site_variant",
+    }
+)
+
+#: Impacts that retain a variant whatever its terms say.
+#:
+#: Fail-open on purpose: an unrecognised SO term with a HIGH impact must not be
+#: dropped because this module's vocabulary is out of date. A new annotation tool
+#: adds terms far more often than it adds impact classes.
+SELECTING_IMPACTS: Final[frozenset[ImpactSeverity]] = frozenset(
+    {ImpactSeverity.HIGH, ImpactSeverity.MODERATE}
+)
+
+
+def iter_consequence_terms(consequence_terms: Iterable[str]) -> Iterator[str]:
+    """Individual SO terms, splitting the joined forms some tools emit.
+
+    SnpEff writes ``splice_region_variant&synonymous_variant`` in a single ANN
+    field, and a VEP-style adapter may pass ``+``-joined terms through. Matching
+    the joined string against a set of atomic terms silently fails to recognise
+    either, which for the stages that consume this means dropping a splice-region
+    call as non-coding.
+    """
+    for term in consequence_terms:
+        for token in term.replace("+", "&").split("&"):
+            cleaned = token.strip().lower()
+            if cleaned:
+                yield cleaned
 
 
 class Genotype(FrozenModel):
@@ -230,6 +359,24 @@ class ConsequenceAnnotation(FrozenModel):
     @property
     def most_severe_term(self) -> str:
         return self.consequence_terms[0] if self.consequence_terms else "unknown"
+
+
+def consequence_is_selecting(annotation: ConsequenceAnnotation) -> bool:
+    """Does this one transcript annotation argue for keeping the variant?
+
+    HIGH or MODERATE impact, or any coding-altering or splice-relevant SO term.
+    The single definition behind two stages: ``mva.annotation.triage`` asks it
+    before deciding whether a variant is worth a frequency and clinical lookup,
+    and ``mva.prioritization.selection`` asks it again before pairing. They must
+    agree, because triage runs first and a triage bar narrower than the selection
+    rule deletes candidates selection would have kept (ADR 0028).
+    """
+    if annotation.impact in SELECTING_IMPACTS:
+        return True
+    return any(
+        term in CODING_CONSEQUENCE_TERMS or term in SPLICE_CONSEQUENCE_TERMS
+        for term in iter_consequence_terms(annotation.consequence_terms)
+    )
 
 
 class ClinicalAssertion(FrozenModel):

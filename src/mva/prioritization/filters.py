@@ -21,6 +21,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 from mva.config import FrequencyThresholds, QualityThresholds
+from mva.models.discard import DiscardRecord, DiscardSink, DiscardStage
 from mva.models.genome import CANONICAL_CONTIGS, GenomeBuild
 from mva.models.variant import (
     INGESTION_QC_FLAGS,
@@ -233,20 +234,41 @@ class HardFilterStream:
     entries and is the very allocation this class exists to avoid. And it is a
     list of build-qualified proband coordinates held for the length of a run in
     order to be counted; the counts are what a report can state anyway, and a
-    count is not a coordinate (GP-41). A caller that genuinely needs the
-    identities of discarded records is working at fixture scale and should call
-    :func:`apply_hard_filters`.
+    count is not a coordinate (GP-41).
+
+    Since ADR 0028 there is a third option between holding the list and losing it:
+    pass a ``discards`` sink and each removal is written straight through to the
+    discard ledger, by id, with its reason code and the value that produced it.
+    Nothing is held — the row leaves the process as it is made — so the memory
+    argument above still stands and the identities survive anyway. A caller that
+    wants the removals as a Python object is still working at fixture scale and
+    should still call :func:`apply_hard_filters`.
     """
 
-    __slots__ = ("_expected_build", "_input", "_reasons", "_retained", "_source", "_started")
+    __slots__ = (
+        "_discards",
+        "_expected_build",
+        "_input",
+        "_reasons",
+        "_retained",
+        "_source",
+        "_started",
+    )
 
-    def __init__(self, variants: Iterable[VariantRecord], *, expected_build: GenomeBuild) -> None:
+    def __init__(
+        self,
+        variants: Iterable[VariantRecord],
+        *,
+        expected_build: GenomeBuild,
+        discards: DiscardSink | None = None,
+    ) -> None:
         self._source = variants
         self._expected_build = expected_build
         self._input = 0
         self._retained = 0
         self._reasons: dict[str, int] = dict.fromkeys(HARD_FILTER_REASONS, 0)
         self._started = False
+        self._discards = discards
 
     def __iter__(self) -> Iterator[VariantRecord]:
         if self._started:
@@ -260,11 +282,21 @@ class HardFilterStream:
 
     def _drive(self) -> Iterator[VariantRecord]:
         expected_build = self._expected_build
+        discards = self._discards
         for variant in self._source:
             self._input += 1
             reason = _hard_filter_reason(variant, expected_build)
             if reason is not None:
                 self._reasons[reason] += 1
+                if discards is not None:
+                    discards.record(
+                        DiscardRecord(
+                            variant_id=variant.variant_id,
+                            stage=DiscardStage.HARD_FILTER,
+                            rule=reason,
+                            value=_hard_filter_value(variant, reason),
+                        )
+                    )
                 continue
             self._retained += 1
             yield variant
@@ -281,8 +313,29 @@ class HardFilterStream:
         return counts
 
 
+def _hard_filter_value(variant: VariantRecord, reason: str) -> str:
+    """The observation the rule fired on, for the discard ledger's ``value`` column.
+
+    "Dropped by the hard filter" is a category; "dropped because the record says
+    GRCh37" is a fact a reviewer can check against the source VCF in one command.
+    Each reason returns the field its own predicate read, and nothing else — the
+    row must not carry a genotype or a depth that no rule looked at (GP-41).
+    """
+    if reason == REASON_WRONG_GENOME_BUILD:
+        return str(variant.build)
+    if reason == REASON_NON_CANONICAL_CONTIG:
+        return variant.coordinate.contig
+    if reason == REASON_UNINFORMATIVE_ALT:
+        return variant.coordinate.alt
+    # Both remaining reasons are zygosity verdicts: hom-ref and no-call.
+    return str(variant.genotype.zygosity)
+
+
 def iter_hard_filtered(
-    variants: Iterable[VariantRecord], *, expected_build: GenomeBuild
+    variants: Iterable[VariantRecord],
+    *,
+    expected_build: GenomeBuild,
+    discards: DiscardSink | None = None,
 ) -> HardFilterStream:
     """Hard-filter a stream without holding the callset.
 
@@ -290,8 +343,11 @@ def iter_hard_filtered(
     order and unmodified — see :class:`HardFilterStream` for why that is
     ``retained`` and not ``flagged``. Counts come from
     :meth:`HardFilterStream.counts` once the stream is drained.
+
+    ``discards`` accounts for each removal by id in the discard ledger. It changes
+    nothing about which records are yielded or in what order.
     """
-    return HardFilterStream(variants, expected_build=expected_build)
+    return HardFilterStream(variants, expected_build=expected_build, discards=discards)
 
 
 def iter_soft_flagged(

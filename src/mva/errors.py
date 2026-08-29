@@ -55,6 +55,17 @@ class AdapterUnavailableError(MvaError):
     """A required external tool or dataset is not present."""
 
 
+class InsufficientDiskError(MvaError):
+    """A stage projected more output than the volume can hold, and stopped.
+
+    Raised from :mod:`mva.progress` once the first trustworthy projection does not
+    fit. It is deliberately not a :class:`ConfigError`: nothing about the
+    configuration is wrong, and the fix may be a larger volume rather than a
+    different setting. It is the measured statement that this run cannot finish —
+    made in the first minute rather than the twentieth hour (ADR 0028).
+    """
+
+
 class AnnotationError(MvaError):
     """The annotation stage was driven in a way it cannot honour.
 

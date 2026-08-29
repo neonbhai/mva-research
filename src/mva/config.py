@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mva.determinism import stable_hash
 from mva.errors import ConfigError, WorkspaceError
 from mva.models.genome import GenomeBuild
+from mva.models.variant import ImpactSeverity
 
 # ---------------------------------------------------------------------------
 # Privacy boundary constants (PRIV-07)
@@ -328,6 +329,111 @@ class SelectionThresholds(StrictModel):
         }
 
 
+class TriageThresholds(StrictModel):
+    """The relevance bar the staged annotation path partitions on (ADR 0028).
+
+    Consequence annotation runs over the whole callset. This decides which of
+    those records then get the expensive half — a gnomAD lookup, a ClinVar
+    lookup, a full set of ``EvidenceItem``s and a ~6 KB row in the variants
+    artifact — and which get one ~75-byte line in the discard ledger instead.
+
+    **The bar is deliberately generous, and the default is defended in ADR 0028.**
+    A measured whole-genome callset put 14,228 of 4,962,060 variants (0.284%)
+    above a HIGH/MODERATE impact bar. The default here is looser than that on
+    three axes at once — LOW impact is kept, every coding or splice-relevant term
+    is kept whatever its impact, and an impact that was never assessed is kept —
+    because the cost of being generous is throughput and the cost of being tight
+    is the answer.
+
+    **This is not a second selection stage.** Every knob below exists so that the
+    effective bar can be proved to be at least as wide as whatever
+    :class:`SelectionThresholds` is configured to keep. The composition root
+    narrows it automatically where it is not, and says so in a run warning: a
+    triage bar narrower than the selection rule behind it deletes candidates that
+    would otherwise have been ranked, which would change the answer.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Off annotates and materialises every record exactly as before ADR 0028, "
+            "and the discard ledger then records only what the hard filter and "
+            "selection remove. This is the escape hatch the ADR names: a reviewer who "
+            "wants to know what triage cost turns it off and re-runs."
+        ),
+    )
+    min_impact: ImpactSeverity = Field(
+        default=ImpactSeverity.LOW,
+        description=(
+            "Keep a variant when any transcript predicts an impact at least this "
+            "severe. LOW rather than MODERATE deliberately: a synonymous or "
+            "splice-region call is uninformative, not exculpatory, and the measured "
+            "cost of keeping the whole LOW band is small next to the cost of "
+            "discarding a splice-disrupting synonymous variant. MODIFIER keeps every "
+            "annotated record and turns the bar into a gene-assignment test."
+        ),
+    )
+    retain_unassessed_impact: bool = Field(
+        default=True,
+        description=(
+            "ADR 0016. `impact is None` means NOT ASSESSED, not MODIFIER — it is the "
+            "shape a MANE interval join produces for every variant it places. False "
+            "here discards, unseen, the whole class the selection stage retains under "
+            "`retained_impact_not_assessed`."
+        ),
+    )
+    retain_without_gene_assignment: bool = Field(
+        default=False,
+        description=(
+            "Keep records the consequence adapter returned nothing for. False by "
+            "default because pairing is gene-scoped: a variant with no gene symbol "
+            "forms no candidate pair and cannot reach the output, whatever selection "
+            "is configured to do with it. That makes dropping it here provably "
+            "answer-preserving, and it is ~55% of a whole-genome callset by volume. "
+            "Forced True when `selection.drop_without_gene_assignment` is False, so "
+            "the counts the two stages report stay about the same population."
+        ),
+    )
+    min_splice_ai_delta: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "A SpliceAI delta at or above this keeps the variant whatever its impact "
+            "or terms say. Identical to `selection.min_splice_ai_delta`; a value "
+            "above it would discard variants selection retains on the same signal."
+        ),
+    )
+    clinical_before_bar: bool = Field(
+        default=True,
+        description=(
+            "Ask the clinical adapter about the WHOLE batch, before the bar, so that a "
+            "curated assertion can keep a variant the consequence rule would drop. "
+            "True by default because the alternative is measurably wrong: on the scale "
+            "phantom, deferring the clinical lookup behind the bar changed the selected "
+            "set from 3,616 to 3,600 — 16 variants that selection's "
+            "`retain_pathogenic_clinical` rescue would have kept, lost because the "
+            "rescue needs a lookup the bar had already skipped. Setting this False "
+            "restores that hole and is reported as a run warning; it exists because the "
+            "cost is a real one and someone may have measured it as unaffordable. The "
+            "FREQUENCY lookup stays behind the bar either way, and that is the "
+            "expensive one — the whole-genome stall was 4.96 M random tabix seeks "
+            "across 22 multi-gigabyte gnomAD shards, not a ClinVar scan."
+        ),
+    )
+
+    def as_payload(self) -> dict[str, bool | float | str]:
+        """The threshold set in a fixed key order, for the triage report artifact."""
+        return {
+            "enabled": self.enabled,
+            "min_impact": str(self.min_impact),
+            "retain_unassessed_impact": self.retain_unassessed_impact,
+            "retain_without_gene_assignment": self.retain_without_gene_assignment,
+            "min_splice_ai_delta": self.min_splice_ai_delta,
+            "clinical_before_bar": self.clinical_before_bar,
+        }
+
+
 class QualityThresholds(StrictModel):
     """Analytical-validity cut-points. Breaching one flags; it does not delete."""
 
@@ -585,6 +691,17 @@ class CaseConfig(StrictModel):
             "Kept apart from `frequency`, whose cut-points only down-rank, so that the "
             "filter/rank separation this pipeline is built on is visible in the config "
             "as well as in the code (GP-13)."
+        ),
+    )
+    triage: TriageThresholds = Field(
+        default_factory=TriageThresholds,
+        description=(
+            "The relevance bar that decides which annotated variants get a frequency "
+            "lookup, a clinical lookup and an evidence row, and which get one line in "
+            "the discard ledger (ADR 0028). Separate from `selection` because it runs "
+            "earlier and for a different reason — cost, not plausibility — and because "
+            "it must be provably WIDER than `selection`, which is a relationship a "
+            "reader can only check if both are visible in one file."
         ),
     )
 

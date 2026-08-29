@@ -53,10 +53,17 @@ Enforced in `GenomicCoordinate`. Cross-build comparison raises; it never coerces
 `AssertionTier.OBSERVED_DATA` may not be paired with an in-silico or inference
 evidence type. Enforced in `EvidenceItem`.
 
-**GP-13 — Filtering and ranking are separate.**
+**GP-13 — Filtering and ranking are separate, and every discard is accounted for.**
 Hard filters remove only *invalid or impossible* records (malformed, wrong build,
-non-canonical contig). Everything else is flagged and down-ranked, never deleted.
-See ADR 0005.
+non-canonical contig). Nothing is removed for being common, low quality or
+predicted-benign; that is a soft flag, and it down-ranks. Where a stage does drop
+a *valid* record — the candidate-selection stage and the annotation relevance bar
+both do, and only those two — it writes one row naming the variant, the rule and
+the value that triggered it. The requirement is that a dropped candidate be
+**accounted for**, not that it be retained: what the principle forbids is a
+candidate becoming invisible and unfalsifiable, and a discard record with its
+reason is not invisible. `discards/discard_ledger.tsv` is the mechanism, and
+`mva discards explain` is how a reviewer asks. See ADR 0005 and ADR 0028.
 
 **GP-14 — Absence of information is not negative information.**
 `ObservationStatus.NOT_ASSESSED` carries no evidential weight. Only `EXCLUDED`
