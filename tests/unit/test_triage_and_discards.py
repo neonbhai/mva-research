@@ -457,3 +457,81 @@ def test_the_monitor_reports_the_measured_shape_of_the_real_failure() -> None:
             monitor.observe(bytes_written=19_000)
     assert "94.3 GB" in str(excinfo.value)
     assert "60.0 GB free" in str(excinfo.value)
+
+
+def test_bytes_only_observations_do_not_advance_the_record_count() -> None:
+    """Bytes and records are counted at different places, so they must not double.
+
+    The write loop reports bytes for a record the bar already counted when it
+    examined it. If that call also incremented the record count, every survivor
+    would be counted twice and bytes/record would come out at half its true value.
+    """
+    out, clock = io.StringIO(), [0.0]
+    monitor = _monitor(out, clock)
+    monitor.observe(records=100, bytes_written=0)
+    for _ in range(50):
+        monitor.observe(records=0, bytes_written=1_000)
+
+    projection = monitor.projection()
+    assert projection.records_seen == 100
+    assert projection.bytes_written == 50_000
+    assert not out.getvalue(), "a bytes-only observation must not read the clock or report"
+
+
+def test_a_bar_that_rejects_most_records_does_not_refuse_a_run_that_fits() -> None:
+    """The regression: project from records EXAMINED, never from records retained.
+
+    A bar that keeps 1 record in 100 still has the whole callset as its
+    denominator. Counting only survivors would measure ~19 kB against each of them,
+    multiply that by every record in the callset, and refuse a run whose real output
+    is a hundredth of the projection -- reproducing, from the other direction, the
+    95 GB estimate that ADR 0028 exists to have caught.
+    """
+    out, clock = io.StringIO(), [0.0]
+    # 1 M records at 10 kB per SURVIVOR. One record in 100 survives, so the true
+    # output is 1 M / 100 * 10 kB = 100 MB, which fits in a 1 GB volume easily.
+    # Counted the wrong way it projects 1 M * 10 kB = 10 GB and refuses.
+    monitor = _monitor(out, clock)
+    for index in range(100_000):
+        clock[0] += 0.0001
+        monitor.observe(records=1)
+        if index % 100 == 0:
+            monitor.observe(records=0, bytes_written=10_000)
+
+    projection = monitor.projection()
+    assert projection.records_seen == 100_000
+    assert projection.fits, "a run writing 100 MB to a 1 GB volume must not be refused"
+    assert projection.projected_bytes < 200_000_000
+
+
+def test_the_stream_reports_every_record_it_examines_not_every_record_it_yields() -> None:
+    """``on_examined`` is the only way a caller can see a bar-rejected record.
+
+    Without it the count is unobservable: a rejected record is never yielded, so a
+    consumer driving progress from the yielded records goes silent for exactly as
+    long as the bar is doing its job.
+    """
+    from datetime import UTC, datetime
+
+    from tests.unit.test_stage_streaming import sample_adapters, sample_records
+
+    from mva.annotation.service import iter_annotated
+    from mva.clock import FixedClock
+
+    records = sample_records()
+    examined: list[int] = []
+    stream = iter_annotated(
+        iter(records),
+        adapters=sample_adapters(),
+        clock=FixedClock(datetime(2026, 1, 1, tzinfo=UTC)),
+        batch_size=3,
+        triage=VariantTriage(TriageThresholds()),
+        on_examined=examined.append,
+    )
+    yielded = list(stream)
+
+    assert sum(examined) == len(records), "every input record must be reported once"
+    assert len(yielded) < len(records), (
+        "this fixture must exercise a bar that actually rejects, or the test passes "
+        "for the wrong reason"
+    )

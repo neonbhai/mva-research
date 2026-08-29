@@ -606,3 +606,40 @@ def test_every_catalogue_load_declares_its_provenance() -> None:
         "knowledge/literature/ (ADR 0022), synthetic=True for the demo tables "
         "under knowledge/public/. The default is True and silent."
     )
+
+
+def test_the_annotation_stream_is_driven_with_a_record_counter() -> None:
+    """Any `iter_annotated` call that binds a bar must also pass ``on_examined``.
+
+    With a bar bound, a rejected record is never yielded (ADR 0028). A caller that
+    measures progress from the yielded records is therefore measuring survivors,
+    and a survivor count is the wrong numerator for a whole-callset denominator: it
+    projects survivor cost -- roughly 19 kB a row -- across every record in the
+    input. On the shipped case that is a ~94 GB estimate for a run that writes a
+    fraction of it, and `StageMonitor` refuses to start.
+
+    That is not hypothetical either. The wiring shipped without it, and the first
+    real run was killed by hand after twelve minutes because it had gone silent and
+    was heading for a refusal it did not deserve. Nothing failed: the unit tests
+    covered the monitor's arithmetic and the stream's partition separately, and the
+    defect lived in the line that joined them.
+    """
+    offenders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name != "iter_annotated":
+                continue
+            keywords = {kw.arg for kw in node.keywords}
+            if "triage" in keywords and "on_examined" not in keywords:
+                offenders.append(f"{path.relative_to(SRC.parent.parent)}:{node.lineno}")
+
+    assert not offenders, (
+        "iter_annotated is bound to a relevance bar without an on_examined counter, "
+        "so progress and the disk projection would both be measured over survivors "
+        "only: " + ", ".join(offenders)
+    )

@@ -31,7 +31,7 @@ a fixed per-record sequence.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import islice
@@ -232,6 +232,7 @@ def iter_annotated(
     batch_size: int | None = DEFAULT_ANNOTATION_BATCH_SIZE,
     triage: VariantTriage | None = None,
     discards: DiscardSink | None = None,
+    on_examined: Callable[[int], None] | None = None,
 ) -> AnnotationStream:
     """Annotate a stream of records without holding the callset.
 
@@ -265,6 +266,11 @@ def iter_annotated(
     are yielded to ``discards`` instead of being yielded to the caller: no evidence,
     no artifact row, no lookup. Without a bar this is exactly the pre-ADR-0028 pass,
     which is what every existing caller gets.
+
+    ``on_examined`` is called once per batch with the number of records examined,
+    retained and rejected alike. It exists because the count a progress monitor
+    needs is not observable from the records this function yields: with a bar
+    bound, a rejected record never appears there at all.
     """
     return AnnotationStream(
         variants,
@@ -273,6 +279,7 @@ def iter_annotated(
         batch_size=batch_size,
         triage=triage,
         discards=discards,
+        on_examined=on_examined,
     )
 
 
@@ -297,6 +304,7 @@ class AnnotationStream:
         "_exhausted",
         "_frequency_desc",
         "_hits",
+        "_on_examined",
         "_pre_annotated",
         "_records",
         "_source",
@@ -316,6 +324,7 @@ class AnnotationStream:
         batch_size: int | None,
         triage: VariantTriage | None = None,
         discards: DiscardSink | None = None,
+        on_examined: Callable[[int], None] | None = None,
     ) -> None:
         if batch_size is not None and batch_size < 1:
             msg = (
@@ -348,6 +357,12 @@ class AnnotationStream:
         self._triage = triage if (triage is not None and triage.enabled) else None
         self._clinical_before_bar = triage.clinical_before_bar if triage is not None else True
         self._discards = discards
+        # Fired once per batch with the number of records EXAMINED, retained and
+        # triaged alike. A caller measuring progress cannot get that count from the
+        # records this stream yields, because a bar-rejected record is never yielded
+        # (ADR 0028) -- and a progress monitor fed only survivors would divide
+        # survivor cost into a whole-callset denominator and refuse a run that fits.
+        self._on_examined = on_examined
         self._triage_kept: dict[str, int] = dict.fromkeys(TRIAGE_KEEP_REASONS, 0)
         self._triage_dropped: dict[str, int] = dict.fromkeys(TRIAGE_DROP_REASONS, 0)
         #: Distinct IDs each adapter was ASKED about. Equal to `_distinct` for the
@@ -399,6 +414,14 @@ class AnnotationStream:
             )
 
             verdicts = self._triage_batch(batch, variant_ids, consequence_index, early_clinical)
+            # Every record in this batch has now been examined, whether or not it
+            # will be yielded. Reported here rather than from the yield loop below
+            # so that a batch the bar rejects entirely still moves the caller's
+            # progress: a run whose first million records are intergenic would
+            # otherwise print nothing at all, which is the blindness ADR 0028 exists
+            # to remove.
+            if self._on_examined is not None:
+                self._on_examined(len(batch))
             # The ONLY ids that reach the frequency and clinical adapters. This is
             # the line the whole of ADR 0028 is about: a gnomAD lookup is a region
             # query against a multi-gigabyte shard, and asking it about 14 thousand

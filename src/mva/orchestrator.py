@@ -451,14 +451,6 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
         context.warnings.extend(triage_warnings(triage_thresholds, config.selection, narrowings))
         triage = VariantTriage(triage_thresholds)
 
-        annotated = iter_annotated(
-            qc.variants,
-            adapters=bound.adapters,
-            clock=context.clock,
-            triage=triage,
-            discards=discards,
-        )
-
         # Projects total time and bytes from the first batch against free disk, and
         # refuses to continue when the answer is "this cannot finish". The measured
         # run that motivated all of this was killed at 7 h 30 m; every number needed
@@ -468,6 +460,22 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
             "annotate",
             total_records=len(qc.variants),
             free_bytes=free_bytes_at(context.run_dir),
+        )
+
+        # The monitor counts records here, not in the write loop below, because the
+        # denominator is the WHOLE callset and so the numerator has to be. With a
+        # bar bound, the write loop only ever sees survivors: feeding it those would
+        # divide survivor cost -- roughly 19 kB a row -- across 4.96 M records and
+        # project ~94 GB of output for a run that actually writes a fraction of it,
+        # then refuse to start. It would also print nothing at all while the bar was
+        # rejecting, which is the condition ADR 0028 was written to end.
+        annotated = iter_annotated(
+            qc.variants,
+            adapters=bound.adapters,
+            clock=context.clock,
+            triage=triage,
+            discards=discards,
+            on_examined=lambda examined: monitor.observe(records=examined),
         )
 
         # ONE pass drives everything: annotation feeds the ledger and the artifact,
@@ -493,7 +501,9 @@ def _execute_stages(  # noqa: PLR0915 - the composition root is legitimately lon
                     ledger.extend(item.evidence)
                     before = sink.bytes_written
                     sink.write(item.variant.model_dump(mode="json"))
-                    monitor.observe(bytes_written=sink.bytes_written - before)
+                    # Bytes only. The record was already counted when the bar
+                    # examined it, and counting it twice would halve bytes/record.
+                    monitor.observe(records=0, bytes_written=sink.bytes_written - before)
                     yield item.variant
 
             filtered = iter_hard_filtered(

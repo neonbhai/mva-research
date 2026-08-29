@@ -290,6 +290,11 @@ class StageMonitor:
         """
         self._records += records
         self._bytes += bytes_written
+        if not records:
+            # Bytes-only: the record these bytes belong to was counted when it was
+            # examined, upstream of any bar. Accounting only -- no clock read and no
+            # projection, so a caller may report bytes as often as it likes.
+            return
         if self._records >= self._next_check_at:
             self._next_check_at = self._records + self._project_after
             self._enforce()
