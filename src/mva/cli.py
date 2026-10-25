@@ -14,29 +14,41 @@ Two properties of this module are load-bearing rather than stylistic:
 
 from __future__ import annotations
 
+import json
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 from rich.table import Table
 
 from mva.config import (
     CaseConfig,
+    InputPaths,
     NetworkProfile,
     Workspace,
     find_repo_root,
     load_case_config,
+    path_is_within,
     resolve_workspace,
 )
-from mva.errors import MvaError, PrivacyViolationError
+from mva.errors import ConfigError, MvaError, PrivacyViolationError
+from mva.models.genome import GenomeBuild
 
 app = typer.Typer(
     name="mva",
     help="Provenance-first rare-disease variant and mechanism analysis.",
     no_args_is_help=True,
     add_completion=False,
+)
+case_app = typer.Typer(
+    name="case",
+    help="Set up and run one case. The front door: guided or fully scripted.",
+    no_args_is_help=True,
 )
 run_app = typer.Typer(name="run", help="Execute pipeline stages.", no_args_is_help=True)
 privacy_app = typer.Typer(name="privacy", help="Privacy boundary tooling.", no_args_is_help=True)
@@ -46,6 +58,7 @@ discards_app = typer.Typer(
     help="Ask a run's discard ledger why a variant is not in the output (ADR 0028).",
     no_args_is_help=True,
 )
+app.add_typer(case_app)
 app.add_typer(run_app)
 app.add_typer(privacy_app)
 app.add_typer(verify_app)
@@ -649,6 +662,1001 @@ def discards_summary(
     for key, count in counts.items():
         stage, rule = key.split("/", 1)
         console.print(f"  {stage:<12} {rule:<32} {count}")
+
+
+# ---------------------------------------------------------------------------
+# case — the guided front door
+# ---------------------------------------------------------------------------
+#
+# Assembling a valid case used to mean reading four unrelated places first:
+# `docs/submission-runbook.md` §1.3 for where the gated data comes from,
+# `config/schemas/case.schema.json` for which keys are required,
+# `src/mva/phenotype/loader.py` for the phenotype columns, and
+# `src/mva/config.py` for the workspace rules. This group is those four answers
+# in one command.
+#
+# Three properties are load-bearing rather than stylistic:
+#
+# * **One code path, two modes.** `resolve_case` does every check. The only
+#   difference between a guided run and a scripted one is the `Prompter` it is
+#   handed; `None` means "there is nobody to ask", so a missing value is an
+#   immediate error with a non-zero exit and never a hang.
+# * **Nothing here opens an input file.** Paths and extensions are checked by
+#   name. The contents belong to the pipeline (GP-44, ADR 0008).
+# * **No value is validated twice.** The workspace rules come from
+#   `resolve_workspace`, the build from `GenomeBuild.parse`, the identifiers from
+#   the constraints declared on `CaseConfig`, and the relative-path rule from
+#   `InputPaths`. A second copy of a rule here would be a second rule.
+
+#: Name suffixes a variant-call input may plausibly carry.
+#:
+#: Checked on the NAME only. A path and an extension are all that can be
+#: verified without reading patient data, and reading it is not this command's
+#: job: it exists to get a valid case assembled, not to inspect a genome.
+VCF_SUFFIXES: tuple[str, ...] = (
+    ".vcf",
+    ".vcf.gz",
+    ".vcf.bgz",
+    ".gvcf",
+    ".gvcf.gz",
+    ".g.vcf",
+    ".g.vcf.gz",
+    ".bcf",
+)
+
+#: Name suffixes the phenotype loader can actually read. `read_tsv_rows` calls
+#: `Path.read_text`, so a gzipped TSV is refused here rather than three stages
+#: later, after the workspace and the VCF have already been accepted.
+PHENOTYPE_SUFFIXES: tuple[str, ...] = (".tsv", ".txt", ".tab")
+
+#: Raw reads, refused by name WITH the reason rather than quietly accepted.
+#: This pipeline does no alignment and no SV/CNV calling (TD-03), so a BAM, CRAM
+#: or FASTQ is not an input it consumes — and a command that accepted one would
+#: be implying otherwise.
+RAW_READ_SUFFIXES: tuple[str, ...] = (
+    ".bam",
+    ".cram",
+    ".sam",
+    ".ubam",
+    ".fastq",
+    ".fastq.gz",
+    ".fq",
+    ".fq.gz",
+    ".sra",
+)
+
+#: How many invalid answers one question takes before the command gives up. An
+#: unbounded re-prompt loop is a hang when stdin is a file of the wrong thing.
+MAX_PROMPT_ATTEMPTS: int = 5
+
+#: Default workspace-relative destination for the phenotype template.
+DEFAULT_PHENOTYPE_TEMPLATE: str = "inputs/phenotype.tsv"
+
+#: The shape of one phenotype row, shipped COMMENTED OUT in the template. The
+#: term is a real public ontology identifier and the row is fabricated; it is
+#: here to be copied, not to be run. See `phenotype_template_text`.
+EXAMPLE_PHENOTYPE_ROW: tuple[str, ...] = (
+    "HP:0000252",
+    "Microcephaly",
+    "observed",
+    "congenital",
+    "clinical_summary",
+    "1.0",
+    "",
+)
+
+#: The one `proband_id` the challenge scorer accepts. Not enforced — the schema
+#: permits any non-empty string and this command does not narrow it — but
+#: reported, because the failure mode otherwise is a scored submission of zero.
+EXPECTED_PROBAND_ID: str = "PROBAND01"
+
+#: Asks one question and returns the raw answer. Injected so that the guided and
+#: the scripted paths are one path with different sources of answers.
+Prompter = Callable[[str, str | None], str]
+
+
+@dataclass(frozen=True)
+class CaseRequest:
+    """Raw, unvalidated values as supplied on the command line.
+
+    `None` means "not supplied", which is the only thing that triggers a prompt.
+    A value that was supplied is validated exactly as a typed answer is.
+    """
+
+    workspace: str | None
+    vcf: str | None
+    phenotype: str | None
+    genome_build: str | None
+    case_id: str | None
+    proband_id: str | None
+    synthetic: bool
+    description: str
+
+
+@dataclass(frozen=True)
+class ResolvedCase:
+    """A case that passed every existing validator, ready to render."""
+
+    workspace: Workspace
+    case_id: str
+    proband_id: str
+    genome_build: GenomeBuild
+    synthetic: bool
+    description: str
+    vcf: str
+    """Workspace-relative, as `InputPaths` requires (ADR 0006)."""
+    phenotype: str
+
+
+@dataclass(frozen=True)
+class CheckRow:
+    """One line of `mva case check`. `state` is 'ok', 'FAIL' or 'note'."""
+
+    name: str
+    state: str
+    detail: str
+
+
+# --------------------------------------------------------------- field parsers
+
+
+def _declared_field_parser(model: type[BaseModel], field: str) -> Callable[[str], str]:
+    """A parser for one field, built from the model's OWN declared constraints.
+
+    `CaseConfig.model_fields["case_id"]` carries the pattern and the length bound
+    written in `mva.config`. Validating an answer through it means this command
+    cannot drift from the schema it is writing for: there is no second copy of
+    the pattern here to forget to update.
+    """
+    adapter: TypeAdapter[str] = TypeAdapter(Annotated[str, model.model_fields[field]])
+    return adapter.validate_python
+
+
+def _parse_workspace(raw: str, repo_root: Path) -> Workspace:
+    """Validate a workspace with the existing boundary check.
+
+    Every rule — exists, outside the repo after symlink resolution, not under a
+    cloud-synced root — belongs to `resolve_workspace` (GP-40, PRIV-07). There is
+    deliberately no bypass flag: if that function refuses a directory, this
+    command reports why and asks again.
+    """
+    if not raw.strip():
+        msg = "No workspace given. It is a directory outside this repo, e.g. ~/mva-workspace."
+        raise ConfigError(msg)
+    return resolve_workspace(raw.strip(), repo_root=repo_root)
+
+
+def _parse_proband_id(raw: str) -> str:
+    """Validate `proband_id` against `CaseConfig`, plus the emptiness the schema adds.
+
+    `config/schemas/case.schema.json` gives this field `minLength: 1`; the
+    pydantic model does not, and pydantic is the authority (so the empty string
+    would reach Snakemake's schema check and fail there instead). Refusing it
+    here is the same rule reported earlier, not a new one.
+    """
+    value = _declared_field_parser(CaseConfig, "proband_id")(raw).strip()
+    if not value:
+        msg = (
+            "proband_id is empty. case.schema.json requires at least one character, "
+            f"and the challenge scorer accepts only {EXPECTED_PROBAND_ID!r}."
+        )
+        raise ConfigError(msg)
+    return value
+
+
+def _matches_suffix(name: str, suffixes: tuple[str, ...]) -> bool:
+    lowered = name.lower()
+    return any(lowered.endswith(suffix) for suffix in suffixes)
+
+
+def _parse_workspace_input(
+    raw: str,
+    *,
+    workspace: Workspace,
+    label: str,
+    suffixes: tuple[str, ...],
+) -> str:
+    """Resolve one input path to the workspace-relative form a case config stores.
+
+    Accepts either an absolute path or a path already relative to the workspace,
+    because both are what a person has to hand. Returns the relative form, which
+    is the only form `InputPaths` permits: a committed config must not record
+    where patient data lives (ADR 0006).
+
+    **No path is echoed back.** `mva.pipeline.validate_case` sets the precedent
+    for the same reason — this output goes to a terminal, a log and an agent's
+    context (GP-44, ADR 0008), and the workspace layout is itself sensitive. The
+    label and the reason are enough to act on.
+    """
+    token = raw.strip()
+    if not token:
+        msg = f"No path given for {label}."
+        raise ConfigError(msg)
+
+    if _matches_suffix(token, RAW_READ_SUFFIXES):
+        msg = (
+            f"The path given for {label} names a raw-read file. This pipeline consumes "
+            "called variants only: it does no alignment and no SV/CNV calling (TD-03), "
+            f"so a BAM, CRAM, SAM or FASTQ is not an input it can use. Supply the VCF "
+            "produced from those reads."
+        )
+        raise ConfigError(msg)
+    if not _matches_suffix(token, suffixes):
+        msg = (
+            f"The path given for {label} does not end in one of: {', '.join(suffixes)}. "
+            "The extension is checked by name only — nothing here opens the file — so a "
+            "file with the wrong name must be renamed or a different one supplied."
+        )
+        raise ConfigError(msg)
+
+    candidate = Path(token).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace.root / candidate
+    resolved = candidate.resolve()
+
+    if not path_is_within(resolved, workspace.root):
+        msg = (
+            f"The path given for {label} is outside the workspace. A case config records "
+            "workspace-relative paths only (ADR 0006), so the file has to live under the "
+            "workspace root. Move or copy it there and retry — this command will not copy "
+            "patient data on your behalf."
+        )
+        raise ConfigError(msg)
+
+    try:
+        relative = resolved.relative_to(workspace.root)
+    except ValueError as exc:
+        msg = (
+            f"The path given for {label} is inside the workspace but cannot be expressed "
+            "relative to it, which happens when the two are spelled in different letter "
+            "cases on a case-insensitive filesystem. Spell both the same way and retry."
+        )
+        raise ConfigError(msg) from exc
+
+    # Re-resolve through the workspace itself, which refuses an escape, and then
+    # ask whether the file is there. `is_file` is a stat, not a read.
+    if not workspace.path(relative.as_posix()).is_file():
+        msg = (
+            f"No file at the path given for {label}. The path is deliberately not echoed "
+            "(GP-44); check it with `ls` in your own shell. If the file is not downloaded "
+            "yet, see docs/submission-runbook.md §1.3 for the gated dataset."
+        )
+        raise ConfigError(msg)
+    return relative.as_posix()
+
+
+# --------------------------------------------------------------- asking
+
+
+def _console_prompter(question: str, default: str | None) -> str:
+    """Read one answer from stdin. Works on a terminal and on a pipe alike."""
+    if default is None:
+        return str(typer.prompt(question))
+    return str(typer.prompt(question, default=default))
+
+
+def _select_prompter(*, no_input: bool, interactive: bool) -> Prompter | None:
+    """Decide whether anybody can be asked a question.
+
+    `--no-input` wins outright: a caller that passes it has guaranteed itself a
+    non-zero exit instead of a prompt, and that guarantee is the point.
+    `--interactive` forces prompting when stdin is a pipe, which is how this
+    command is driven by a test or an expect-style script. Otherwise prompting
+    follows the TTY, so a script, a CI job or an agent never gets asked.
+    """
+    if no_input:
+        return None
+    if interactive:
+        return _console_prompter
+    return _console_prompter if sys.stdin.isatty() else None
+
+
+def _explain(exc: Exception) -> str:
+    """One readable line for a rejected answer, carrying no echoed input value.
+
+    Pydantic appends `input_value=...` to a `ValidationError` by default, and for
+    a path under the workspace that is exactly the thing not to print, so the
+    message is rebuilt from the field location and the constraint (PRIV-09).
+    """
+    if isinstance(exc, ValidationError):
+        parts: list[str] = []
+        for error in exc.errors():
+            location = ".".join(str(piece) for piece in error["loc"]) or "value"
+            parts.append(f"{location}: {error['msg']}")
+        return "; ".join(parts)
+    return _without_doc_links(" ".join(str(exc).split()))
+
+
+#: Pydantic appends this plus a URL to every error in a multi-error message. In a
+#: three-column table it crowds out the part that says which field is wrong.
+_DOC_LINK_MARKER: str = "For further information visit"
+
+
+def _without_doc_links(message: str) -> str:
+    """Drop pydantic's per-error documentation URLs, keeping the field and reason."""
+    while _DOC_LINK_MARKER in message:
+        head, _, tail = message.partition(_DOC_LINK_MARKER)
+        _, _, rest = tail.strip().partition(" ")
+        message = f"{head.strip()} {rest.strip()}".strip()
+    return message
+
+
+def _read_answer(prompter: Prompter, question: str, default: str | None) -> str:
+    try:
+        return prompter(question, default)
+    except (EOFError, KeyboardInterrupt, typer.Abort) as exc:
+        msg = (
+            "Input ended before every required value was supplied, so nothing was "
+            "written. Pass the remaining values as flags, or use --no-input to get a "
+            "clear error instead of a question."
+        )
+        raise ConfigError(msg) from exc
+
+
+def _ask[T](
+    *,
+    label: str,
+    flag: str,
+    supplied: str | None,
+    question: str,
+    default: str | None,
+    parse: Callable[[str], T],
+    prompter: Prompter | None,
+) -> T:
+    """Obtain one validated value, from a flag or from whoever is answering.
+
+    The validation is identical either way, which is the whole reason this
+    function exists: a flag value is not trusted more than a typed one, and a
+    typed one gets the same validator rather than a friendlier approximation of
+    it. With no prompter, a missing or invalid value raises.
+    """
+    raw = supplied
+    for _ in range(MAX_PROMPT_ATTEMPTS):
+        if raw is None:
+            if prompter is None:
+                raise ConfigError(_missing_value_message(label, flag))
+            raw = _read_answer(prompter, question, default)
+        try:
+            return parse(raw)
+        except (MvaError, ValueError) as exc:
+            reason = _explain(exc)
+            if prompter is None:
+                msg = f"--{flag} ({label}): {reason}"
+                raise ConfigError(msg) from exc
+            err_console.print(f"  [bold red]invalid[/bold red] {label}: {reason}")
+            raw = None
+    msg = (
+        f"Five invalid answers for {label!r}; giving up without writing anything. "
+        f"The accepted form is described by --{flag} in `mva case init --help`."
+    )
+    raise ConfigError(msg)
+
+
+def _missing_value_message(label: str, flag: str) -> str:
+    return (
+        f"No value for {label}. Supply --{flag}, or run from a terminal without "
+        "--no-input to be asked for it."
+    )
+
+
+def _missing_flags(request: CaseRequest) -> list[str]:
+    """Every required flag the caller left out, reported together.
+
+    Together rather than one at a time because the caller is usually a script or
+    an agent, which cannot iterate through six round trips as cheaply as a person
+    can answer six questions.
+    """
+    supplied: tuple[tuple[str, str | None], ...] = (
+        ("workspace", request.workspace),
+        ("vcf", request.vcf),
+        ("phenotype", request.phenotype),
+        ("genome-build", request.genome_build),
+        ("case-id", request.case_id),
+        ("proband-id", request.proband_id),
+    )
+    return [f"--{flag}" for flag, value in supplied if value is None]
+
+
+def resolve_case(
+    request: CaseRequest,
+    *,
+    prompter: Prompter | None,
+    repo_root: Path,
+) -> ResolvedCase:
+    """Validate a case request into a `ResolvedCase`, asking for what is missing.
+
+    The workspace is resolved first because the two input paths are meaningless
+    without it: they are stored relative to it and checked against it.
+
+    Two prompts carry a default (`GRCh38`, and `PROBAND01` for the proband id).
+    A default shown to a person who can see and overtype it is not the same thing
+    as a silent flag default, and neither is available in `--no-input` mode —
+    GP-11 makes a guessed genome build a defect, not a convenience.
+    """
+    if prompter is None:
+        missing = _missing_flags(request)
+        if missing:
+            msg = (
+                f"Missing required value(s): {', '.join(missing)}. Supply them as flags, "
+                "or drop --no-input and run from a terminal to be asked. Nothing was "
+                "written."
+            )
+            raise ConfigError(msg)
+
+    workspace = _ask(
+        label="workspace",
+        flag="workspace",
+        supplied=request.workspace,
+        question="Workspace root (outside this repo, e.g. ~/mva-workspace)",
+        default=None,
+        parse=lambda raw: _parse_workspace(raw, repo_root),
+        prompter=prompter,
+    )
+    vcf = _ask(
+        label="vcf",
+        flag="vcf",
+        supplied=request.vcf,
+        question="VCF path (absolute, or relative to the workspace)",
+        default=None,
+        parse=lambda raw: _parse_workspace_input(
+            raw, workspace=workspace, label="vcf", suffixes=VCF_SUFFIXES
+        ),
+        prompter=prompter,
+    )
+    phenotype = _ask(
+        label="phenotype",
+        flag="phenotype",
+        supplied=request.phenotype,
+        question="Phenotype TSV path (see `mva case phenotype-template`)",
+        default=None,
+        parse=lambda raw: _parse_workspace_input(
+            raw, workspace=workspace, label="phenotype", suffixes=PHENOTYPE_SUFFIXES
+        ),
+        prompter=prompter,
+    )
+    genome_build = _ask(
+        label="genome build",
+        flag="genome-build",
+        supplied=request.genome_build,
+        question="Genome build (GRCh38 or GRCh37)",
+        default=GenomeBuild.GRCH38.value,
+        parse=GenomeBuild.parse,
+        prompter=prompter,
+    )
+    case_id = _ask(
+        label="case id",
+        flag="case-id",
+        supplied=request.case_id,
+        question="Case id (letters, digits, '-' and '_'; used as a directory name)",
+        default=None,
+        parse=_declared_field_parser(CaseConfig, "case_id"),
+        prompter=prompter,
+    )
+    proband_id = _ask(
+        label="proband id",
+        flag="proband-id",
+        supplied=request.proband_id,
+        question="Proband id",
+        default=EXPECTED_PROBAND_ID,
+        parse=_parse_proband_id,
+        prompter=prompter,
+    )
+    return ResolvedCase(
+        workspace=workspace,
+        case_id=case_id,
+        proband_id=proband_id,
+        genome_build=genome_build,
+        synthetic=request.synthetic,
+        description=request.description,
+        vcf=vcf,
+        phenotype=phenotype,
+    )
+
+
+# --------------------------------------------------------------- rendering
+
+
+def case_config_model(resolved: ResolvedCase) -> CaseConfig:
+    """Build the typed config, so the file is written only if the model accepts it.
+
+    Pydantic is the authority on a case configuration (`config/schemas/case.schema.json`
+    says so itself), and this is the call that consults it. `InputPaths` is what
+    refuses an absolute or `..`-bearing input path.
+    """
+    return CaseConfig(
+        case_id=resolved.case_id,
+        proband_id=resolved.proband_id,
+        genome_build=resolved.genome_build,
+        synthetic=resolved.synthetic,
+        description=resolved.description,
+        inputs=InputPaths(vcf=resolved.vcf, phenotype=resolved.phenotype),
+    )
+
+
+def render_case_config(resolved: ResolvedCase) -> str:
+    """Render the case YAML.
+
+    The single writer, which is what makes the guided and the scripted mode
+    byte-identical for identical answers: neither of them formats anything
+    itself. Hand-rendered rather than dumped so the file carries the two
+    sentences a reader of it needs, and so key order is a property of this
+    function rather than of a serialiser's defaults (GP-30).
+    """
+    lines = [
+        "# Case configuration written by `mva case init`.",
+        "#",
+        "# Input paths are WORKSPACE-RELATIVE, and the workspace root is deliberately",
+        "# absent: it is per-machine, and a committed config must not record where",
+        "# patient data lives (ADR 0006, GP-40). Supply it at run time with --workspace",
+        "# or MVA_WORKSPACE.",
+        f"case_id: {_yaml_scalar(resolved.case_id)}",
+        f"proband_id: {_yaml_scalar(resolved.proband_id)}",
+        f"genome_build: {resolved.genome_build.value}",
+        f"synthetic: {'true' if resolved.synthetic else 'false'}",
+    ]
+    if resolved.description:
+        lines.append(f"description: {_yaml_scalar(resolved.description)}")
+    lines.extend(
+        [
+            "",
+            "inputs:",
+            f"  vcf: {_yaml_scalar(resolved.vcf)}",
+            f"  phenotype: {_yaml_scalar(resolved.phenotype)}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _yaml_scalar(value: str) -> str:
+    """Quote a string as a YAML double-quoted scalar.
+
+    `json.dumps` is exactly that syntax for this subset, and it is total: a value
+    holding a quote, a colon, a `#` or a leading digit survives it, which a bare
+    scalar would not.
+    """
+    return json.dumps(value)
+
+
+def phenotype_template_text() -> str:
+    """The phenotype TSV header, with the vocabulary taken from the loader itself.
+
+    The columns and the accepted `status` spellings are read from
+    `mva.phenotype.loader`, so this template cannot describe a schema the parser
+    does not implement. Guessing that vocabulary is the thing this file exists to
+    stop: the loader refuses an unrecognised status rather than defaulting it
+    (GP-14), and "status" is the one column where a wrong guess silently inverts
+    the evidence.
+    """
+    from mva.models.phenotype import Onset
+    from mva.phenotype.loader import (
+        OPTIONAL_COLUMNS,
+        REQUIRED_COLUMNS,
+        allowed_status_summary,
+    )
+
+    columns = (*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)
+    lines = [
+        "# Phenotype profile. One row per HPO term, tab-separated.",
+        "# '#' comment lines and blank lines are ignored; the first other line is the header.",
+        "#",
+        f"# Required: {', '.join(REQUIRED_COLUMNS)}",
+        f"# Optional: {', '.join(OPTIONAL_COLUMNS)}",
+        "#",
+        "# hpo_id   'HP:' then exactly seven digits ('HP_0000252' is accepted too). A",
+        "#          truncated id is an error, never zero-padded.",
+        "# status   An unlisted spelling is refused, not defaulted: guessing 'observed'",
+        "#          invents a finding and guessing 'excluded' turns a missing assessment",
+        "#          into evidence against a gene (GP-14). 'not_assessed' is NOT",
+        "#          'excluded'. Accepted spellings, by canonical value:",
+    ]
+    lines.extend(f"#            {group}" for group in allowed_status_summary().split("; "))
+    lines.extend(
+        [
+            f"# onset    One of: {', '.join(onset.value for onset in Onset)}. Empty means unknown.",
+            "# extraction_confidence  0.0-1.0. Empty means 1.0, which claims only that the",
+            "#          term was transcribed correctly from a table, not clinical certainty.",
+            "# notes    Free text, and NOT the place for a clinical narrative: anything",
+            "#          derived from one belongs in a source_excerpt_hash (PRIV-09).",
+            "#",
+            "# The example row below is commented out deliberately. An uncommented one is",
+            "# a finding no clinician recorded, and it becomes data the moment somebody",
+            "# forgets to delete it — which is the mistake this whole file exists to",
+            "# prevent (GP-14). Copy its shape; do not ship it.",
+            "\t".join(columns),
+            "#" + "\t".join(EXAMPLE_PHENOTYPE_ROW),
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------- reporting
+
+
+def _display_path(path: Path, *, repo_root: Path, workspace: Workspace | None) -> str:
+    """A copy-pasteable spelling of a path that never reveals the workspace root.
+
+    A path under the workspace is printed through `$MVA_WORKSPACE` rather than
+    expanded, because the workspace layout is sensitive and this output reaches a
+    log and an agent's context (GP-44, ADR 0008).
+    """
+    resolved = path.expanduser().resolve()
+    if workspace is not None and path_is_within(resolved, workspace.root):
+        relative = resolved.relative_to(workspace.root).as_posix()
+        return f'"$MVA_WORKSPACE/{relative}"'
+    if path_is_within(resolved, repo_root):
+        return resolved.relative_to(repo_root).as_posix()
+    return resolved.as_posix()
+
+
+def _next_command(config_arg: str, defaults_arg: str | None) -> str:
+    parts = ["mva run all", f"--config {config_arg}"]
+    if defaults_arg is not None:
+        parts.append(f"--defaults {defaults_arg}")
+    parts.append('--workspace "$MVA_WORKSPACE"')
+    return " ".join(parts)
+
+
+def _print_case_summary(resolved: ResolvedCase, out_path: Path, repo_root: Path) -> None:
+    """Report what was written. Workspace-relative input paths, nothing absolute."""
+    console.print(
+        f"[green]ok[/green] wrote "
+        f"{_display_path(out_path, repo_root=repo_root, workspace=resolved.workspace)}"
+    )
+    console.print(f"  case id        {resolved.case_id}")
+    console.print(f"  proband id     {resolved.proband_id}")
+    console.print(f"  genome build   {resolved.genome_build.value}")
+    console.print(f"  synthetic      {'true' if resolved.synthetic else 'false'}")
+    console.print(f"  vcf            {resolved.vcf}   (workspace-relative)")
+    console.print(f"  phenotype      {resolved.phenotype}   (workspace-relative)")
+    console.print("  workspace      validated; its path is not printed (GP-44)")
+    if resolved.proband_id != EXPECTED_PROBAND_ID:
+        console.print(
+            f"  [yellow]note[/yellow] the challenge scorer accepts only "
+            f"proband_id={EXPECTED_PROBAND_ID!r} and hard-fails anything else with "
+            "'Unknown proband_id' (docs/references/track1-submission-contract.md)."
+        )
+    if not resolved.synthetic:
+        console.print(
+            "  [yellow]note[/yellow] network_profile is left at its default, so the run "
+            "will warn that the Python guard is a tripwire rather than a boundary. Set "
+            "`network_profile: offline_enforced` only once an OS-level control is "
+            "actually asserted (docs/privacy-model.md, TD-06)."
+        )
+
+
+# --------------------------------------------------------------- commands
+
+
+@case_app.command("init")
+def case_init(
+    *,
+    workspace: Annotated[
+        str | None,
+        typer.Option("--workspace", "-w", help="External workspace root. Outside this repo."),
+    ] = None,
+    vcf: Annotated[
+        str | None,
+        typer.Option("--vcf", help="VCF path: absolute, or relative to the workspace."),
+    ] = None,
+    phenotype: Annotated[
+        str | None,
+        typer.Option("--phenotype", help="Phenotype TSV path, same two forms."),
+    ] = None,
+    genome_build: Annotated[
+        str | None,
+        typer.Option("--genome-build", help="GRCh38 or GRCh37. Never guessed (GP-11)."),
+    ] = None,
+    case_id: Annotated[
+        str | None,
+        typer.Option("--case-id", help="Case id; used as a directory name under runs/."),
+    ] = None,
+    proband_id: Annotated[
+        str | None,
+        typer.Option("--proband-id", help=f"Proband id. The scorer accepts {EXPECTED_PROBAND_ID}."),
+    ] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Where to write. Default: config/<case-id>.yaml."),
+    ] = None,
+    synthetic: Annotated[
+        bool,
+        typer.Option("--synthetic", help="Mark the case synthetic. Default: NOT synthetic."),
+    ] = False,
+    description: Annotated[str, typer.Option("--description", help="Free-text note.")] = "",
+    defaults: Annotated[
+        Path | None,
+        typer.Option("--defaults", help="Shared defaults YAML to validate and run against."),
+    ] = None,
+    no_input: Annotated[
+        bool,
+        typer.Option("--no-input", help="Never prompt. A missing value is an error, not a wait."),
+    ] = False,
+    interactive: Annotated[
+        bool,
+        typer.Option("--interactive", help="Prompt even when stdin is a pipe."),
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Assume yes; skip confirmation.")
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite an existing --out file.")
+    ] = False,
+    run: Annotated[
+        bool, typer.Option("--run", help="Run the pipeline once the case is written.")
+    ] = False,
+) -> None:
+    """Assemble a valid case configuration, and optionally run it.
+
+    Guided when stdin is a terminal and something is missing; silent when every
+    value is supplied. The same validators run either way — the workspace
+    boundary from `mva.config.resolve_workspace`, the build from
+    `GenomeBuild.parse`, the identifiers from the constraints on `CaseConfig`,
+    the relative-path rule from `InputPaths` — so the two modes cannot disagree
+    about what is valid, and they write identical bytes for identical answers.
+
+    No input file is opened. Paths and extensions are checked by name, and no
+    path from the workspace is printed back (GP-44, ADR 0008).
+
+    Scripted:
+
+        mva case init --no-input --workspace ~/mva-workspace \\
+            --vcf inputs/proband.vcf --phenotype inputs/phenotype.tsv \\
+            --genome-build GRCh38 --case-id real-case-01 --proband-id PROBAND01
+
+    Guided: run it with no flags at all.
+    """
+    repo_root = find_repo_root()
+    request = CaseRequest(
+        workspace=workspace,
+        vcf=vcf,
+        phenotype=phenotype,
+        genome_build=genome_build,
+        case_id=case_id,
+        proband_id=proband_id,
+        synthetic=synthetic,
+        description=description,
+    )
+    prompter = _select_prompter(no_input=no_input, interactive=interactive)
+    confirmed = yes or no_input
+
+    try:
+        resolved = resolve_case(request, prompter=prompter, repo_root=repo_root)
+        case_config_model(resolved)
+        text = render_case_config(resolved)
+        out_path = (out or repo_root / "config" / f"{resolved.case_id}.yaml").expanduser()
+        _confirm_write(out_path, resolved, prompter=prompter, confirmed=confirmed, force=force)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        # Read it back through the ordinary loader, so what is reported as valid
+        # is the file on disk and its merge with --defaults, not the values in
+        # memory a moment ago.
+        load_case_config_with_defaults(out_path, defaults)
+    except (MvaError, ValidationError) as exc:
+        _fail(_explain(exc))
+        return
+
+    _print_case_summary(resolved, out_path, repo_root)
+    config_arg = _display_path(out_path, repo_root=repo_root, workspace=resolved.workspace)
+    defaults_arg = (
+        None
+        if defaults is None
+        else _display_path(defaults, repo_root=repo_root, workspace=resolved.workspace)
+    )
+    if not run:
+        console.print("\n  next:")
+        if not _workspace_env_set():
+            console.print(
+                "    [yellow]note[/yellow] MVA_WORKSPACE is not set in this shell. Export "
+                "it to the workspace you just gave (it is not echoed here), or pass "
+                "--workspace again."
+            )
+        console.print(f"    {_next_command(config_arg, defaults_arg)}")
+        return
+    console.print("")
+    run_all(
+        config=out_path,
+        defaults=defaults,
+        workspace=resolved.workspace.root,
+        allow_workspace_in_repo=False,
+    )
+
+
+def _confirm_write(
+    out_path: Path,
+    resolved: ResolvedCase,
+    *,
+    prompter: Prompter | None,
+    confirmed: bool,
+    force: bool,
+) -> None:
+    """Ask before writing, and before overwriting. Never ask when nobody can answer."""
+    if out_path.exists() and not force:
+        if prompter is None or confirmed:
+            msg = (
+                "The output file already exists. Pass --force to overwrite it, or --out to "
+                "write somewhere else. Nothing was changed."
+            )
+            raise ConfigError(msg)
+        answer = _read_answer(prompter, "Output file exists. Overwrite? [y/N]", "N")
+        if answer.strip().lower() not in {"y", "yes"}:
+            msg = "Declined to overwrite the existing file. Nothing was changed."
+            raise ConfigError(msg)
+    if prompter is None or confirmed:
+        return
+    console.print("")
+    console.print(f"  case {resolved.case_id} / proband {resolved.proband_id}")
+    console.print(f"  build {resolved.genome_build.value}, synthetic={resolved.synthetic}")
+    console.print(f"  vcf {resolved.vcf}, phenotype {resolved.phenotype} (workspace-relative)")
+    answer = _read_answer(prompter, "Write this case configuration? [Y/n]", "Y")
+    if answer.strip().lower() not in {"y", "yes", ""}:
+        msg = "Declined. Nothing was written."
+        raise ConfigError(msg)
+
+
+@case_app.command("check")
+def case_check(
+    config: ConfigOpt,
+    defaults: DefaultsOpt = None,
+    workspace: WorkspaceOpt = None,
+) -> None:
+    """Say whether a case config could run, without running anything.
+
+    A dry run in the strict sense: it parses the config, resolves the workspace
+    and asks whether each declared input is where the config says it is. It does
+    not open an input, does not hash one, and does not create a run directory —
+    `mva run validate` is the next step up, and it does all three.
+
+    Exits 1 if anything is wrong. 'note' rows are reports, not failures.
+    """
+    rows: list[CheckRow] = []
+    case: CaseConfig | None = None
+    try:
+        case = load_case_config_with_defaults(config, defaults)
+    except (MvaError, ValidationError) as exc:
+        rows.append(CheckRow("config parses", "FAIL", _explain(exc)))
+
+    if case is not None:
+        rows.extend(_check_config_rows(case))
+        resolved_ws, workspace_row = _check_workspace_row(workspace)
+        rows.append(workspace_row)
+        rows.extend(_check_input_rows(case, resolved_ws))
+
+    _render_check_rows(rows)
+    if any(row.state == "FAIL" for row in rows):
+        err_console.print(
+            "\n[bold red]case NOT runnable[/bold red] — fix the FAIL rows above. "
+            "`mva case init` writes a config that passes this check."
+        )
+        raise typer.Exit(code=1)
+    console.print("\n[green]ok[/green] the case config is complete and its inputs are present")
+
+
+def _check_config_rows(case: CaseConfig) -> list[CheckRow]:
+    """Rows for the parts of the case the config file alone decides."""
+    rows = [
+        CheckRow(
+            "required fields",
+            "ok",
+            "case_id, proband_id, genome_build, synthetic, inputs.vcf, inputs.phenotype",
+        ),
+        CheckRow("case id", "ok", case.case_id),
+    ]
+    if case.proband_id == EXPECTED_PROBAND_ID:
+        rows.append(CheckRow("proband id", "ok", case.proband_id))
+    else:
+        rows.append(
+            CheckRow(
+                "proband id",
+                "note",
+                f"{case.proband_id} — the scorer accepts only {EXPECTED_PROBAND_ID}",
+            )
+        )
+    if case.genome_build is GenomeBuild.GRCH38:
+        rows.append(CheckRow("genome build", "ok", case.genome_build.value))
+    else:
+        rows.append(
+            CheckRow("genome build", "note", f"{case.genome_build.value} — the challenge is GRCh38")
+        )
+    rows.append(
+        CheckRow(
+            "synthetic",
+            "ok",
+            "true — privacy checks are relaxed" if case.synthetic else "false — real-case rules",
+        )
+    )
+    return rows
+
+
+def _check_workspace_row(workspace: Path | None) -> tuple[Workspace | None, CheckRow]:
+    try:
+        resolved = resolve_workspace(workspace)
+    except MvaError as exc:
+        return None, CheckRow("workspace", "FAIL", _explain(exc))
+    return resolved, CheckRow("workspace", "ok", "resolved; outside the repo, not cloud-synced")
+
+
+def _check_input_rows(case: CaseConfig, workspace: Workspace | None) -> list[CheckRow]:
+    """One row per declared input: is it there, and is its name plausible?"""
+    declared: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+        ("inputs.vcf", case.inputs.vcf, VCF_SUFFIXES),
+        ("inputs.phenotype", case.inputs.phenotype, PHENOTYPE_SUFFIXES),
+    )
+    rows: list[CheckRow] = []
+    for name, relative, suffixes in declared:
+        if workspace is None:
+            rows.append(CheckRow(name, "FAIL", f"{relative} — not checkable without a workspace"))
+            continue
+        try:
+            present = workspace.path(relative).is_file()
+        except MvaError as exc:
+            rows.append(CheckRow(name, "FAIL", _explain(exc)))
+            continue
+        if not present:
+            rows.append(CheckRow(name, "FAIL", f"{relative} — no file at that workspace path"))
+        elif not _matches_suffix(relative, suffixes):
+            rows.append(
+                CheckRow(name, "note", f"{relative} — expected one of {', '.join(suffixes)}")
+            )
+        else:
+            rows.append(CheckRow(name, "ok", relative))
+    return rows
+
+
+def _render_check_rows(rows: list[CheckRow]) -> None:
+    table = Table(show_header=True, title="case check")
+    table.add_column("check")
+    table.add_column("result")
+    table.add_column("detail")
+    states = {
+        "ok": "[green]ok[/green]",
+        "FAIL": "[bold red]FAIL[/bold red]",
+        "note": "[yellow]note[/yellow]",
+    }
+    for row in rows:
+        table.add_row(row.name, states.get(row.state, row.state), row.detail)
+    console.print(table)
+
+
+@case_app.command("phenotype-template")
+def case_phenotype_template(
+    relative_path: Annotated[
+        str,
+        typer.Argument(help="Workspace-relative destination."),
+    ] = DEFAULT_PHENOTYPE_TEMPLATE,
+    workspace: WorkspaceOpt = None,
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing file.")] = False,
+) -> None:
+    """Write a phenotype TSV with the correct header, ready to fill in.
+
+    The columns and the accepted `status` spellings come from
+    `mva.phenotype.loader`, so the template cannot describe a schema the parser
+    does not implement — which is the point, since the loader refuses an
+    unrecognised status rather than defaulting it (GP-14).
+
+    It is written INTO the workspace, through `resolve_workspace`, because you
+    are about to fill it with patient phenotype data and that never enters the
+    repo tree (GP-40).
+    """
+    try:
+        resolved = resolve_workspace(workspace)
+        if Path(relative_path).is_absolute():
+            msg = (
+                "The destination is workspace-relative, e.g. 'inputs/phenotype.tsv'. Point "
+                "--workspace at the workspace root instead of giving an absolute path."
+            )
+            raise ConfigError(msg)
+        destination = resolved.path(relative_path)
+        if destination.exists() and not force:
+            msg = f"{relative_path} already exists in the workspace. Pass --force to overwrite."
+            raise ConfigError(msg)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(phenotype_template_text(), encoding="utf-8")
+    except MvaError as exc:
+        _fail(str(exc))
+        return
+
+    console.print(f"[green]ok[/green] wrote {relative_path} in the workspace (path not echoed)")
+    console.print("  fill one row per HPO term, then pass it to `mva case init --phenotype`")
 
 
 def main() -> None:
