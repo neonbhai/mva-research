@@ -314,3 +314,13 @@ skills-lock.json
 # Production notes for the Track 2 video. The submitted artifact is the video
 # itself; the script that produced it is working material, not a deliverable.
 docs/track2-video-script.md
+
+# The demo workspace when DEMO_ROOT resolves inside the repo. The pattern above
+# has no leading dot, so it never matched `.demo-workspace/`; its contents were
+# only covered incidentally by `*.vcf` and `runs/`.
+.demo-workspace/
+
+# Written fresh by `just install-hooks` on every bootstrap, and core.hooksPath is
+# local git config. Committing it would make the recipe and the file two sources
+# for one hook.
+.githooks/

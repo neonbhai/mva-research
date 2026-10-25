@@ -32,6 +32,33 @@ DET_WORKSPACE := DEMO_ROOT / "mva-research-demo-det"
 default:
     @just --list
 
+# ---------------------------------------------------------------- one command
+
+# For a reader who was told "clone and run this" and should not have to pick a
+# first command.
+#
+# Written as a body rather than as `all: bootstrap verify demo`, because
+# dependencies run before the body and there is nowhere to print progress from.
+# The progress lines are the point: `verify` runs a four-figure test suite for
+# five minutes, and a reader who does not know that kills it and reports a
+# failure that never happened. A wrong failure report costs more than four echoes.
+#
+# `workflow/containers/assert-demo-parity.sh` extracts the `demo` recipe block by
+# name, so this recipe calling `just demo` does not enter that comparison.
+#
+# Everything, in order: install, then the gate, then the synthetic demo.
+all:
+    @echo "==> [1/3] bootstrap: uv, Python 3.12, dependencies, pre-commit privacy hook"
+    @just bootstrap
+    @echo ""
+    @echo "==> [2/3] verify: the acceptance gate, 7 steps, several minutes. Let it run."
+    @just verify
+    @echo ""
+    @echo "==> [3/3] demo: end-to-end synthetic run"
+    @just demo
+    @echo ""
+    @echo "  all: bootstrap, gate and demo complete"
+
 # ---------------------------------------------------------------- setup
 
 # Install the toolchain and sync dependencies.
@@ -47,9 +74,24 @@ bootstrap:
     @echo "==> bootstrap complete. Next: just verify"
 
 # Install the pre-commit privacy gate.
+#
+# NOT `--strict`, and that is the whole decision (ADR 0029). `run_audit` reserves
+# strict for "CI on a release branch, not the inner loop", because the two
+# highest-volume warn rules are dominated by legitimate matches: `iso_date_bare`
+# matches every dated ADR in docs/decisions/, and `vcf_data_line` matches any
+# public coordinate table. A hook that cannot pass on a clean tree is a hook
+# everyone runs with --no-verify, which is strictly worse than one that blocks on
+# the findings that mean something.
+#
+# Still blocking: every rule that marks an actual disclosure -- vcf_header,
+# genotype_field, the magic:* container rules, person_name_keyed -- carries
+# `fail` severity and fails the hook without --strict. So does a `warn` rule the
+# whole-file logic promotes: a vcf_data_line in a file that also has a VCF header,
+# or >= 8 distinct HPO terms in one file. Warnings are still printed, just not
+# fatal. `just privacy-audit-staged` is the strict read when you want it.
 install-hooks:
     @mkdir -p .githooks
-    @printf '#!/usr/bin/env bash\n# Blocking privacy gate (PRIV-01). Bypass only with --no-verify, and never for real data.\nexec uv run mva privacy audit --staged --strict\n' > .githooks/pre-commit
+    @printf '#!/usr/bin/env bash\n# Blocking privacy gate (PRIV-01). Blocks on `fail`; `warn` is printed, not fatal\n# (ADR 0029 -- see the install-hooks recipe in the justfile for why).\n# Bypass only with --no-verify, and never for real data.\nexec uv run mva privacy audit --staged\n' > .githooks/pre-commit
     @chmod +x .githooks/pre-commit
     @git config core.hooksPath .githooks
     @echo "git hooks installed (core.hooksPath=.githooks)"
@@ -131,6 +173,18 @@ science-canary:
 # Regenerate docs/track2-drugs-to-avoid.md from a live triage run.
 drugs-to-avoid:
     uv run python -m tools.track2 drugs-to-avoid
+
+# The accepting side of the same triage pass. `drugs-to-avoid` renders why twelve
+# agents were rejected; the surviving agent and its score were hand-typed in
+# `docs/track2-hypothesis.md` §5 and nowhere else, so the headline a reader is most
+# likely to quote -- "1 accepted, rank 1, 0.500" -- was the one part of it no command
+# could reproduce. `tests/unit/test_ranking.py` fails if the committed page and the
+# generator disagree, so `just verify` already catches a stale page; this recipe is
+# how you make it un-stale.
+#
+# Regenerate docs/track2-ranking.md from a live triage run.
+ranking:
+    uv run python -m tools.track2 ranking
 
 # ---------------------------------------------------------------- citations
 
