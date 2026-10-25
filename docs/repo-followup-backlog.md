@@ -46,7 +46,7 @@ the hardest to retrofit, which is why it is worth saying out loud.
 | Discard ledger — what was considered and rejected | GP-13 is enforced inside the pipeline and invisible from outside it |
 | Claims ledger — every assertion traced to its source | Turns a stylistic virtue into a checkable one |
 | Negative fixtures — inputs that *must* fail | The suite proves good input works and infers the rest |
-| A "start here" path for a reviewer with 10 minutes | 27 ADRs and 275 files is not a front door |
+| A "start here" path for a reviewer with 10 minutes | 28 ADRs and 275 files is not a front door |
 
 The ablation is the important one. It is also the thing the real-callset run
 currently in flight exists to produce.
@@ -92,7 +92,7 @@ control on the science pipeline (§2.7).
 
 ### 1.1 A "start here" path
 A reviewer arrives with ten minutes and no context. Today the README asks them
-to orient themselves across 27 ADRs and 275 files. Needed: one path that runs in
+to orient themselves across 28 ADRs and 275 files. Needed: one path that runs in
 minutes on synthetic data, produces a visible artifact, and links the three docs
 worth reading in order. Everything else stays where it is; this is a front door,
 not a reorganisation.
