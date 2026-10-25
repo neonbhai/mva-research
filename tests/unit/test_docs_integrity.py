@@ -30,6 +30,10 @@ TESTS = REPO / "tests"
 DECISIONS = DOCS / "decisions"
 
 CLAUDE_MD = REPO / "CLAUDE.md"
+#: The router's content lives in AGENTS.md; CLAUDE.md is a one-line
+#: `@AGENTS.md` import. Sweeping CLAUDE.md alone checks 11 bytes and proves
+#: nothing, so the router rules below read AGENTS.md.
+AGENTS_MD = REPO / "AGENTS.md"
 JUSTFILE = REPO / "justfile"
 GOLDEN_PRINCIPLES = DOCS / "golden-principles.md"
 PRIVACY_MODEL = DOCS / "privacy-model.md"
@@ -50,6 +54,7 @@ CITATION_ROOTS: tuple[Path, ...] = (
 #: Individual files swept alongside those roots.
 CITATION_FILES: tuple[Path, ...] = (
     CLAUDE_MD,
+    AGENTS_MD,
     JUSTFILE,
     REPO / "Snakefile",
     REPO / "README.md",
@@ -155,27 +160,30 @@ def _path_is_present(token: str) -> bool:
 
 
 @pytest.mark.unit
-def test_claude_md_paths_exist() -> None:
-    """Every repo-relative path CLAUDE.md points at is really there.
+def test_agents_md_paths_exist() -> None:
+    """Every repo-relative path AGENTS.md points at is really there.
 
-    CLAUDE.md is a router. A router pointing at a file that was renamed sends
+    AGENTS.md is the router. A router pointing at a file that was renamed sends
     every subsequent reader — human or agent — down a dead end, and the reader
     usually assumes the mistake is theirs.
     """
-    text = _read(CLAUDE_MD)
+    text = _read(AGENTS_MD)
     missing: list[str] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         for match in _INLINE_CODE.finditer(line):
             token = match.group(1).strip()
+            # A leading "@" is an import directive (CLAUDE.md is `@AGENTS.md`),
+            # not a path claim. Check the target it names, not the directive.
+            token = token.removeprefix("@")
             if _looks_like_repo_path(token) and not _path_is_present(token):
-                missing.append(f"  CLAUDE.md:{lineno} — `{token}`")
+                missing.append(f"  AGENTS.md:{lineno} — `{token}`")
 
     assert not missing, (
-        "CLAUDE.md references paths that do not exist.\n"
+        "AGENTS.md references paths that do not exist.\n"
         + "\n".join(missing)
-        + "\n\nRemediation: either create the file/directory, or update CLAUDE.md to "
+        + "\n\nRemediation: either create the file/directory, or update AGENTS.md to "
         "name the path that actually exists. Do NOT delete the reference to make this "
-        "pass if the document is genuinely still owed — CLAUDE.md is the router into "
+        "pass if the document is genuinely still owed — AGENTS.md is the router into "
         "docs/, and a router that quietly forgets a destination is how a whole "
         "document stops being read. If the path is not a repo path at all (a module "
         "name, a glob for something outside the tree), un-backtick it or spell it as a "
@@ -513,7 +521,7 @@ _JUST_RECIPE = re.compile(
 
 
 @pytest.mark.unit
-def test_just_recipes_named_in_claude_md_exist() -> None:
+def test_just_recipes_named_in_agents_md_exist() -> None:
     """CLAUDE.md's command list is copy-pasteable or it is worse than nothing."""
     recipes = {
         match.group(1)
@@ -527,16 +535,16 @@ def test_just_recipes_named_in_claude_md_exist() -> None:
     )
 
     cited: dict[str, list[str]] = {}
-    for lineno, line in enumerate(_read(CLAUDE_MD).splitlines(), start=1):
+    for lineno, line in enumerate(_read(AGENTS_MD).splitlines(), start=1):
         for match in _JUST_INVOCATION.finditer(line):
-            cited.setdefault(match.group(1), []).append(f"CLAUDE.md:{lineno}")
+            cited.setdefault(match.group(1), []).append(f"AGENTS.md:{lineno}")
 
     missing = _undefined(cited, recipes)
     assert not missing, (
-        "CLAUDE.md documents `just` recipes that the justfile does not define.\n"
+        "AGENTS.md documents `just` recipes that the justfile does not define.\n"
         + "\n".join(missing)
         + "\n\nRemediation: add the recipe to the justfile, or correct the name in "
-        "CLAUDE.md. The Commands block in CLAUDE.md is the first thing anyone runs; a "
+        "CLAUDE.md. The Commands block in AGENTS.md is the first thing anyone runs; a "
         "command that errors with 'Justfile does not contain recipe' on line one costs "
         "the reader their trust in the rest of the document. Renaming a recipe is a "
         "two-file change, always."
