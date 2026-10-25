@@ -46,6 +46,28 @@ cp env.example .env          # .env is denied by .gitignore and stays local
 $EDITOR .env                 # point MVA_WORKSPACE outside the repo
 ```
 
+### Bringing a real case online
+
+The encrypted-bundle and deletion mechanics are under "Secure deletion on macOS
+APFS" below. This is the configuration sequence that has to accompany them, and
+real data never enters git at any point in it.
+
+1. Mount the encrypted bundle, then
+   `export MVA_WORKSPACE=/Volumes/MVACASE/case01` — outside the repo, outside any
+   cloud-synced directory. The config layer verifies this and refuses otherwise.
+2. Place the VCF and phenotype document under `$MVA_WORKSPACE/inputs/`.
+3. Write a case config with `synthetic: false` and `network_profile:
+   offline_enforced`. A non-synthetic case with the network open is rejected by a
+   validator.
+4. Replace the synthetic annotation adapters with real, hash-pinned local
+   resources (TD-01). **Until this is done, no real-data claim is supportable.**
+5. Run under an OS-level network control as well as the Python guard — see "The
+   real boundary is OS-level" below for why the Python guard alone is a tripwire.
+6. `just privacy-audit` before any export.
+
+Note that step 4 is the one that gates every scientific claim, and step 3 is
+checked by code while steps 1, 2 and 6 are procedure.
+
 ---
 
 ## The scanner must not become the leak
