@@ -59,7 +59,7 @@ way.**
 
 ```bash
 just bootstrap   # Python 3.12, deps, pre-commit privacy hook
-just verify      # lint, types, architecture, 1,779 tests, workflow, determinism, privacy
+just verify      # lint, types, architecture, 1,782 tests, workflow, determinism, privacy
 just demo        # end-to-end synthetic run
 ```
 

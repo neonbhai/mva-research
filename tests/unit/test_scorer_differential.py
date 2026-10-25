@@ -49,9 +49,12 @@ VENDORED = FIXTURE_DIR / "evaluation_vendored.py"
 #: THIS file is the one whose provenance SOURCE.md describes.
 VENDORED_SHA256 = "6d18b581e65a45e1ccc120071d588e740c2e42e983ff50704c60a40232b19180"
 
+#: One fabricated locus: contig, position, reference allele, alternate allele.
+type _Variant = tuple[str, int, str, str]
+
 #: Fabricated loci. Three contigs x three positions is enough to exercise full
 #: match, partial match, no match, and rows that overlap the truth on one allele.
-_VARIANTS: list[tuple[str, int, str, str]] = [
+_VARIANTS: list[_Variant] = [
     (f"chr{contig}", pos, "A", "G") for contig in (1, 2, 15) for pos in (100, 200, 300)
 ]
 
@@ -88,14 +91,16 @@ def test_the_rank_tiers_are_the_published_ones() -> None:
     assert [tuple(tier) for tier in oracle.RANK_POINT_TIERS] == [tuple(t) for t in RANK_TIERS]
 
 
-def _random_case(rng: random.Random) -> tuple[list[tuple[frozenset, float]], frozenset]:
+def _random_case(
+    rng: random.Random,
+) -> tuple[list[tuple[frozenset[_Variant], float]], frozenset[_Variant]]:
     """One submission and one ground truth.
 
     Truth is one or two variants, because those are the two shapes the scorer
     branches on: partial credit exists only for a compound-het answer.
     """
     truth = frozenset(rng.sample(_VARIANTS, rng.choice([1, 2])))
-    rows: list[tuple[frozenset, float]] = []
+    rows: list[tuple[frozenset[_Variant], float]] = []
     for i in range(rng.randint(1, 7)):
         variants = frozenset(rng.sample(_VARIANTS, rng.choice([1, 1, 2])))
         epcr = round(1.0 - i * 0.09 - rng.random() * 0.02, 4)

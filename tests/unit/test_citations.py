@@ -37,6 +37,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.citations.extract import (  # noqa: E402
     CitationForm,
+    WrittenCitation,
     collect_written_citations,
     extract_written_citations,
     normalise_journal,
@@ -69,7 +70,7 @@ MINIMUM_FORM_COUNTS = {
 
 
 @pytest.fixture(scope="module")
-def citations() -> list:
+def citations() -> list[WrittenCitation]:
     return collect_written_citations(REPO_ROOT)
 
 
@@ -79,7 +80,9 @@ def ledger() -> Ledger:
 
 
 @pytest.mark.unit
-def test_every_cited_pmid_matches_the_verified_record(citations, ledger) -> None:
+def test_every_cited_pmid_matches_the_verified_record(
+    citations: list[WrittenCitation], ledger: Ledger
+) -> None:
     """THE GATE. Every PMID resolves, and to the paper the sentence around it names.
 
     A PMID that resolves to a *different* paper is the failure this exists for: it
@@ -99,7 +102,7 @@ def test_every_cited_pmid_matches_the_verified_record(citations, ledger) -> None
 
 
 @pytest.mark.unit
-def test_citation_parse_coverage_has_not_regressed(citations) -> None:
+def test_citation_parse_coverage_has_not_regressed(citations: list[WrittenCitation]) -> None:
     """A positive control for the parser, not for the document.
 
     If a regex change quietly demoted every citation to ``unannotated``, the gate
@@ -125,7 +128,9 @@ def test_citation_parse_coverage_has_not_regressed(citations) -> None:
 
 
 @pytest.mark.unit
-def test_comparison_catches_a_citation_pointing_at_the_wrong_paper(citations, ledger) -> None:
+def test_comparison_catches_a_citation_pointing_at_the_wrong_paper(
+    citations: list[WrittenCitation], ledger: Ledger
+) -> None:
     """The canary. Repoint one ledger record at a different paper; demand a failure.
 
     Modelled on :func:`mva.privacy.patterns.detector_canaries`: every rule carries a
@@ -162,7 +167,9 @@ def test_comparison_catches_a_citation_pointing_at_the_wrong_paper(citations, le
 
 
 @pytest.mark.unit
-def test_a_pmid_missing_from_the_ledger_is_a_failure_not_a_pass(citations, ledger) -> None:
+def test_a_pmid_missing_from_the_ledger_is_a_failure_not_a_pass(
+    citations: list[WrittenCitation], ledger: Ledger
+) -> None:
     """GP-14, applied to the ledger. An unresolved PMID is not a verified one."""
     dropped = {k: v for k, v in ledger.records.items() if k != "15475955"}
     mismatches = compare(citations, dataclasses.replace(ledger, records=dropped))
@@ -170,7 +177,9 @@ def test_a_pmid_missing_from_the_ledger_is_a_failure_not_a_pass(citations, ledge
 
 
 @pytest.mark.unit
-def test_a_ledger_record_nothing_cites_is_reported(citations, ledger) -> None:
+def test_a_ledger_record_nothing_cites_is_reported(
+    citations: list[WrittenCitation], ledger: Ledger
+) -> None:
     """Orphans are surfaced, not deleted (GP-19). They usually mean a stale refresh."""
     extra = dict(ledger.records)
     extra["99999999"] = LedgerRecord(
@@ -189,7 +198,7 @@ def test_a_ledger_record_nothing_cites_is_reported(citations, ledger) -> None:
 
 
 @pytest.mark.unit
-def test_ledger_file_is_byte_identical_to_a_rewrite(ledger, tmp_path: Path) -> None:
+def test_ledger_file_is_byte_identical_to_a_rewrite(ledger: Ledger, tmp_path: Path) -> None:
     """GP-30. A ledger that reformats on every refresh has an unreviewable diff."""
     rewritten = tmp_path / "citations.verified.json"
     write_ledger(rewritten, ledger)
@@ -208,7 +217,7 @@ def test_ledger_refuses_an_unknown_schema(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_ledger_declares_when_it_was_resolved(ledger) -> None:
+def test_ledger_declares_when_it_was_resolved(ledger: Ledger) -> None:
     """A cache with no date is a cache nobody can judge the age of."""
     assert ledger.schema == LEDGER_SCHEMA
     assert ledger.resolved_utc.endswith("Z")
@@ -351,7 +360,9 @@ def test_title_normalisation_ignores_typesetting_only() -> None:
 
 
 @pytest.mark.unit
-def test_every_source_file_contributes_or_is_deliberately_empty(citations) -> None:
+def test_every_source_file_contributes_or_is_deliberately_empty(
+    citations: list[WrittenCitation],
+) -> None:
     """Guards the sweep itself: a glob that silently matched nothing would pass."""
     assert len(unique_pmids(citations)) >= 54
     sources = {c.source for c in citations}

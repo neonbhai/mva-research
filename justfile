@@ -3,6 +3,21 @@
 
 set shell := ["bash", "-uc"]
 
+# The pyright BINARY, pinned. Exported, so every recipe that reaches pyright --
+# `just typecheck`, and `just verify` through it -- gets the same one.
+#
+# `pyproject.toml` pins the `pyright` PyPI package, but that package is only a
+# downloader: at run time it fetches the real pyright and, left alone, takes the
+# newest release. So the strictness of the type gate arrived from the network
+# rather than from this repository, and it moved -- a newer pyright reports
+# unannotated pytest fixture parameters that an older one accepted, and
+# `just typecheck` went red on 76 errors in code nobody had touched. A gate whose
+# rules can change without a commit is not a gate.
+#
+# Raising this is a deliberate change: bump the version, run `just typecheck`,
+# fix what the new release finds, and commit the pin and the fixes together.
+export PYRIGHT_PYTHON_FORCE_VERSION := "1.1.411"
+
 # Workspace for the synthetic demo.
 #
 # Deliberately OUTSIDE the repository (ADR 0006). The privacy audit's

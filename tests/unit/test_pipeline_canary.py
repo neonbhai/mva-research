@@ -27,6 +27,7 @@ import pytest
 from mva.config import find_repo_root
 from mva.interventions.canaries import (
     CANARY_VERSION,
+    CanaryOutcome,
     PipelineCanary,
     check_triage_liveness,
     pipeline_canaries,
@@ -45,7 +46,7 @@ def canaries() -> dict[str, PipelineCanary]:
 
 
 @pytest.fixture(scope="module")
-def outcomes() -> dict[str, object]:
+def outcomes() -> dict[str, CanaryOutcome]:
     return {outcome.canary_id: outcome for outcome in check_triage_liveness().outcomes}
 
 
@@ -55,7 +56,7 @@ def test_the_triage_stage_still_reaches_every_demanded_verdict() -> None:
     assert liveness.ok, liveness.summary()
 
 
-def test_the_pipeline_can_still_say_yes(outcomes) -> None:
+def test_the_pipeline_can_still_say_yes(outcomes: dict[str, CanaryOutcome]) -> None:
     """The single most important assertion here.
 
     Without it, deleting the entire direction check and rejecting unconditionally
@@ -80,7 +81,7 @@ def test_the_pipeline_can_still_say_yes(outcomes) -> None:
     )
 
 
-def test_at_least_one_canary_demands_acceptance(canaries) -> None:
+def test_at_least_one_canary_demands_acceptance(canaries: dict[str, PipelineCanary]) -> None:
     """Guards the control set itself.
 
     A canary suite that drifted into all-rejections would be indistinguishable from
@@ -95,7 +96,9 @@ def test_at_least_one_canary_demands_acceptance(canaries) -> None:
     )
 
 
-def test_inverting_the_direction_rejects_for_the_direction(outcomes) -> None:
+def test_inverting_the_direction_rejects_for_the_direction(
+    outcomes: dict[str, CanaryOutcome],
+) -> None:
     """Rejected is not enough; rejected *for the right reason* is the assertion.
 
     An agent rejected for approval status while its sign check was broken would
@@ -107,7 +110,9 @@ def test_inverting_the_direction_rejects_for_the_direction(outcomes) -> None:
     assert invert.directions_agree is False
 
 
-def test_an_unsigned_direction_is_neither_accepted_blindly_nor_rejected(outcomes) -> None:
+def test_an_unsigned_direction_is_neither_accepted_blindly_nor_rejected(
+    outcomes: dict[str, CanaryOutcome],
+) -> None:
     """GP-16 and GP-14, on the same candidate.
 
     Wrong direction disqualifies. Unknown direction does not — it is a flag and a
@@ -129,7 +134,7 @@ def test_an_unsigned_direction_is_neither_accepted_blindly_nor_rejected(outcomes
 
 
 def test_the_unasked_safety_question_rejects_an_agent_whose_direction_agrees(
-    outcomes,
+    outcomes: dict[str, CanaryOutcome],
 ) -> None:
     """GP-14 / ADR 0011, made executable.
 
@@ -145,7 +150,9 @@ def test_the_unasked_safety_question_rejects_an_agent_whose_direction_agrees(
     assert unassessed.directions_agree is True
 
 
-def test_an_off_chain_target_is_a_finding_not_a_non_event(outcomes) -> None:
+def test_an_off_chain_target_is_a_finding_not_a_non_event(
+    outcomes: dict[str, CanaryOutcome],
+) -> None:
     """The negative control. Rules out "accepted" being an artefact of ignoring the
     mechanism, and pins that an off-chain node yields no direction verdict at all
     rather than a fabricated disagreement."""
@@ -155,7 +162,9 @@ def test_an_off_chain_target_is_a_finding_not_a_non_event(outcomes) -> None:
     assert off_chain.directions_agree is None
 
 
-def test_the_same_agent_flips_verdict_against_a_sibling_gene(canaries, outcomes) -> None:
+def test_the_same_agent_flips_verdict_against_a_sibling_gene(
+    canaries: dict[str, PipelineCanary], outcomes: dict[str, CanaryOutcome]
+) -> None:
     """The sibling-case control, and the sharpest one here.
 
     The verdict has to be a property of the (mechanism, drug) pair. A stage that had
@@ -177,7 +186,7 @@ def test_the_same_agent_flips_verdict_against_a_sibling_gene(canaries, outcomes)
     assert outcomes["ACCEPT"].accepted is True
 
 
-def test_each_control_varies_exactly_one_thing(canaries) -> None:
+def test_each_control_varies_exactly_one_thing(canaries: dict[str, PipelineCanary]) -> None:
     """Control hygiene. A canary rejected for three reasons at once proves none of them.
 
     Every catalogue-level control is the ACCEPT baseline with a single field moved,
@@ -201,13 +210,13 @@ def test_each_control_varies_exactly_one_thing(canaries) -> None:
         )
 
 
-def test_running_a_canary_twice_gives_the_same_verdict(canaries) -> None:
+def test_running_a_canary_twice_gives_the_same_verdict(canaries: dict[str, PipelineCanary]) -> None:
     """GP-30. The canaries use a fixed clock, so they are a determinism probe too."""
     for canary in canaries.values():
         assert run_canary(canary) == run_canary(canary)
 
 
-def test_the_fixtures_are_never_presented_as_biology(canaries) -> None:
+def test_the_fixtures_are_never_presented_as_biology(canaries: dict[str, PipelineCanary]) -> None:
     """GP-20. Obviously fabricated, and labelled so at every level."""
     assert "SYNTHETIC" in CANARY_VERSION
     for canary in canaries.values():
@@ -222,7 +231,9 @@ def test_the_fixtures_are_never_presented_as_biology(canaries) -> None:
         assert "SYNTHETIC" in canary.entry.validation_experiment
 
 
-def test_the_fixtures_never_leak_into_a_knowledge_table_or_a_report(canaries) -> None:
+def test_the_fixtures_never_leak_into_a_knowledge_table_or_a_report(
+    canaries: dict[str, PipelineCanary],
+) -> None:
     """A synthetic substitute is never described as biologically valid (GP-20).
 
     The strongest form of that rule is that these names cannot appear anywhere a

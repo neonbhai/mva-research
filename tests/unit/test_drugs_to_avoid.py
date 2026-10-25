@@ -77,7 +77,9 @@ def test_rendering_twice_produces_identical_bytes() -> None:
     assert render(REPO_ROOT) == render(REPO_ROOT)
 
 
-def test_every_rejected_agent_is_on_the_page(entries, committed: str) -> None:
+def test_every_rejected_agent_is_on_the_page(
+    entries: tuple[AvoidEntry, ...], committed: str
+) -> None:
     assert len(entries) == 12, (
         "docs/track2-hypothesis.md §5 reports 12 rejections. If that number changed, "
         "both documents change in the same commit."
@@ -88,7 +90,9 @@ def test_every_rejected_agent_is_on_the_page(entries, committed: str) -> None:
         assert entry.node_id in committed
 
 
-def test_the_page_separates_measured_wrong_from_never_measured(entries, flat: str) -> None:
+def test_the_page_separates_measured_wrong_from_never_measured(
+    entries: tuple[AvoidEntry, ...], flat: str
+) -> None:
     """The one thing this page exists to get right (GP-14).
 
     ``OPPOSES`` is a measurement that came back the wrong way. ``oncogenic_risk``
@@ -118,14 +122,18 @@ def test_the_page_separates_measured_wrong_from_never_measured(entries, flat: st
     assert "Reading it as reassurance is worse" in flat
 
 
-def test_measured_and_never_measured_are_not_rendered_with_the_same_cell(entries) -> None:
+def test_measured_and_never_measured_are_not_rendered_with_the_same_cell(
+    entries: tuple[AvoidEntry, ...],
+) -> None:
     """If the two states print identically, separating them in prose is decoration."""
     cells = {e.cin_state: e.cin_cell for e in entries}
     assert len(set(cells.values())) == len(cells)
     assert cells["never_measured"] != cells.get("measured_positive")
 
 
-def test_the_direction_verdict_never_rounds_unknown_to_agreement(entries) -> None:
+def test_the_direction_verdict_never_rounds_unknown_to_agreement(
+    entries: tuple[AvoidEntry, ...],
+) -> None:
     """GP-16 / ASSUMPTION-DRUG-02, read off the rendered text rather than the field."""
     for entry in entries:
         if entry.directions_agree is None:
@@ -136,7 +144,9 @@ def test_the_direction_verdict_never_rounds_unknown_to_agreement(entries) -> Non
             assert "OPPOSES" in entry.direction_verdict
 
 
-def test_the_highest_scoring_agent_is_on_this_page(entries, flat: str) -> None:
+def test_the_highest_scoring_agent_is_on_this_page(
+    entries: tuple[AvoidEntry, ...], flat: str
+) -> None:
     """A gate is a gate. A pipeline where the top score always wins cannot express
     "right about the biology, not yet a candidate"."""
     best = max(entries, key=lambda e: e.score)
@@ -145,7 +155,7 @@ def test_the_highest_scoring_agent_is_on_this_page(entries, flat: str) -> None:
     assert f"({best.name}, {best.score:.3f})" in flat
 
 
-def test_every_agent_has_a_disease_specific_warning(entries) -> None:
+def test_every_agent_has_a_disease_specific_warning(entries: tuple[AvoidEntry, ...]) -> None:
     """No generic fallback sentence is allowed to reach the page."""
     for entry in entries:
         assert (entry.node_id, entry.observed) in DANGER_BY_NODE_AND_DIRECTION

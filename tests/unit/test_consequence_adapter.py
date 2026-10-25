@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import stat
 import subprocess
@@ -1049,9 +1050,49 @@ BUB1B_FRAMESHIFT = "GRCh38:chr15:40170578:AGG:A"
 
 REAL_VARIANTS = [BUB1B_NONSENSE, CEP57_NONSENSE, BUB1B_FRAMESHIFT]
 
+#: The gene model. Half of the precondition for every test below.
+REAL_PREDICTOR = REAL_DATA_DIR / REAL_DATABASE / "snpEffectPredictor.bin"
+
+#: The other half, and the one a database check alone silently assumes.
+#:
+#: :func:`resolve_java_binary` consults ``$JAVA_HOME/bin/java`` and nothing else;
+#: a bare ``java`` on PATH is refused on purpose, because on macOS that name is a
+#: shim which exists, is executable, and is not a runtime. So a machine with the
+#: 790 MB installation but no JAVA_HOME has one half of the toolchain, and a guard
+#: that checks only the database lets these tests run: the module-scoped
+#: ``real_adapter`` fixture then raises ``AdapterUnavailableError`` at setup, and
+#: eight errors plus two failures read as a broken adapter rather than as an
+#: absent JDK. The condition states both halves so the skip means what it says.
+_JAVA_HOME = os.environ.get(JAVA_HOME_ENV, "").strip()
+REAL_JAVA = Path(_JAVA_HOME) / "bin" / "java" if _JAVA_HOME else None
+
+
+def _missing_real_snpeff() -> str:
+    """Which half of the real-SnpEff toolchain is absent, for the skip reason.
+
+    Named rather than counted: "installation absent" sends a reader to
+    ``install_snpeff.sh`` even when the 790 MB download is already there and the
+    only thing missing is an exported variable.
+    """
+    missing: list[str] = []
+    if not REAL_PREDICTOR.is_file():
+        missing.append(f"the SnpEff database ({REAL_PREDICTOR})")
+    if REAL_JAVA is None:
+        missing.append(f"a Java runtime ({JAVA_HOME_ENV} is unset)")
+    elif not REAL_JAVA.is_file():
+        missing.append(f"a Java runtime ({JAVA_HOME_ENV} is set but {REAL_JAVA} is not a file)")
+    return " and ".join(missing)
+
+
+MISSING_REAL_SNPEFF = _missing_real_snpeff()
+
 requires_real_snpeff = pytest.mark.skipif(
-    not (REAL_DATA_DIR / REAL_DATABASE / "snpEffectPredictor.bin").is_file(),
-    reason="real SnpEff installation absent; run tools/setup/install_snpeff.sh",
+    bool(MISSING_REAL_SNPEFF),
+    reason=(
+        f"real SnpEff installation incomplete: missing {MISSING_REAL_SNPEFF}. "
+        "tools/setup/install_snpeff.sh fetches the database and symlinks a JRE into "
+        f"the install root; export {JAVA_HOME_ENV} if the JVM is the missing half."
+    ),
 )
 
 

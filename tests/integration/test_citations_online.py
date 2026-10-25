@@ -37,6 +37,7 @@ from tools.citations.extract import collect_written_citations, unique_pmids  # n
 from tools.citations.ledger import (  # noqa: E402
     LEDGER_PATH,
     Ledger,
+    LedgerRecord,
     compare,
     format_mismatches,
     load_ledger,
@@ -46,14 +47,14 @@ pytestmark = [pytest.mark.network, pytest.mark.integration, pytest.mark.slow]
 
 
 @pytest.fixture(scope="module")
-def live_records() -> dict:
+def live_records() -> dict[str, LedgerRecord]:
     from tools.citations.resolve import resolve_pmids
 
     citations = collect_written_citations(REPO_ROOT)
     return resolve_pmids(unique_pmids(citations))
 
 
-def test_every_cited_pmid_resolves_against_pubmed(live_records) -> None:
+def test_every_cited_pmid_resolves_against_pubmed(live_records: dict[str, LedgerRecord]) -> None:
     """Existence, live. ``resolve_pmids`` raises on a PMID NCBI does not know."""
     citations = collect_written_citations(REPO_ROOT)
     expected = set(unique_pmids(citations))
@@ -64,7 +65,7 @@ def test_every_cited_pmid_resolves_against_pubmed(live_records) -> None:
     )
 
 
-def test_written_citations_match_the_live_records(live_records) -> None:
+def test_written_citations_match_the_live_records(live_records: dict[str, LedgerRecord]) -> None:
     """The real check: author, year, journal and title, against PubMed itself."""
     citations = collect_written_citations(REPO_ROOT)
     ledger = load_ledger(REPO_ROOT / LEDGER_PATH)
@@ -82,7 +83,7 @@ def test_written_citations_match_the_live_records(live_records) -> None:
     )
 
 
-def test_the_committed_ledger_still_matches_pubmed(live_records) -> None:
+def test_the_committed_ledger_still_matches_pubmed(live_records: dict[str, LedgerRecord]) -> None:
     """Staleness detector. Refresh and commit if this fails for a benign reason."""
     ledger = load_ledger(REPO_ROOT / LEDGER_PATH)
     drifted = [
