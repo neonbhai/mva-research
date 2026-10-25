@@ -1,0 +1,62 @@
+# =============================================================================
+# Build context allowlist for workflow/containers/Dockerfile.
+# =============================================================================
+#
+# DENY EVERYTHING, THEN NAME WHAT MAY ENTER. The usual shape of this file is a
+# deny list, which gets the default wrong: anything a future commit adds to the
+# tree is in the build context until someone remembers to exclude it. Here the
+# default is exclusion, so a new directory is invisible to the build until it is
+# named below.
+#
+# That matters more than build speed. The build context is uploaded to the Docker
+# daemon in full, whether or not a COPY ever references it, and this tree has an
+# in-repo `.demo-workspace/`, agent worktrees under `.claude/`, a `.venv/` and a
+# `.snakemake/` cache. None of them belong anywhere near an image build.
+#
+# THE FIXTURE RULES AT THE BOTTOM ARE THE POINT. The two synthetic fixtures are
+# the only genomic files the image contains, and they are fully fabricated
+# (fictional `SYNTH*` gene symbols). `tests/` is re-included only so those two
+# paths can be, and then its contents are excluded again so that no other VCF,
+# BAM, CRAM or FASTQ can reach the context -- including one that does not exist
+# yet. Patient data is bind-mounted at runtime and never built in (ADR 0006,
+# GP-40); see workflow/containers/README.md.
+# =============================================================================
+
+# --- deny everything --------------------------------------------------------
+*
+
+# --- what the Dockerfile copies ---------------------------------------------
+!pyproject.toml
+!uv.lock
+!README.md
+!Snakefile
+!src
+!config
+!knowledge
+!workflow
+!templates
+
+# Bind-mounted at build time by the demo-parity assertion, not copied into the
+# image. Still has to be in the context to be mountable.
+!justfile
+
+# --- the two synthetic fixtures, and nothing else under tests/ --------------
+!tests
+tests/*
+!tests/fixtures
+tests/fixtures/*
+!tests/fixtures/synthetic
+tests/fixtures/synthetic/*
+!tests/fixtures/synthetic/synthetic_case.vcf
+!tests/fixtures/synthetic/synthetic_phenotype.tsv
+
+# --- belt and braces --------------------------------------------------------
+# Nothing above re-includes these, so these lines are redundant by construction.
+# They are here so that a later edit which loosens the allowlist -- say, swapping
+# `!src` for `!*` in a hurry -- still cannot sweep in credentials or a workspace.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/.demo-workspace
+**/runs
