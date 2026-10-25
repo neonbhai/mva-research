@@ -13,7 +13,7 @@ Boundary: `$MVA_WORKSPACE`, an external absolute path (ADR 0006).
 
 | ID | Threat | Path | L | I | Control |
 |---|---|---|---|---|---|
-| PRIV-01 | Patient file committed | `git add -A` from repo root | H | Critical | Deny-by-default `.gitignore`; pre-commit hook running `mva privacy audit --staged --strict`; `git config core.hooksPath .githooks` |
+| PRIV-01 | Patient file committed | `git add -A` from repo root | H | Critical | Deny-by-default `.gitignore`; pre-commit hook running `mva privacy audit --staged`, blocking on `fail` severity (ADR 0029); `git config core.hooksPath .githooks` |
 | PRIV-02 | Agent/subagent reads patient files | Agent globs `**/*.vcf`; workspace symlinked into repo | H | Critical | Workspace outside repo, path only via env; `workspace_containment` + `symlink_escape` checks; ADR 0008 (illegibility by design) |
 | PRIV-03 | Terminal output enters model context | `head file.vcf`, dataframe print, pytest failure diff | H | Critical | No stage prints records; CLI is counts/paths only; `safe_repr()`; pytest `--tb=line`, never `--showlocals` |
 | PRIV-04 | Logs dump VCF records | `log.debug("variant=%s", rec)` | H | High | `GenomicRedactionFilter` on **every handler** + `setLogRecordFactory`; `log_redaction_probe` check |
@@ -48,13 +48,33 @@ $EDITOR .env                 # point MVA_WORKSPACE outside the repo
 
 ### Bringing a real case online
 
-The encrypted-bundle and deletion mechanics are under "Secure deletion on macOS
-APFS" below. This is the configuration sequence that has to accompany them, and
-real data never enters git at any point in it.
+Two decisions get conflated here: where the workspace goes, and whether it is
+encrypted. Only the first is enforced. Real data enters git at no point in
+either.
 
-1. Mount the encrypted bundle, then
-   `export MVA_WORKSPACE=/Volumes/MVACASE/case01` — outside the repo, outside any
-   cloud-synced directory. The config layer verifies this and refuses otherwise.
+**Where the workspace lives is enforced.** It must be an absolute path outside
+the repository tree and outside every cloud-synced root. `resolve_workspace`
+refuses anything else and names the reason, and the `workspace_containment` and
+`cloud_sync_location` checks re-assert it. A plain directory satisfies that:
+`export MVA_WORKSPACE=~/mva-workspace` is supported, and sufficient to run.
+
+**Whether that directory is encrypted is a recommendation, and nothing here
+checks it.** No code in this repository can observe whether a volume is
+encrypted, so the config layer does not pretend to. What encryption buys is the
+deletion argument under "Secure deletion on macOS APFS" below: on APFS,
+cryptographic erasure is the only erasure that holds, and it is available only if
+the data sat inside an encrypted volume from the first write. Enabling encryption
+afterwards does nothing for blocks already written. PRIV-14 and PRIV-16 are the
+two controls that rest on this, so for one real child's VCF under a 30-day
+deletion obligation it is the stronger choice and the one to default to — but it
+is a choice, not a prerequisite for running anything.
+
+The sequence:
+
+1. Set the workspace. Either an encrypted volume —
+   `export MVA_WORKSPACE=/Volumes/MVACASE/case01`, created as below — or any
+   directory outside the repo and outside a cloud-synced root. The config layer
+   verifies the *location* and refuses otherwise; it cannot verify encryption.
 2. Place the VCF and phenotype document under `$MVA_WORKSPACE/inputs/`.
 3. Write a case config with `synthetic: false` and `network_profile:
    offline_enforced`. A non-synthetic case with the network open is rejected by a
@@ -65,8 +85,9 @@ real data never enters git at any point in it.
    real boundary is OS-level" below for why the Python guard alone is a tripwire.
 6. `just privacy-audit` before any export.
 
-Note that step 4 is the one that gates every scientific claim, and step 3 is
-checked by code while steps 1, 2 and 6 are procedure.
+Note that step 4 is the one that gates every scientific claim. Step 3 and the
+location half of step 1 are checked by code; encryption, steps 2 and 6, and
+everything in the teardown are procedure.
 
 ---
 
