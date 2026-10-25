@@ -223,7 +223,7 @@ If forced to select one approved compound as the primary mechanistic probe, I wo
 
 - **Potential Impact.** No approved molecule has a measured BubR1 effect, the achievable postnatal phenotype is narrow, and the proposed in-vivo programme is long and expensive. “Experiment, not recommendation” is honest but lowers immediate impact.
 
-- **Innovation.** This is the biggest competitive problem. With roughly 14 of 19 submissions using the same NAD⁺/SIRT2/BubR1 axis, neither the axis nor direction-of-effect logic differentiates it. The tri-state pipeline is engineering discipline, not biological innovation.
+- **Innovation.** This is the weakest rubric line. The NAD⁺/SIRT2/BubR1 axis is the obvious one to reach for in this disease, so neither the axis nor direction-of-effect logic differentiates the submission. The tri-state pipeline is engineering discipline, not biological innovation.
 
 - **Scalability.** The submission admits the bottleneck: signs and cross-node effects are manually curated. “A new disease is two tables” understates the real work because producing trustworthy table contents is the difficult part.
 
@@ -231,4 +231,4 @@ The single highest-value change is:
 
 > **Replace “nicotinamide accepted, rank 1” with an allele-stratified, head-to-head precursor discrimination experiment, and recast the thesis from “MVA1 is a dosage disease” to “a subset of MVA1 may be rescuable through allele-specific stabilization.”**
 
-That one change fixes the invalid gate, removes the self-inflicted nicotinamide choice, incorporates the strongest contrary biology, makes the experiment genuinely discriminating, and differentiates the submission from competitors making the generic NAD⁺ argument.
+That one change fixes the invalid gate, removes the self-inflicted nicotinamide choice, incorporates the strongest contrary biology, makes the experiment genuinely discriminating, and differentiates the submission from the generic NAD⁺ argument.

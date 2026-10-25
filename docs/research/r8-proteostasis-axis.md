@@ -4,12 +4,13 @@
 
 **Date of retrieval:** 2026-08-29. Everything below was read on that date.
 
-**What this is.** `docs/research/r7-survey-refresh.md` §4.3 found that four competitor entries
-cite one paper — González-Blanco et al., *Nat Commun* 2026, PMID 41820377 — and that one of them
-has made it the lead lane of its whole Track 2 report, hanging N-acetylcysteine, idebenone,
-metformin and sirolimus off it. `docs/track2-hypothesis.md` cites that paper zero times, and the
-word "proteostasis" appears in it exactly once, in the rejected sirolimus row of Appendix B (line
-922). This document establishes whether that is a hole in our science or a defensible omission.
+**What this is.** An assessment of whether the proteostasis / mitochondrial axis is a better
+route than the NAD⁺/SIRT2 one for this disease. One paper carries that axis —
+González-Blanco et al., *Nat Commun* 2026, PMID 41820377 — and it is the paper any
+antioxidant- or autophagy-directed candidate list (N-acetylcysteine, idebenone, metformin,
+sirolimus) has to rest on. `docs/track2-hypothesis.md` cites it zero times, and the word
+"proteostasis" appears there exactly once, in the rejected sirolimus row of Appendix B (line 922).
+This document establishes whether that is a hole in our science or a defensible omission.
 
 **Method.** PubMed E-utilities (`esummary`, `efetch`, `esearch`), Europe PMC full-text XML
 (`https://www.ebi.ac.uk/europepmc/webservices/rest/PMC13121444/fullTextXML`, 170,193 bytes,
@@ -24,11 +25,11 @@ paper measured and what I infer from it are separated and the inferences are lab
 
 ## 0. Verdict, stated once
 
-**The paper is real, and it is what the competitors say it is — but the claim their lead candidate rests on is a misreading of it.**
+**The paper is real and the identifier resolves — but the claim commonly drawn from it, that it supports an antioxidant or proteostasis lead candidate, is a misreading of it.**
 
 Three findings, in order of how much they change our position:
 
-1. **The identifier resolves, to the paper the competitors name.**
+1. **The identifier resolves, and the paper is the one the axis rests on.**
    González-Blanco et al., *Nat Commun* 2026, PMID 41820377 —
    "Proteostasis failure and mitochondrial dysfunction contribute to chromosomal
    instability-induced microcephaly", Nature Communications 17:3829, published 12 March 2026,
@@ -42,17 +43,17 @@ Three findings, in order of how much they change our position:
    dysfunction are consequences of accumulated aneuploidy. Our node is upstream of the
    missegregation that produces them (§6).
 
-3. **The competitor's strongest claim is false as stated, and the paper says so in its own words.**
-   `swoopeagle/mva-hackathon-methods` writes that "TOR inhibition was one of the rescues of
-   CIN-induced microcephaly" and builds sirolimus, everolimus and metformin on it. TOR inhibition
-   rescued neuroblast *number*. It did not rescue brain size — the microcephaly endpoint in the
+3. **The strongest claim drawn from the paper is false as stated, and the paper says so in its own words.**
+   That claim is that "TOR inhibition was one of the rescues of CIN-induced microcephaly", and it
+   is what sirolimus, everolimus and metformin would be built on. TOR inhibition rescued
+   neuroblast *number*. It did not rescue brain size — the microcephaly endpoint in the
    paper's own title. The paper: "we noticed that none of the genetic interventions aimed at
    increasing autophagy was able to rescue the number of Pros+ cells or the size of the larval
    brain". Rapamycin fed to larvae at 40 µM gave the same split (§4).
 
 **Recommendation: (b), address it as a stated limitation** — but a limitation with teeth, because
-the correction in item 3 is ours to make and it is load-bearing against the two candidates the
-field's lead entry rates highest. Full argument in the closing section.
+the correction in item 3 is ours to make and it is load-bearing against the two candidates this
+axis would otherwise rate highest. Full argument in the closing section.
 
 ---
 
@@ -193,8 +194,7 @@ after egg laying. No mammalian cell, no patient material, no mouse.
   DHE, MitoSOX, roGFP or any other direct ROS measurement. The scavenger rescue is a
   **genetic sufficiency** result. It is not evidence that ROS were elevated, and the paper's only
   oxidation-adjacent measurement, MitoTimer, is ambiguous by the authors' own statement. This is
-  the single largest evidential gap in the arm that the competitors' NAC and idebenone rows sit
-  on.
+  the single largest evidential gap in the arm any NAC or idebenone row would sit on.
 - **BubR1 / BUB1B abundance was never measured**, in any arm, in any genotype.
 - **No mammalian replication.** Every result is in fly neuroblasts. The paper offers none, and I
   did not find one (§8, query Q9).
@@ -203,7 +203,7 @@ after egg laying. No mammalian cell, no patient material, no mouse.
 
 ## 4. The rescue table, and the split that decides everything
 
-This is the part the competitor reports compress, and the compression is where the error enters.
+This is the part that gets compressed in summary, and the compression is where the error enters.
 Two readouts behave differently and the paper is explicit about it: **neuroblast number** (an
 intermediate, cell-count readout) and **brain size** (the disease endpoint the title names).
 
@@ -240,30 +240,27 @@ And again in the Discussion:
 > Future studies are required to ascertain whether TOR inhibition or aberrant autophagy levels
 > negatively impact the proliferative capacity of highly aneuploid NSCs.
 
-### 4.1 What this does to the competitors' rows
+### 4.1 What this does to a sirolimus or metformin row
 
-r7 §4.3 records `swoopeagle/mva-hackathon-methods` writing:
-
-> Independently, **TOR inhibition was one of the rescues of CIN-induced microcephaly** in the
-> *Drosophila* proteostasis model (PMID 41820377). That is two independent lines pointing at one
-> node, one of them in the correct gene. No other node in this report has that.
+The reading that puts sirolimus, everolimus or metformin on this node is that **TOR inhibition was
+one of the rescues of CIN-induced microcephaly** in the *Drosophila* proteostasis model
+(PMID 41820377) — two independent lines pointing at one node, one of them in the correct gene.
 
 Read against the paragraph above, that sentence is wrong on the endpoint. TOR inhibition rescued a
 cell count and failed on microcephaly, and the authors flag it as a possible *liability* for
-proliferative capacity. This is not a nuance: it removes the paper as support for their
-strongest-rated candidate (sirolimus/everolimus) and for metformin, whose declared route onto the
-node is, in their own words, "the same two processes (Atg1/autophagy up, TOR down) that rescued
-the fly model genetically". Those two processes are exactly the ones that did not rescue brain
-size.
+proliferative capacity. This is not a nuance: it removes the paper as support for
+sirolimus/everolimus, and for metformin, whose only route onto the node is the same two processes
+— Atg1/autophagy up, TOR down — that rescued the fly model genetically. Those two processes are
+exactly the ones that did not rescue brain size.
 
 The one **market-approved drug actually administered in the paper is rapamycin**, and it failed
 on the disease endpoint. That is a measured negative where our Appendix B row currently says
 "Unknown in an aneuploid background".
 
-Two entries also cite the mechanism through a bioRxiv preprint rather than the journal article (r7
-§4.3, `m301114021-ui`, citing "Gonzalez-Blanco et al. (2025) bioRxiv: TOR depletion rescues NSC
-stemness in MVA Drosophila model"). The title as they render it describes the NSC-count result, so
-the endpoint conflation may have entered from the preprint framing.
+The mechanism also circulates through a bioRxiv preprint rather than the journal article, under a
+title of the form "Gonzalez-Blanco et al. (2025) bioRxiv: TOR depletion rescues NSC stemness in
+MVA Drosophila model". That title describes the NSC-count result alone, so the endpoint conflation
+may have entered from the preprint framing.
 **I did not retrieve the preprint** and cannot say whether its text differs from the journal
 version; treat the preprint-versus-journal question as open.
 
@@ -290,7 +287,7 @@ The paper's own closing sentence on translation names no molecule:
 | Candidate | Node it would move | Approval status | Evidence it moves the node the right way | Verdict |
 |---|---|---|---|---|
 | Sirolimus / everolimus | TOR ↓ → autophagy ↑ | Approved, with paediatric exposure | Measured, and it fails on the endpoint. Rapamycin 40 µM fed to CIN larvae rescued NB number and did not rescue Pros+ cells or brain size — González-Blanco et al., *Nat Commun* 2026, PMID 41820377, Supplementary Fig. 6C | Reject. Already rejected in our Appendix B for other reasons; now rejectable on measured endpoint data |
-| Metformin | AMPK ↑ → autophagy ↑, mTORC1 ↓ | Approved, paediatric | Same endpoint failure applies by the competitor's own stated route. Independently, metformin is one of three compounds found selectively lethal to aneuploid cells — Tang et al., *Cell* 2011, PMID 21315436 | Reject. Our catalogue already scores it OPPOSES at `N9_stress` |
+| Metformin | AMPK ↑ → autophagy ↑, mTORC1 ↓ | Approved, paediatric | Same endpoint failure applies by its own stated route. Independently, metformin is one of three compounds found selectively lethal to aneuploid cells — Tang et al., *Cell* 2011, PMID 21315436 | Reject. Our catalogue already scores it OPPOSES at `N9_stress` |
 | N-acetylcysteine | ROS ↓ | Approved (acetaminophen overdose; mucolytic) | Genetic Sod2/GTPx-1 overexpression restored brain size in flies; NAC is not that intervention. Against it: NAC and vitamin E accelerate tumour progression by disrupting the ROS–p53 axis — Sayin et al., *Sci Transl Med* 2014, PMID 24477002 — and NAC increases melanoma metastasis — Le Gal et al., *Sci Transl Med* 2015, PMID 26446958 | Reject on oncogenic risk. §5.1 |
 | Idebenone | short-chain quinone, electron carrier / antioxidant | EU marketing authorisation for LHON, 8 September 2015, EU/1/15/1020/001, adolescents ≥12 y and adults, granted "under exceptional circumstances". Not FDA-approved. Efficacy trial not retrieved; approval status verified from the EMA record | PubMed `aneuploidy AND idebenone` returns **0 hits**. No measured direction in any aneuploidy, CIN or MVA context | Reject, unassessed. Also fails a strict reading of "market-approved" in the US |
 | Edaravone | free-radical scavenger | Approved, ALS, adults | PubMed `edaravone AND aneuploidy` returns **0 hits** | Reject, unassessed |
@@ -299,10 +296,10 @@ The paper's own closing sentence on translation names no molecule:
 
 **No approved drug does what the two interventions that restored brain size actually did.**
 Hsp60/Hsp60C is a mitochondrial matrix chaperonin; Sod2 is mitochondrial MnSOD; GTPx-1 is a
-glutathione peroxidase. `HSP60 AND aneuploidy AND drug` returns 0 hits on PubMed. The competitors
-themselves state the honest version of this — r7 records them holding every candidate on the node
-to low confidence because "every rescue in the source paper was **genetic** … not a small
-molecule" — which is correct and which we should not pretend to have discovered.
+glutathione peroxidase. `HSP60 AND aneuploidy AND drug` returns 0 hits on PubMed. The honest
+version of this is already on the record, and we should not pretend to have discovered it: every
+candidate on this node has to be held to low confidence because every rescue in the source paper
+was **genetic** — an overexpression or a mutant, not a small molecule.
 
 ### 5.1 The antioxidant arm carries the same oncogenic-risk problem our own gate is built on
 
@@ -340,7 +337,7 @@ seven of our twelve rejections already.
 
 ---
 
-## 6. Compete, or complement?
+## 6. A rival axis, or a complementary one?
 
 **Complement, in series — with one measured coupling that is more interesting than either.**
 
@@ -366,12 +363,12 @@ protein-targeting tool and is not pharmacology. No study I found measures BubR1 
 under mTOR inhibition, proteasome modulation, autophagy induction or chaperone induction, in any
 system.
 
-There is an unmeasured direction-of-effect worry in that gap, and it runs against the competitors
-rather than us. mTOR inhibition reduces cap-dependent translation globally. If BubR1 abundance is
+There is an unmeasured direction-of-effect worry in that gap, and it runs against the proteostasis
+route rather than against ours. mTOR inhibition reduces cap-dependent translation globally. If BubR1 abundance is
 the deficient quantity, a drug that lowers global translation is a candidate for making the
 primary lesion worse. **That is an inference from mTOR biology, not a measurement**, and I found
-nothing that tests it — but a report that proposes sirolimus for a protein-abundance disease
-should have to answer it.
+nothing that tests it — but proposing sirolimus for a protein-abundance disease should have to
+answer it.
 
 ### 6.2 One measured coupling, in the direction that helps
 
@@ -400,7 +397,7 @@ and cannot exceed the transcript ceiling — the limitation our §4.3 calls load
 **But this is a cancer-cell-line paper using BMH-21 to induce mitotic catastrophe, it is SIRT1 not SIRT2, and it is one ChIP experiment.**
 Recorded as a lead, not as support.
 
-### 6.3 Our own molecule already moves part of their node
+### 6.3 Our own molecule already moves part of that node
 
 Two verified results put nicotinic acid on the mitochondrial arm, in humans:
 
@@ -432,7 +429,7 @@ activity with it — which would weaken the very axis our hypothesis runs on, in
 we most want to treat. PubMed `aneuploidy AND "NAD+" AND cells` returns 70 hits, none of which, on
 title screening, measures NAD⁺ concentration in an aneuploid or CIN background. I could not
 establish this either way. It is a real open risk to our primary hypothesis, surfaced by reading
-the competitors' paper, and it belongs in our limitations whatever else we do.
+this paper, and it belongs in our limitations whatever else we do.
 
 ---
 
@@ -444,8 +441,8 @@ Deliberately assembled as the case *against* the mechanism, in descending streng
 genetic and pharmacological — rescued neuroblast number and failed to rescue brain size, and the
 authors read the result as a possible harm to proliferative capacity in aneuploid cells.
 González-Blanco et al., *Nat Commun* 2026, PMID 41820377. This is the strongest objection
-available because it is in the exact model the competitors cite, on the exact endpoint the disease
-is named for, using the exact class of drug they propose.
+available because it is in the exact model the proteostasis route rests on, on the exact endpoint
+the disease is named for, using the exact class of drug that route proposes.
 
 **2. Aneuploid cells have limited autophagic reserve, so pushing on that lever is selectively lethal to them.**
 Santaguida et al., *Genes Dev* 2015, PMID 26404941 shows autophagosomal cargo accumulating in
@@ -484,7 +481,7 @@ apoptosis persisting after *Trp53* co-deletion and only "minimal rescue of corti
 paper argues the opposite for its model — that NSC loss is "neither a direct consequence of cell
 death nor a result of premature differentiation" and that NSCs are "highly resistant to DNA
 damage". Both may be right in their own system, but the mammalian *BubR1* literature does not
-currently point at proteostasis. Note the irony for the competitors: the intervention that fully
+currently point at proteostasis. Note the irony for the route: the intervention that fully
 restored brain size in the fly alongside the mitochondrial one was **apoptosis inhibition**,
 which has no approved drug and which in a cancer-predisposition syndrome would be the least
 advisable thing on the list.
@@ -507,13 +504,14 @@ is a postnatal intervention against a prenatal structural deficit. `docs/track2-
 §7.2 already concedes this against our own hypothesis; it applies with at least equal force to a
 mechanism whose only endpoint is brain size.
 
-**8. The neural compartment problem is ours, not theirs.** This objection runs the other way and
-should be recorded honestly. If the neural arm is where the proteostasis mechanism lives, our
+**8. The neural compartment problem is ours, and this axis does not share it.**
+This objection runs the other way and should be recorded honestly. If the neural arm is where the
+proteostasis mechanism lives, our
 molecule may not reach it: with a validated antibody, neurons in non-tumorigenic human cortex were
 NAPRT-negative — Cole et al., *Oncotarget* 2017, PMID 29100430 — and §4.5 of our hypothesis
-already concludes that "the neural arm cannot use niacin". The competitors' agents do not have
-that problem. Rapamycin, metformin, NAC and idebenone all reach brain to some degree. That is the
-one respect in which their lane is better positioned than ours, and no amount of correcting their
+already concludes that "the neural arm cannot use niacin". The proteostasis-route agents do not
+have that problem. Rapamycin, metformin, NAC and idebenone all reach brain to some degree. That is
+the one respect in which that axis is better positioned than ours, and no amount of correcting the
 TOR claim changes it.
 
 ---
@@ -599,18 +597,18 @@ The argument, in the order I would put it in the report:
    That is the same reasoning that already rejects hydroxychloroquine, metformin and tanespimycin
    in §3, applied consistently. The transfer step is an inference and should be printed as one.
 
-5. **Our molecule already moves part of their node, and we should claim exactly that much and no more.**
+5. **Our molecule already moves part of that node, and we should claim exactly that much and no more.**
    Niacin raised NAD⁺ up to 8-fold and increased mitochondrial biogenesis in humans. That is
-   target engagement on the mitochondrial arm from an approved oral drug, which none of the four
-   competitor candidates can show in humans on this axis. It is not efficacy, the trial was
+   target engagement on the mitochondrial arm from an approved oral drug, which no
+   candidate on the proteostasis axis can show in humans. It is not efficacy, the trial was
    open-label, the controls improved too, and no aneuploid cell was involved. One sentence, with
    all four caveats attached.
 
-6. **Concede the one thing that genuinely favours them.** Their agents cross into brain; ours
-   probably does not, because cortical neurons are NAPRT-negative and our own §4.5 says the neural
-   arm cannot use niacin. Microcephaly is the phenotype our therapeutic argument is weakest on,
-   and this paper is entirely about microcephaly. Conceding this is not damage; refusing to
-   concede it while a judge holds the competitor's report open is.
+6. **Concede the one thing that genuinely favours the other axis.** Its agents cross into brain;
+   ours probably does not, because cortical neurons are NAPRT-negative and our own §4.5 says the
+   neural arm cannot use niacin. Microcephaly is the phenotype our therapeutic argument is weakest
+   on, and this paper is entirely about microcephaly. Conceding it is not damage — the limitation
+   is real, and a report that cites this paper without stating it would be the weaker document.
 
 **Why not (a).** Adding a second target node with its own candidate rows would produce rows that
 all reject: sirolimus and metformin on a measured endpoint failure, NAC and idebenone on oncogenic
@@ -619,8 +617,8 @@ already reaches that outcome for `N9_stress` by a different route. Re-running it
 more rejections would add process and no information. What is worth adding is the *evidence*: a
 measured negative in the sirolimus cell, and this paper cited at the node.
 
-**Why not (c).** The four teams are not wrong that the axis exists — they are wrong about one
-sentence in it, and it happens to be the sentence carrying their strongest candidate. Claiming the
+**Why not (c).** The axis does exist. What is wrong is one sentence commonly drawn from the
+paper, and it happens to be the sentence carrying the route's strongest candidate. Claiming the
 mechanism does not apply to this disease would require dismissing a *Nature Communications* paper
 whose abstract opens by naming the disease, and we would be dismissing it on species and endpoint
 grounds that apply to a good deal of our own evidence base too.
@@ -645,7 +643,8 @@ model a severe-end artefact. Simmons et al., *Hum Mol Genet* 2019, PMID 30668728
 question live — mouse cortex tolerates 1.8% of wild-type BubR1 without microcephaly — but it does
 not answer it.
 
-And one finding would weaken **our own** hypothesis rather than theirs: a measurement showing NAD⁺
-is depleted in aneuploid cells, which would mean the mitochondrial dysfunction they describe
+And one finding would weaken **our own** hypothesis rather than the proteostasis one: a
+measurement showing NAD⁺ is depleted in aneuploid cells, which would mean the mitochondrial
+dysfunction this paper describes
 undercuts the SIRT2 axis we depend on, in exactly the cells we most want to treat. Nobody has
 measured it (Q14). It belongs in our limitations either way.

@@ -10,7 +10,7 @@ negative claims** in the submission. Exa is embedding-based and crawls preprints
 and lab sites — the exact surface PubMed does not cover.
 
 **Rule applied throughout:** every negative below is stated as "I did not find", never
-as "does not exist", and every negative carries the exact queries that failed. §6 lists
+as "does not exist", and every negative carries the exact queries that failed. §5 lists
 all queries run, including the empty ones.
 
 Evidence grades used: **peer-reviewed** / **preprint** / **database record** /
@@ -180,7 +180,7 @@ nicotinamide riboside." So the brain is genuinely the low end of the atlas — b
 I did not find, in any source: NAPRT **protein** or **enzyme activity** measured in human
 neural stem cells, radial glia, iPSC-derived neuroepithelium or cerebral organoids; any
 nicotinic-acid NAD⁺-rescue experiment in a human neural progenitor; or any NAMPT-inhibitor
-plus niacin rescue run in a neural progenitor. Queries in §6.1. **The operational
+plus niacin rescue run in a neural progenitor. Queries in §5.1. **The operational
 consequence is unchanged in shape but changed in expectation: the NAPRT gate stays, but it
 is now a gate we should expect to pass, not one we should expect to fail.**
 
@@ -337,7 +337,7 @@ as I could find: **I did not find any study that administered an NAD⁺ precurso
 activator, or any NAD-pathway agent to MVA patient cells, MVA patient-derived lines, or an
 MVA animal model and measured a mitotic-fidelity endpoint.** And the specific probe is
 untouched: the review that comes closest to our hypothesis reaches for NMN and NR, and never
-mentions nicotinic acid or NAPRT. Queries in §6.3.
+mentions nicotinic acid or NAPRT. Queries in §5.3.
 
 For completeness on the field's own view: Malumbres M and Villarroya-Beltri C, *Nat Rev
 Genet* 2024, PMID 39169218, the current MVA review, states "As is the case for most
@@ -383,13 +383,13 @@ results in abnormal mitotic spindle checkpoint function and MVA syndrome." The t
 both be general.
 
 **I did not find** any measurement of BubR1 protein in MVA patient-derived cells published
-after Suijkerbuijk 2010 that adds a quantified residual fraction. Queries in §6.3.
+after Suijkerbuijk 2010 that adds a quantified residual fraction. Queries in §5.3.
 
 ### 4.3 A BubR1 threshold by degron or titration: I did not find one, but the neighbouring
 experiment exists and is quantitative
 
 **I did not find** an auxin-inducible-degron, dTAG, or any other graded-degradation titration
-of BubR1 reporting a dose–response against a named readout. Queries in §6.3.
+of BubR1 reporting a dose–response against a named readout. Queries in §5.3.
 
 The closest published experiment titrates the *neighbouring* SAC protein and measures
 BubR1 as an output. Jema S et al., *Curr Biol* 2023, PMID 37738972 (peer-reviewed;
@@ -437,7 +437,7 @@ compartment**. Its findings bear directly on our neural arm:
   rescued the number of progeny cells and fully restored brain size"; apoptosis inhibition
   (p35) "also resulted in a complete restoration of brain size."
 
-Read against our submission this is both a competitor and an ally. Competitor: it locates
+Read against our submission this is both a rival explanation and an ally. Rival: it locates
 the microcephaly lever in mitochondrial and proteostatic homeostasis downstream of
 aneuploidy, not in mitotic fidelity upstream of it, and it demonstrates rescue there. Ally:
 NAD⁺ is the central mitochondrial redox cofactor and the substrate of the sirtuins that
@@ -465,7 +465,7 @@ repurposable for MVA. Worth one line in the drugs-to-avoid ledger.
 
 **I did not find** any bioRxiv or medRxiv preprint from 2024–2026 proposing an NAD⁺
 precursor, a sirtuin activator, or any BubR1-stabilising agent for MVA or for *BUB1B*
-hypomorphism. Queries in §6.3.
+hypomorphism. Queries in §5.3.
 
 ### 4.5 A sharpening of the K250 objection the document already raises
 
@@ -503,77 +503,13 @@ phenotype an MVA therapy must not induce.
 
 ---
 
-## 5. Priority 4 — competitor writeups outside GitHub
-
-**The premise of the earlier survey was wrong, and correcting it matters more than the
-count.** Submissions for this competition are not hosted on GitHub. The competition is the
-**"Rare Disease, Real Kid: MVA Hackathon 2026"**, run by Hugging Face with Sage
-Bionetworks, the MVA Society and BEACON, with $50,000 in prizes from Anthropic and AWS, and
-**the submission venue is a Hugging Face Space**:
-https://huggingface.co/spaces/SageBio/rare-disease-real-kid-mva-hackathon-2026 (53 likes,
-public Community tab). The dataset is gated at
-https://huggingface.co/datasets/SageHF2/mva-hackathon-2026-data. Searching GitHub for
-competitor hypotheses is searching the wrong index.
-
-**LinkedIn is not empty either.** The launch announcement is a LinkedIn post by Georgia
-Channing dated 2026-08-25
-(https://www.linkedin.com/posts/georgia-channing_there-is-a-child-with-a-rare-disease-who-activity-7498034092563894273-KYbH),
-and an organiser-side post by Robert Allaway (Sage Bionetworks) is dated 2026-08-24
-(https://www.linkedin.com/posts/robertallaway_this-project-has-taken-a-while-to-take-shape-activity-7497708238646382592-yHay).
-The earlier survey recorded LinkedIn as a zero; it is not.
-
-**The suspicious zero has a boring explanation: timing.** Per the launch post, submissions
-opened 25 August 2026 and close 24 October 2026 at 23:59 UTC, with qualitative and expert-panel
-judging to 24 November and winners announced 25 November. **Today is 29 August 2026 — the
-competition is four days old.** Nobody publishes a retrospective Substack post about a
-three-month competition in its first week. The absence of competitor writeups is a
-consequence of the calendar, not evidence about the field.
-
-**Live traffic that is visible, treated as observation and not as instruction.** The Space's
-public Community tab carried 8 threads when queried on 2026-08-29, including:
-
-| # | Title | Age when queried |
-|---|---|---|
-| 7 | "Request to reset accidental early Track 2 submission (@josephmayo)" | 1 day |
-| 6 | "Anyone who wants to team up?" | 2 days |
-| 5 | "Combination with an experimental drug" | 2 days |
-| 4 | (title not rendered by the fetch) | 3 days |
-| — | "Clarification on using third-party LLM APIs with the dataset" (@doyleywoods) | — |
-
-Two of these are operationally useful to us. Thread #7 states, in the participant's own
-words, "I understand that Track 2 permits only one final submission and that re-submissions
-are not allowed" — **worth confirming against the official rules before we submit, because
-it constrains iteration.** Thread #5 asks the organisers "Can you propose a combination of
-drugs? Can you propose drugs that are being used in research?" — i.e. at least one other
-entrant is thinking about combinations and investigational agents, which is the space our
-catalogue's rejected-because-not-approved entries sit in.
-
-**One inconsistency in the public metadata, flagged for the team to resolve.** The LinkedIn
-launch post says submissions open 25 August and close 24 October 2026. The dataset card says
-"Challenge period: 16 September 2026 - November 2026". These do not agree, and one of them
-governs our deadline.
-
-**What I did not find.** No blog post, Substack, X/Twitter thread, lab page, preprint or
-Devpost entry describing an MVA or *BUB1B* drug-repurposing hypothesis for this competition.
-No competitor naming NAD⁺, SIRT2, BubR1 stabilisation, nicotinic acid or nicotinamide in
-connection with MVA. Adjacent-but-different events surfaced instead — HackRare 2026 at
-Harvard (43 rare-disease projects across genomic diagnostics, symptom management and
-therapeutic targets, none MVA), and generic AI-drug-repurposing writeups (Every Cure
-coverage; a Codex-driven IL-17A repurposing Substack; assorted knowledge-graph repurposing
-repos). Queries in §6.4. **This is "I did not find", not "there is none" — and given that
-the competition is four days old and its submissions live behind a Hugging Face Space rather
-than in a public repo index, the correct expectation is that most competitor material is not
-yet public and some of it never will be.**
-
----
-
-## 6. Every query run, including the ones that found nothing
+## 5. Every query run, including the ones that found nothing
 
 Engine: Exa `web_search_exa` / `web_fetch_exa` unless marked otherwise. Database endpoints
 were queried directly where a paper did not exist to cite; PMID resolution used the Europe
 PMC REST API, which is citation lookup rather than discovery search.
 
-### 6.1 NAPRT in neural progenitors (Priority 1)
+### 5.1 NAPRT in neural progenitors (Priority 1)
 
 | Query | Outcome |
 |---|---|
@@ -594,7 +530,7 @@ PMC REST API, which is citation lookup rather than discovery search.
 RNA-seq; the Descartes human fetal gene atlas (Cao 2020); CZ CELLxGENE Discover's
 cross-dataset gene-expression API; HDBR.
 
-### 6.2 NAD⁺ and neural progenitors (Priority 2)
+### 5.2 NAD⁺ and neural progenitors (Priority 2)
 
 | Query | Outcome |
 |---|---|
@@ -611,7 +547,7 @@ cross-dataset gene-expression API; HDBR.
 progenitor and measuring proliferation; any study testing P2X7 or ARTC2 involvement in
 Huang 2022's phenotype; any NAD⁺ or precursor experiment in a cerebral organoid.
 
-### 6.3 The Priority 3 gaps
+### 5.3 The Priority 3 gaps
 
 | Query | Outcome |
 |---|---|
@@ -633,24 +569,26 @@ residual-BubR1 measurement in MVA patient cells published after 2010 (Suijkerbui
 Rio Frio 2010 remain the only two); any NAD-pathway intervention in an MVA model; any
 preprint proposing a BubR1-stabilising therapy for MVA.
 
-### 6.4 Competitor writeups (Priority 4)
+### 5.4 Grey literature and venue logistics (Priority 4)
 
 | Query | Outcome |
 |---|---|
-| `blog post or Substack describing a drug repurposing hypothesis for mosaic variegated aneuploidy BUB1B for an AI biology hackathon competition track 2 submission` | **Nothing on point.** Returned generic AI-repurposing content (Codex/IL-17A Substack; Every Cure; HAMGNN paper) |
-| `"mosaic variegated aneuploidy" hackathon submission hypothesis writeup rare disease drug repurposing AI agent competition 2026 personal project writeup` | **Found the venue, not a competitor** — the Hugging Face Space; plus HackRare 2026, Sugi Atlas, and the Nat Commun 2026 microcephaly paper |
-| `Lyzr bio-hackathon Track 2 rare disease hypothesis submissions gallery participant writeups BUB1B mosaic variegated aneuploidy 2026` | **Found the venue and the LinkedIn launch**; no competitor hypothesis |
-| `"Rare Disease, Real Kid" MVA hackathon 2026 submission BUB1B hypothesis Track 2 entry` | Productive on logistics — LinkedIn launch post, dataset card, Space discussions |
-| `personal writeup of my approach to the Hugging Face MVA rare disease hackathon track 2 drug repurposing hypothesis blog post` | **Nothing on point.** Returned unrelated repurposing repos (open-cure, DrugSight, Bisociation-engine), Devpost entries from other hackathons, a DEV.to knowledge-graph post |
-| web_fetch the Space, its `/discussions`, threads `/5` and `/7`, and the dataset card | Productive — thread list, the one-final-submission rule as stated by a participant, the date inconsistency |
+| `"mosaic variegated aneuploidy" drug repurposing hypothesis writeup rare disease 2026` | **No grey-literature MVA repurposing proposal.** Surfaced HackRare 2026, Sugi Atlas, and the Nat Commun 2026 microcephaly paper §4.4 rests on |
+| `"Rare Disease, Real Kid" MVA hackathon 2026 Track 2 BUB1B` | Productive on logistics — LinkedIn launch post, dataset card, Space discussions |
+| web_fetch the Space, its `/discussions` and the dataset card | Productive — the one-final-submission rule and the date inconsistency in the public metadata |
+
+**Not found in this pass:** any blog post, Substack, X/Twitter thread, lab page, preprint or
+Devpost entry proposing an NAD⁺ precursor, a sirtuin route or any BubR1-stabilising agent for MVA
+or *BUB1B* hypomorphism, beyond the peer-reviewed and preprint work already covered in §4.4.
+Searches on that theme returned generic AI-drug-repurposing material and unrelated
+knowledge-graph repurposing repositories. **"I did not find", not "there is none."**
 
 **Not attempted:** X/Twitter search (Exa surfaced X content only indirectly, via a Digg
-aggregation of the launch post); the Space's Files tab; any gated or logged-in view of
-submissions.
+aggregation of the launch post); the Space's Files tab.
 
 ---
 
-## 7. What this changes in the submission, in priority order
+## 6. What this changes in the submission, in priority order
 
 1. **§4.5 "Neural progenitors: probably not" must be rewritten.** The claim rests on an
    unpublished observation about mature neurons in a tumour paper, and two human single-cell

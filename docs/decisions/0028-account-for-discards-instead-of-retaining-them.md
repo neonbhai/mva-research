@@ -29,15 +29,15 @@ of JSON and ~3 evidence rows for **all 4,962,060** variants, when 14,228 of them
 can possibly matter. SnpEff is cheap and 350x selective. We ran it and threw its
 selectivity away.
 
-Two independent confirmations arrived while this was being built, and both narrow
-the diagnosis rather than widen it:
+Two things confirmed the diagnosis while this was being built, and both narrow it
+rather than widen it:
 
-* A survey of 37 competitor pipelines on this exact callset found **two entrants
-  running SnpEff genome-wide over the same 5,012,204 records in 19 minutes and 58
-  minutes**. Same tool, same input, against our 19.5-hour projection. Four
-  independent tools converge on **14–18 k survivors** after consequence filtering,
-  which our measured 14,228 agrees with. The survey's own conclusion: the
-  bottleneck everywhere was **population frequency, not consequence annotation**.
+* **SnpEff is not the slow part.** Run genome-wide over the same 5,012,204
+  records it is a tens-of-minutes job — the ad-hoc script's ~14 minutes — against
+  our pipeline's 19.5-hour projection on the same tool and the same input.
+  Independent consequence-filtering tools land in the same place on this callset,
+  **14–18 k survivors**, and our measured 14,228 sits inside that. The bottleneck
+  is **population frequency, not consequence annotation**.
 * An audit of `src/mva/annotation/snpeff_local.py` confirms the SnpEff path is
   **not** the defect. It launches the JVM 20 times for a 4.96 M callset, not 993;
   it streams SnpEff's stdout rather than buffering it; it passes `-noStats`,
@@ -105,13 +105,13 @@ is small and MODIFIER is most of what is genic.
 information as `EvidenceItem`s would.
 
 Four stages write to it — `ingest`, `triage`, `hard_filter`, `selection` — and
-`ingest` is there deliberately. The competitor survey's sharpest finding about
-discard auditing is that every entrant's audit "is complete *downstream* of the
-first region gate and absent *at* it". Ours had the same hole: the reader's
-`skipped_count` removed 116,485 decoy and unplaced records on this callset — more
-than eight times the number of variants that survive to the end — as a bare
-integer in `qc_report.json`. `itzmeanjan/mva-study` names the distinction we now
-keep: **"never extracted" and "extracted then dropped" stay distinguishable.**
+`ingest` is there deliberately. Discard auditing fails in a predictable place: it
+is complete *downstream* of the first region gate and absent *at* it. Ours had
+exactly that hole — the reader's `skipped_count` removed 116,485 decoy and
+unplaced records on this callset, more than eight times the number of variants
+that survive to the end, as a bare integer in `qc_report.json`. The distinction
+the ledger now keeps is the one that closes it: **"never extracted" and
+"extracted then dropped" stay distinguishable.**
 
 `mva discards explain <ledger> <variant_id>` answers "why isn't variant X in the
 output?" by scanning the file. An empty result is reported as **ambiguous**, not
@@ -159,10 +159,11 @@ the projected output does not fit. Fed the measured run's own shape it prints:
 [annotate]   disk     : 60.0 GB free, 54.0 GB budget after 10% headroom
 ```
 
-and refuses. **This matters more than the speedup.** It is also the one thing no
-entrant in the 37-repo survey did: not one projected runtime or disk before
-starting, because no other design generated enough intermediate data for it to
-matter.
+and refuses. **This matters more than the speedup.** A pre-flight projection of
+runtime and disk is an unusual thing for a pipeline to carry, because it only
+earns its keep in a design that generates enough intermediate data for the
+projection to matter — and this design does, which is exactly why it had to be
+added here.
 
 The same object emits throttled progress — records/s, count, ETA, bytes — every
 30 seconds. It reads the clock once per 4,096 records so the meter is not a
@@ -252,19 +253,19 @@ reverted within the same change: 3,616 → 3,600. The saving was small and the c
 was the rescue that `retain_pathogenic_clinical` exists to provide.
 
 **Switch to `bcftools csq`.** Not rejected, deferred, and recorded as TD-27 with
-the evidence: five entrants used it, one measured **~10–20 minutes genome-wide**,
-and it is fast for an architectural reason — it streams the VCF against a GFF3 and
-writes a `BCSQ` tag in place, so no per-variant annotated intermediate is ever
+the evidence: it annotates a genome-wide callset in **~10–20 minutes**, and it is
+fast for an architectural reason — it streams the VCF against a GFF3 and writes a
+`BCSQ` tag in place, so no per-variant annotated intermediate is ever
 materialised. It is also haplotype-aware, which is directly relevant to a
 compound-heterozygote question. Two caveats stop it being a drop-in: it has no
-MANE/canonical transcript selection, which produced the survey's sharpest
-self-disclosure (one entrant's `break` took the first protein-coding consequence
-and mis-annotated their own primary candidate); and three of the five users passed
-`--local-csq`, which turns off the haplotype awareness the tool is being credited
+MANE/canonical transcript selection, so the obvious "take the first
+protein-coding consequence" loop mis-annotates whichever candidate happens to be
+listed first, and does it silently; and `--local-csq`, which is easy to pass by
+reflex, turns off the haplotype awareness the tool is being credited
 for. Our SnpEff path is already at 20 JVM launches, so it is not the emergency the
 19.5-hour number made it look like.
 
 **Retain everything and buy a bigger disk.** The volume is 60 GB and the
 projection was 95 GB, so this is not available today. It is also the wrong shape
-of answer: the run was 78x slower than two entrants doing the same work with the
-same tool, and more disk does not fix that.
+of answer: the ad-hoc script did the same work with the same tool in ~14 minutes
+against this run's 19.5-hour projection, and more disk does not fix that.

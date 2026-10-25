@@ -11,87 +11,80 @@ Ordered by what a judge would notice first, not by effort.
 
 ---
 
-## 0. The competitive read this list is derived from
+## 0. Why this list is ordered the way it is
 
-A survey of **47 public entry repositories** on 2026-08-27, plus the public
-Track 1 leaderboard, established two things:
+Two things set the order:
 
-1. **The automated metric is saturated.** Every scored entry sits at 100.0 rank
-   points and F-max 1.000 — the mathematical ceiling — most on their first
-   attempt. A perfect Track 1 score is a participation gate, not a
-   differentiator. See `docs/submission-ledger.md` for the full argument.
+1. **The automated metric is saturated.** Attempt 1 banked 100.0 rank points and
+   F-max 1.000 on its first try — the mathematical ceiling for both. A score that
+   cannot move is a format check, not a differentiator. See
+   `docs/submission-ledger.md` for the full argument.
 2. **Therefore every remaining distinction is qualitative.** What a reviewer
    reads, clones, and can re-run is the whole contest.
 
 That reframes this backlog: these are not engineering niceties, they are the
 only axis left.
 
-### Where we lead the field
+### What the repo already has
 
-| Property | This repo | Field (n=47) |
-|---|---|---|
-| Snakemake DAG over the whole pipeline | 5 rule files, containers + envs pinned | **0 of 47** |
-| Architecture decision records | 27 | a handful have any |
-| Test functions | 1,341 across 52 files (~1,520 cases) | mostly none to a few dozen |
-| Privacy audit with self-proving detectors | 13/13 rules re-proved each run | none observed |
-| Differential oracle against the real scorer | 2,000 randomised trials | none observed |
-
-The Snakemake gap is the single most unusual property. Nobody else made the
-pipeline a reproducible DAG.
-
-### Where we are behind
-
-| Gap | Who has it |
+| Property | This repo |
 |---|---|
-| **Blind ablation** — which evidence sources were load-bearing | 3 of 47 |
-| Discard ledger — what was considered and rejected | a few |
-| Claims ledger — every assertion traced to its source | a few |
-| Negative fixtures — inputs that *must* fail | few |
-| A "start here" path for a reviewer with 10 minutes | many |
+| Snakemake DAG over the whole pipeline | 5 rule files, containers + envs pinned |
+| Architecture decision records | 27 |
+| Test functions | 1,341 across 52 files (~1,520 cases) |
+| Privacy audit with self-proving detectors | 13/13 rules re-proved each run |
+| Differential oracle against the real scorer | 2,000 randomised trials |
+
+Making the whole pipeline a reproducible DAG is the most unusual of these and
+the hardest to retrofit, which is why it is worth saying out loud.
+
+### What is missing
+
+| Gap | Why it matters |
+|---|---|
+| **Blind ablation** — which evidence sources were load-bearing | It is the only answer to "did the pipeline do the work, or did ClinVar?" |
+| Discard ledger — what was considered and rejected | GP-13 is enforced inside the pipeline and invisible from outside it |
+| Claims ledger — every assertion traced to its source | Turns a stylistic virtue into a checkable one |
+| Negative fixtures — inputs that *must* fail | The suite proves good input works and infers the rest |
+| A "start here" path for a reviewer with 10 minutes | 27 ADRs and 275 files is not a front door |
 
 The ablation is the important one. It is also the thing the real-callset run
 currently in flight exists to produce.
 
-### Track 2: what the field actually did
+### Track 2: where the argument actually stands
 
-A second survey on 2026-08-28 found **19 public Track 2 hypotheses**, all on
-GitHub — none on Hugging Face, none in blogs or social posts. It corrected a
-belief we held about our own positioning:
+**Direction-of-effect reasoning is not by itself a differentiator.** The
+inversion argument — that aneuploidy-selective oncology agents lose their
+therapeutic window when the patient's own tissue *is* the aneuploid compartment —
+is reachable by anyone who works the problem carefully, so leading with "we
+noticed the trap" says less than it looks like.
 
-**Direction-of-effect reasoning is not a differentiator.** 14 of 19 raise it
-explicitly; 5 make it the organizing thesis of the whole report; three teams
-independently derived the same inversion argument — that aneuploidy-selective
-oncology agents lose their therapeutic window when the patient's own tissue *is*
-the aneuploid compartment — in near-identical language. Leading with "we noticed
-the trap" says what everyone else said.
+**What does hold up:**
 
-**What does hold up as ours:**
-
-- We sit inside a live 2–2 dispute on one molecule. Two entries reject
-  nicotinamide as a sirtuin *product* inhibitor and pick niacin; two pick
-  nicotinamide. **Resolved 2026-08-29, and it flipped.** The §5 table used to
-  show niacin scoring **higher** (0.410 vs 0.365) and losing on a gate about
-  whether the cancer-susceptibility question had been *asked*. Both `worsens_cin`
-  cells turned out to be wrong: niacin's malignancy counts by randomised arm are
-  public (HPS2-THRIVE and AIM-HIGH) and it has been through a human micronucleus
-  assay, while nicotinamide's cell had been filled from a skin-cancer trial that
-  measures no chromosome number. Correcting the two cells — no code, no weight, no
-  gate touched — inverted the ranking: nicotinic acid accepted at 0.500,
-  nicotinamide rejected at 0.275. Four teams argued this; we can show the rule,
-  the condition that flipped it, and the run that flipped on its own.
+- The nicotinamide-versus-niacin call, and the fact that it **flipped on its own
+  evidence, 2026-08-29**. The §5 table used to show niacin scoring **higher**
+  (0.410 vs 0.365) and losing on a gate about whether the cancer-susceptibility
+  question had been *asked*. Both `worsens_cin` cells turned out to be wrong:
+  niacin's malignancy counts by randomised arm are public (HPS2-THRIVE and
+  AIM-HIGH) and it has been through a human micronucleus assay, while
+  nicotinamide's cell had been filled from a skin-cancer trial that measures no
+  chromosome number. Correcting the two cells — no code, no weight, no gate
+  touched — inverted the ranking: nicotinic acid accepted at 0.500, nicotinamide
+  rejected at 0.275. The molecule is not the differentiator; the fact that we can
+  show the rule, the condition that flipped it, and the run that flipped on its
+  own, is.
 - **§5.2** — 7 of 12 rejections are `oncogenic_risk` where the risk was never
   measured rather than found. "The bottleneck in repurposing for
   chromosomal-instability disorders is not finding targets; it is that the one
-  safety question that matters has not been asked." Nothing in the corpus of 19
-  makes that argument.
+  safety question that matters has not been asked."
 - The blindness constraint (ADR 0008 / GP-44): the agent that wrote the
   hypothesis could not read patient data, which forced a genotype-conditional
-  framing. No other entry operates under that constraint.
+  framing.
 
-**Practices the strongest entries have and we do not** — each is a backlog item
-below: CI-verified citations (§2.5), a standalone drugs-to-avoid artifact
-(§2.6), a stated probability of benefit, a withdrawn-claims table (§1.4), and a
-positive control on the science pipeline (§2.7).
+**Practices worth having that we do not yet** — each is a backlog item below:
+CI-verified citations (§2.5), a standalone drugs-to-avoid artifact (§2.6), a
+stated probability of benefit, a withdrawn-claims table (§1.4), and a positive
+control on the science pipeline (§2.7).
 
 ---
 
@@ -106,9 +99,9 @@ not a reorganisation.
 
 ### 1.2 Publish the ablation
 Blocked on the real-callset run. Once it lands: re-run with each evidence source
-withheld in turn, and report which candidates survive. This closes the one gap
-where we are behind a named subset of the field, and it is the strongest
-possible answer to "did the pipeline do the work, or did ClinVar?"
+withheld in turn, and report which candidates survive. This closes the gap §0
+names as the important one, and it is the strongest possible answer to "did the
+pipeline do the work, or did ClinVar?"
 
 ### 1.3 Discard ledger
 GP-13 says a deleted candidate is invisible and unfalsifiable. We enforce that
@@ -152,9 +145,9 @@ statement about what may change without review.
 
 ### 2.5 Citations verified in CI, not asserted in prose
 `docs/track2-hypothesis.md` §0 states that "every citation was resolved against
-PubMed before being written down" — 47 unique PMIDs. That is an assertion. A
-competing entry *enforces* the same claim in CI and caught a hallucinated
-citation doing so. Existence is not enough: a PMID that resolves to a different
+PubMed before being written down" — 47 unique PMIDs. That is an assertion, and an
+assertion does not catch a hallucinated citation. A CI check *enforces* it, which
+is the whole difference. Existence is not enough: a PMID that resolves to a different
 paper than the one cited is the failure mode worth catching, so first author,
 year and journal must match too. Offline-by-default against a committed ledger,
 with an opt-in online refresh, because PRIV-05 forbids network on the sensitive

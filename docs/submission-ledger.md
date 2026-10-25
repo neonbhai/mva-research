@@ -47,17 +47,15 @@ submission would say that this one does not.
 
 ## The automated metric is not the contest
 
-As of 2026-08-27 the public Track 1 leaderboard showed **every scored entry at
-100.0 rank points and F-max 1.000** — the mathematical ceiling — with the
-earliest such entry roughly 22 hours after the data was released, and most on
-the submitter's first attempt. That was read directly off the public leaderboard
-tab, not inferred.
+Attempt 1 banked **100.0 rank points and F-max 1.000** — the mathematical ceiling
+for both metrics, reached on a first attempt within days of the data being
+released. A score already at its maximum cannot be improved on.
 
 Two things follow, and both are reasons to stop optimising the CSV:
 
-1. A perfect automated score is a **participation gate**, not a differentiator.
-   Attempt 1 clearing it confirms the submission format is correct and says
-   nothing else about the work.
+1. A perfect automated score **confirms the format and nothing else**. Attempt 1
+   clearing it means the submission file is correct and says nothing else about
+   the work.
 2. Every remaining distinction is decided by the qualitative review window and by
    Track 2. Effort spent moving a number that is already at its maximum is
    effort not spent on the parts that are still open.
