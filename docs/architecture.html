@@ -1,0 +1,1130 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mva-research architecture</title>
+<style>
+/* ── tokens ─────────────────────────────────────────────────────────── */
+:root{
+  --paper:#E9ECEE;
+  --card:#FBFCFD;
+  --card-2:#F2F5F7;
+  --ink:#0D1317;
+  --ink-2:#2B363D;
+  --muted:#5A666E;
+  --rule:#D0D7DC;
+  --rule-2:#E0E6EA;
+  --accent:#0E6B7E;
+  --accent-hi:#0A5665;
+  --accent-wash:rgba(14,107,126,.09);
+  --accent-wash-2:rgba(14,107,126,.04);
+  --t2:#9C5A12;
+  --t2-wash:rgba(156,90,18,.08);
+  --t2-wash-2:rgba(156,90,18,.035);
+  --deny:#A22C27;
+  --deny-wash:rgba(162,44,39,.08);
+  --line:#39474F;
+  --shadow:0 1px 0 rgba(13,19,23,.04), 0 1px 2px rgba(13,19,23,.05);
+  --ui:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"Helvetica Neue",Arial,sans-serif;
+  --serif:ui-serif,"New York","Iowan Old Style",Palatino,Georgia,serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D1216;
+    --card:#161D23;
+    --card-2:#1B232A;
+    --ink:#E4EAEE;
+    --ink-2:#CBD5DB;
+    --muted:#8D9BA5;
+    --rule:#27313A;
+    --rule-2:#202930;
+    --accent:#4FC3D7;
+    --accent-hi:#7BD7E6;
+    --accent-wash:rgba(79,195,215,.13);
+    --accent-wash-2:rgba(79,195,215,.055);
+    --t2:#DB9E52;
+    --t2-wash:rgba(219,158,82,.13);
+    --t2-wash-2:rgba(219,158,82,.05);
+    --deny:#EE8E86;
+    --deny-wash:rgba(238,142,134,.12);
+    --line:#8A99A3;
+    --shadow:0 1px 0 rgba(0,0,0,.2), 0 1px 3px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D1216;
+  --card:#161D23;
+  --card-2:#1B232A;
+  --ink:#E4EAEE;
+  --ink-2:#CBD5DB;
+  --muted:#8D9BA5;
+  --rule:#27313A;
+  --rule-2:#202930;
+  --accent:#4FC3D7;
+  --accent-hi:#7BD7E6;
+  --accent-wash:rgba(79,195,215,.13);
+  --accent-wash-2:rgba(79,195,215,.055);
+  --t2:#DB9E52;
+  --t2-wash:rgba(219,158,82,.13);
+  --t2-wash-2:rgba(219,158,82,.05);
+  --deny:#EE8E86;
+  --deny-wash:rgba(238,142,134,.12);
+  --line:#8A99A3;
+  --shadow:0 1px 0 rgba(0,0,0,.2), 0 1px 3px rgba(0,0,0,.25);
+}
+
+/* ── base ───────────────────────────────────────────────────────────── */
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--paper);color:var(--ink);
+  font-family:var(--ui);font-size:14px;line-height:1.5;
+  -webkit-font-smoothing:antialiased;overflow:hidden;
+}
+button{font:inherit;color:inherit;background:none;border:0;margin:0;padding:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+code,.mono{font-family:var(--mono)}
+code{font-size:.9em;background:var(--accent-wash);border-radius:3px;padding:.06em .3em;color:var(--ink)}
+p{margin:0 0 .7em}
+p:last-child{margin-bottom:0}
+em,.q{font-family:var(--serif);font-style:italic}
+
+/* ── shell ──────────────────────────────────────────────────────────── */
+.app{display:grid;grid-template-columns:236px 1fr;height:100%}
+
+.side{
+  border-right:1px solid var(--rule);background:var(--card);
+  display:flex;flex-direction:column;min-height:0;min-width:0;
+}
+.brand{padding:22px 20px 16px}
+.brand .repo{font-family:var(--mono);font-size:13px;letter-spacing:-.01em;color:var(--ink)}
+.brand .what{font-size:11px;color:var(--muted);margin-top:3px;letter-spacing:.02em}
+.nav{padding:4px 10px;display:flex;flex-direction:column;gap:1px;flex:1;min-height:0;min-width:0;overflow:auto}
+.nav button{
+  display:flex;align-items:baseline;gap:9px;width:100%;text-align:left;
+  padding:7px 10px;border-radius:6px;color:var(--ink-2);
+  border-left:2px solid transparent;transition:background .12s,color .12s;
+}
+.nav button .dot{
+  width:5px;height:5px;border-radius:50%;background:var(--rule);flex:none;
+  transform:translateY(-2px);transition:background .12s,transform .12s;
+}
+.nav button .nm{font-size:13.5px}
+.nav button:hover{background:var(--accent-wash-2);color:var(--ink)}
+.nav button[aria-current="true"]{background:var(--accent-wash);color:var(--ink);font-weight:600}
+.nav button[aria-current="true"] .dot{background:var(--accent);transform:translateY(-2px) scale(1.5)}
+.sidefoot{padding:14px 20px 18px;border-top:1px solid var(--rule-2)}
+.sidefoot p{font-size:10.5px;line-height:1.5;color:var(--muted);margin:0 0 6px}
+.sidefoot .meta{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.themebtn{
+  display:inline-flex;align-items:center;gap:7px;margin-top:10px;
+  border:1px solid var(--rule);border-radius:999px;padding:5px 11px 5px 8px;
+  font-size:11px;color:var(--ink-2);background:var(--card-2);
+}
+.themebtn:hover{border-color:var(--accent);color:var(--accent)}
+.themebtn svg{width:13px;height:13px;flex:none}
+
+/* ── main ───────────────────────────────────────────────────────────── */
+.main{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.mhead{padding:26px 32px 18px;border-bottom:1px solid var(--rule);background:var(--paper)}
+.eyebrow{
+  font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--accent);display:block;margin-bottom:9px;
+}
+h1{
+  font-size:clamp(20px,2.3vw,29px);line-height:1.16;letter-spacing:-.022em;
+  font-weight:600;margin:0;max-width:30ch;
+}
+.lede{margin-top:9px;font-size:14px;color:var(--muted);max-width:76ch}
+.lede strong{color:var(--ink-2);font-weight:600}
+.body{flex:1;min-height:0;overflow:auto;padding:22px 32px 40px}
+.screen[hidden]{display:none}
+
+/* ── primitives ─────────────────────────────────────────────────────── */
+.card{background:var(--card);border:1px solid var(--rule);border-radius:10px;padding:16px 18px;box-shadow:var(--shadow)}
+.card > h3,.panelttl{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--muted);margin:0 0 11px;font-weight:500;
+}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:1fr 1fr}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g-7-5{grid-template-columns:7fr 5fr}
+.g-5-7{grid-template-columns:5fr 7fr}
+.tag{
+  display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.06em;
+  padding:2px 6px;border-radius:4px;border:1px solid var(--rule);color:var(--muted);
+  white-space:nowrap;
+}
+.tag.acc{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:var(--accent-wash-2)}
+.tag.no{color:var(--deny);border-color:color-mix(in srgb,var(--deny) 40%,transparent);background:var(--deny-wash)}
+.tag.t2{color:var(--t2);border-color:color-mix(in srgb,var(--t2) 40%,transparent);background:var(--t2-wash-2)}
+.quote{
+  font-family:var(--serif);font-style:italic;font-size:15.5px;line-height:1.48;
+  color:var(--ink);border-left:2px solid var(--accent);padding-left:14px;margin:0;
+}
+.quote.strong{font-size:17px}
+.quote cite{display:block;font-family:var(--mono);font-style:normal;font-size:10px;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-top:9px}
+.facts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.facts li{position:relative;padding-left:15px;font-size:13px;color:var(--ink-2);line-height:1.52}
+.facts li::before{content:"";position:absolute;left:0;top:8px;width:4px;height:4px;border-radius:50%;background:var(--accent)}
+.facts li .tag{vertical-align:baseline}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th{
+  text-align:left;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);font-weight:500;padding:0 10px 7px 0;border-bottom:1px solid var(--rule);
+}
+td{padding:7px 10px 7px 0;border-bottom:1px solid var(--rule-2);vertical-align:top;color:var(--ink-2)}
+tr:last-child td{border-bottom:0}
+td.k{font-family:var(--mono);font-size:11.5px;color:var(--ink);white-space:nowrap}
+.scroll-x{overflow-x:auto;overflow-y:hidden}
+
+/* ── pipeline ───────────────────────────────────────────────────────── */
+.trackctl{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:8px;overflow:hidden;background:var(--card)}
+.seg button{padding:6px 13px;font-size:12px;color:var(--muted);border-right:1px solid var(--rule-2)}
+.seg button:last-child{border-right:0}
+.seg button:hover{color:var(--ink);background:var(--accent-wash-2)}
+.seg button[aria-pressed="true"]{color:var(--ink);font-weight:600;background:var(--accent-wash)}
+.seg button[data-track="t2"][aria-pressed="true"]{background:var(--t2-wash)}
+.legend{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.02em}
+
+.pipewrap{border:1px solid var(--rule);border-radius:10px;background:var(--card);box-shadow:var(--shadow)}
+.pipewrap .scroll-x{padding:4px 10px 8px}
+svg.pipe{display:block;width:1020px;height:326px}
+svg.pipe text{font-family:var(--mono);fill:var(--ink)}
+.nlabel{font-size:11px}
+.nsub{font-size:9px;fill:var(--muted);letter-spacing:.06em}
+.rowlabel{font-size:9px;letter-spacing:.12em;text-transform:uppercase;fill:var(--muted)}
+.hashglyph{font-size:8px;fill:var(--muted);opacity:.55}
+.conn{stroke:var(--line);stroke-width:1.2;fill:none}
+.nrect{fill:var(--card);stroke:var(--line);stroke-width:1}
+.pnode{cursor:pointer}
+.pnode .hit{fill:transparent}
+.pnode:hover .nrect{stroke:var(--accent);stroke-width:1.4}
+.pnode:hover .nlabel{fill:var(--accent)}
+.pnode .ring{fill:none;stroke:var(--accent);stroke-width:2;opacity:0;rx:11}
+.pnode:focus{outline:none}
+.pnode:focus .ring,.pnode:focus-visible .ring{opacity:1}
+.pnode[aria-pressed="true"] .nrect{stroke:var(--accent);stroke-width:1.8;fill:var(--accent-wash)}
+.pnode[aria-pressed="true"] .nlabel{fill:var(--accent);font-weight:600}
+.branch .nrect{stroke-dasharray:3 2.5;stroke:var(--line)}
+.input .nrect{fill:var(--card-2);stroke:var(--rule)}
+.input .nlabel{fill:var(--muted)}
+.t1pill .nrect{stroke:var(--accent);stroke-width:1.5;fill:var(--accent-wash-2)}
+.t1pill .nlabel{fill:var(--accent)}
+.t2band{fill:var(--t2-wash-2)}
+.t2 .nrect{stroke:var(--t2)}
+.t2term .nrect{stroke:var(--t2);stroke-width:1.5;fill:var(--t2-wash-2)}
+.t2 .pnode:hover .nrect,.t2 .pnode[aria-pressed="true"] .nrect{stroke:var(--t2)}
+.t2 .pnode:hover .nlabel,.t2 .pnode[aria-pressed="true"] .nlabel{fill:var(--t2)}
+.t2 .pnode .ring{stroke:var(--t2)}
+.t2line{stroke:var(--t2)}
+.t1line{stroke:var(--accent)}
+.lbl-t1{font-size:9px;letter-spacing:.14em;text-transform:uppercase;fill:var(--accent)}
+.lbl-t2{font-size:9px;letter-spacing:.1em;fill:var(--t2)}
+#ah-ink path{fill:var(--line)}
+#ah-t1 path{fill:var(--accent)}
+#ah-t2 path{fill:var(--t2)}
+svg.pipe .limb{transition:opacity .22s}
+svg.pipe[data-track="t1"] .limb-t2{opacity:.14}
+svg.pipe[data-track="t2"] .limb-t1{opacity:.14}
+svg.pipe[data-track="t1"] .limb-t2 .pnode,svg.pipe[data-track="t2"] .limb-t1 .pnode{pointer-events:none}
+
+.rolepanel{min-height:132px}
+.rolepanel .rname{font-family:var(--mono);font-size:15px;color:var(--accent);letter-spacing:-.01em}
+.rolepanel.is-t2 .rname{color:var(--t2)}
+.rolepanel .rwhere{margin-left:8px}
+.rolepanel .rrole{margin-top:9px;font-size:14.5px;line-height:1.45;color:var(--ink)}
+.rolepanel .rhint{font-size:13px;color:var(--muted);line-height:1.5}
+.rolepanel kbd{font-family:var(--mono);font-size:10.5px;border:1px solid var(--rule);border-bottom-width:2px;
+  border-radius:4px;padding:1px 4px;color:var(--ink-2)}
+
+/* ── layers ─────────────────────────────────────────────────────────── */
+.stackwrap{position:relative;padding-left:24px}
+.rail{position:absolute;left:6px;top:0;width:3px;border-radius:2px;background:var(--accent);
+  opacity:0;transition:top .18s,height .18s,opacity .18s}
+.rail.on{opacity:1}
+.stack{display:flex;flex-direction:column;gap:3px}
+.lrow{
+  display:grid;grid-template-columns:28px minmax(186px,1.25fr) minmax(0,1.75fr) 92px;
+  align-items:center;gap:12px;text-align:left;
+  border:1px solid var(--rule);border-radius:8px;background:var(--card);
+  padding:8px 12px;transition:background .15s,border-color .15s,opacity .15s;
+}
+.lrow:hover{border-color:var(--accent)}
+.lnum{font-family:var(--mono);font-size:15px;color:var(--muted);text-align:center}
+.lmods{font-family:var(--mono);font-size:12px;color:var(--ink)}
+.lrole{font-size:12.5px;color:var(--muted)}
+.lstate{justify-self:end}
+.lstate .tag{font-size:9.5px}
+.lrow[data-state="sel"]{border-color:var(--accent);background:var(--accent-wash);border-width:1px;box-shadow:inset 0 0 0 1px var(--accent)}
+.lrow[data-state="sel"] .lnum{color:var(--accent)}
+.lrow[data-state="ok"]{border-color:color-mix(in srgb,var(--accent) 45%,var(--rule));background:var(--accent-wash-2)}
+.lrow[data-state="ok"] .lnum{color:var(--accent)}
+.lrow[data-state="no"]{opacity:.6;background:var(--card-2);border-style:dashed}
+.lrow[data-state="no"] .lmods,.lrow[data-state="no"] .lnum{color:var(--muted)}
+.verdict{margin-top:12px;font-size:13.5px;line-height:1.5;color:var(--ink);min-height:40px}
+.verdict .mono{font-size:12.5px}
+.verdict .peer{display:block;margin-top:5px;font-size:12.5px;color:var(--muted)}
+.axis{font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);
+  display:flex;justify-content:space-between;margin-bottom:7px}
+
+/* ── contracts ──────────────────────────────────────────────────────── */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--rule);margin-bottom:16px;flex-wrap:wrap}
+.tabs button{
+  padding:8px 14px;font-family:var(--mono);font-size:12.5px;color:var(--muted);
+  border-bottom:2px solid transparent;margin-bottom:-1px;
+}
+.tabs button:hover{color:var(--ink)}
+.tabs button[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.vec{display:flex;flex-direction:column;gap:7px;margin-top:4px}
+.vrow{display:grid;grid-template-columns:138px 1fr 38px;align-items:center;gap:11px}
+.vname{font-family:var(--mono);font-size:11px;color:var(--ink-2);text-align:right}
+.vbar{height:14px;border:1px solid var(--rule);border-radius:3px;background:var(--card-2);overflow:hidden}
+.vbar span{display:block;height:100%;background:var(--accent);opacity:.75}
+.vrow.pen .vbar span{background:var(--deny)}
+.vval{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.illus{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.nototal{margin-top:12px;padding-top:11px;border-top:1px dashed var(--rule);font-size:13px;color:var(--ink-2)}
+
+/* ── determinism ────────────────────────────────────────────────────── */
+.cmp{display:flex;flex-direction:column;gap:9px;margin-top:4px}
+.cmprow{display:grid;grid-template-columns:150px 1fr;align-items:center;gap:12px;
+  border:1px solid var(--rule);border-radius:7px;padding:9px 12px;background:var(--card-2)}
+.cmprow .what{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.cmprow .val{font-size:13px;display:flex;align-items:center;gap:8px}
+.cmprow.diff{border-color:color-mix(in srgb,var(--deny) 45%,var(--rule));background:var(--deny-wash)}
+.cmprow .fig{font-family:var(--mono);font-size:17px;color:var(--deny)}
+.eq{font-family:var(--mono);font-size:13px;color:var(--accent)}
+ol.mech{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:7px}
+ol.mech li{font-size:13px;color:var(--ink-2);line-height:1.45}
+ol.mech li::marker{font-family:var(--mono);font-size:11px;color:var(--accent)}
+.cmd{font-family:var(--mono);font-size:12px;background:var(--card-2);border:1px solid var(--rule);
+  border-radius:6px;padding:8px 11px;color:var(--ink);overflow-x:auto;white-space:nowrap}
+
+/* ── privacy ────────────────────────────────────────────────────────── */
+.boundary{display:grid;grid-template-columns:1fr auto 1fr;align-items:stretch;gap:0}
+.bside{border:1px solid var(--rule);border-radius:9px;padding:13px;background:var(--card-2)}
+.bside h4{margin:0 0 7px;font-family:var(--mono);font-size:11.5px;color:var(--ink);font-weight:500}
+.bside p{font-size:12px;color:var(--muted);margin:0}
+.bgate{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 10px;min-width:118px}
+.bgate .gl{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);text-align:center}
+.bgate .bar{width:3px;flex:1;background:repeating-linear-gradient(to bottom,var(--accent) 0 5px,transparent 5px 9px);margin:7px 0;min-height:22px}
+.gates{display:flex;align-items:center;gap:0;flex-wrap:wrap}
+.gatebox{border:1px solid var(--rule);border-radius:8px;padding:9px 12px;background:var(--card-2);min-width:0}
+.gatebox .gn{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);display:block;margin-bottom:3px}
+.gatebox .gt{font-size:12.5px;color:var(--ink)}
+.garrow{color:var(--muted);padding:0 9px;font-size:13px}
+.deny-card{border-color:color-mix(in srgb,var(--deny) 42%,var(--rule));background:
+  linear-gradient(0deg,var(--deny-wash),var(--deny-wash)),var(--card)}
+.deny-card > h3{color:var(--deny)}
+.deny-card .quote{border-left-color:var(--deny)}
+.refuse{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.refuse li{display:flex;gap:8px;font-size:12.5px;color:var(--ink-2);align-items:baseline}
+.refuse .x{font-family:var(--mono);color:var(--deny);font-size:12px;flex:none}
+.triple{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.triple span{font-family:var(--mono);font-size:11px;border:1px solid var(--rule);border-radius:5px;
+  padding:4px 8px;background:var(--card-2);color:var(--ink-2)}
+.chain{font-family:var(--mono);font-size:12px;color:var(--ink);letter-spacing:.01em}
+.xlink{font-size:12px;color:var(--accent);border-bottom:1px solid var(--rule)}
+.xlink{border-bottom-color:color-mix(in srgb,var(--accent) 40%,transparent)}
+.xlink:hover{border-bottom-color:var(--accent)}
+
+/* ── open questions ─────────────────────────────────────────────────── */
+.oq{display:flex;flex-direction:column;gap:2px}
+.oqrow{display:grid;grid-template-columns:72px 1fr;gap:14px;align-items:baseline;
+  padding:11px 12px;border-bottom:1px solid var(--rule-2)}
+.oqrow:last-child{border-bottom:0}
+.oqrow:hover{background:var(--accent-wash-2)}
+.oqid{font-family:var(--mono);font-size:10.5px;color:var(--muted);letter-spacing:.04em}
+.oqid.none{opacity:.45}
+.oqt{font-size:13.5px;color:var(--ink-2);line-height:1.5;max-width:90ch}
+.oqt b{color:var(--ink);font-weight:600}
+
+/* ── responsive ─────────────────────────────────────────────────────── */
+@media (max-width:900px){
+  body{overflow:auto}
+  .app{grid-template-columns:1fr;height:auto;min-height:100%}
+  .side{border-right:0;border-bottom:1px solid var(--rule)}
+  .brand{padding:14px 16px 8px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;order:0}
+  .brand .themebtn{margin-top:0}
+  .nav{
+    order:2;flex-direction:row;overflow-x:auto;padding:8px 10px;gap:4px;scrollbar-width:none;
+    position:sticky;top:0;z-index:5;background:var(--card);border-top:1px solid var(--rule-2);
+  }
+  .nav::-webkit-scrollbar{display:none}
+  .nav button{width:auto;white-space:nowrap;border:1px solid var(--rule);border-left-width:1px;padding:6px 11px}
+  .sidefoot{order:1;border-top:0;padding:0 16px 10px}
+  .sidefoot .meta{margin-top:2px}
+  .mhead{padding:20px 16px 14px}
+  .body{padding:16px 16px 48px;overflow:visible}
+  .g2,.g3,.g-7-5,.g-5-7{grid-template-columns:1fr}
+  .boundary{grid-template-columns:1fr}
+  .bgate{min-width:0;padding:8px 0;flex-direction:row;gap:10px}
+  .bgate .bar{width:100%;height:3px;flex:1;min-height:0;margin:0;
+    background:repeating-linear-gradient(to right,var(--accent) 0 5px,transparent 5px 9px)}
+  .lrow{grid-template-columns:26px minmax(0,1fr) auto;row-gap:4px;align-items:start}
+  .lnum{grid-column:1;grid-row:1/3;align-self:center}
+  .lmods{grid-column:2;grid-row:1}
+  .lstate{grid-column:3;grid-row:1}
+  .lrole{grid-column:2/4;grid-row:2;font-size:12px}
+  .vrow{grid-template-columns:118px 1fr 34px;gap:8px}
+  .vname{font-size:10px}
+  .cmprow{grid-template-columns:1fr;gap:5px}
+  .oqrow{grid-template-columns:1fr;gap:5px}
+  h1{max-width:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ══ sidebar ══════════════════════════════════════════════════ -->
+  <aside class="side">
+    <div class="brand">
+      <div>
+        <div class="repo">mva-research</div>
+        <div class="what">architecture</div>
+      </div>
+      <button class="themebtn" id="themebtn" aria-label="Switch to dark theme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6"/>
+        </svg>
+        <span id="themelbl">Light</span>
+      </button>
+    </div>
+    <nav class="nav" id="nav" aria-label="Screens">
+      <button data-screen="pipeline"><span class="dot"></span><span class="nm">Pipeline</span></button>
+      <button data-screen="layers"><span class="dot"></span><span class="nm">Layers</span></button>
+      <button data-screen="contracts"><span class="dot"></span><span class="nm">Contracts</span></button>
+      <button data-screen="adapters"><span class="dot"></span><span class="nm">Adapters</span></button>
+      <button data-screen="determinism"><span class="dot"></span><span class="nm">Determinism</span></button>
+      <button data-screen="privacy"><span class="dot"></span><span class="nm">Privacy</span></button>
+      <button data-screen="open"><span class="dot"></span><span class="nm">Open questions</span></button>
+    </nav>
+    <div class="sidefoot">
+      <p>A provenance-first pipeline for rare-disease variant prioritisation and mechanism-grounded drug repurposing. BUB1B-related Mosaic Variegated Aneuploidy.</p>
+      <div class="meta">MVA Hackathon 2026 · Sage Bionetworks</div>
+    </div>
+  </aside>
+
+  <!-- ══ main ═════════════════════════════════════════════════════ -->
+  <main class="main">
+    <header class="mhead">
+      <span class="eyebrow" id="eyebrow">topology</span>
+      <h1 id="htitle">One pipeline, two exits.</h1>
+      <p class="lede" id="hlede">Track 1 leaves after ranking. Track 2 continues from the ranked pair.</p>
+    </header>
+
+    <div class="body" id="body">
+
+      <!-- ── 1 · PIPELINE ──────────────────────────────────────── -->
+      <section class="screen" id="s-pipeline">
+        <div class="trackctl">
+          <div class="seg" role="group" aria-label="Highlight a track">
+            <button data-track="both" aria-pressed="true">Both tracks</button>
+            <button data-track="t1" aria-pressed="false">Track 1</button>
+            <button data-track="t2" aria-pressed="false">Track 2</button>
+          </div>
+          <span class="legend"># = one hashed artifact with provenance</span>
+        </div>
+
+        <div class="pipewrap">
+          <div class="scroll-x">
+            <svg class="pipe" id="pipe" viewBox="0 0 1020 326" data-track="both" role="group"
+                 aria-label="Pipeline schematic: a shared spine from VCF through rank, a phenotype branch joining at rank, then two exits — Track 1 to submission and dossier, Track 2 continuing through mechanism, intervention, direction check, safety filter to the Track 2 report.">
+              <defs>
+                <marker id="ah-ink" viewBox="0 0 8 8" refX="7.4" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0.7 L7.4,4 L0,7.3 Z"/></marker>
+                <marker id="ah-t1" viewBox="0 0 8 8" refX="7.4" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0.7 L7.4,4 L0,7.3 Z"/></marker>
+                <marker id="ah-t2" viewBox="0 0 8 8" refX="7.4" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0.7 L7.4,4 L0,7.3 Z"/></marker>
+              </defs>
+
+              <!-- Track 2 band -->
+              <g class="limb limb-t2">
+                <rect class="t2band" x="14" y="200" width="992" height="116" rx="10"/>
+                <text class="lbl-t2 rowlabel" x="28" y="220">TRACK 2 · from the ranked pair</text>
+              </g>
+
+              <!-- shared spine -->
+              <g class="limb limb-shared">
+                <text class="nsub" x="28" y="62">input</text>
+                <g class="input">
+                  <rect class="nrect" x="28" y="71" width="44" height="30" rx="8"/>
+                  <text class="nlabel" x="50" y="90.5" text-anchor="middle">VCF</text>
+                </g>
+
+                <line class="conn" x1="73" y1="86" x2="94" y2="86" marker-end="url(#ah-ink)"/>
+                <text class="hashglyph" x="84" y="80" text-anchor="middle">#</text>
+                <g class="pnode" data-stage="ingest" tabindex="0" role="button" aria-pressed="false" aria-label="ingest">
+                  <rect class="hit" x="86" y="63" width="84" height="46"/>
+                  <rect class="ring" x="92" y="67" width="72" height="38" rx="11"/>
+                  <rect class="nrect" x="96" y="71" width="64" height="30" rx="8"/>
+                  <text class="nlabel" x="128" y="90.5" text-anchor="middle">ingest</text>
+                </g>
+
+                <line class="conn" x1="161" y1="86" x2="182" y2="86" marker-end="url(#ah-ink)"/>
+                <text class="hashglyph" x="172" y="80" text-anchor="middle">#</text>
+                <g class="pnode" data-stage="normalise" tabindex="0" role="button" aria-pressed="false" aria-label="normalise">
+                  <rect class="hit" x="174" y="63" width="103" height="46"/>
+                  <rect class="ring" x="180" y="67" width="91" height="38" rx="11"/>
+                  <rect class="nrect" x="184" y="71" width="83" height="30" rx="8"/>
+                  <text class="nlabel" x="225.5" y="90.5" text-anchor="middle">normalise</text>
+                </g>
+
+                <line class="conn" x1="268" y1="86" x2="289" y2="86" marker-end="url(#ah-ink)"/>
+                <text class="hashglyph" x="279" y="80" text-anchor="middle">#</text>
+                <g class="pnode" data-stage="QC" tabindex="0" role="button" aria-pressed="false" aria-label="QC">
+                  <rect class="hit" x="281" y="63" width="64" height="46"/>
+                  <rect class="ring" x="287" y="67" width="52" height="38" rx="11"/>
+                  <rect class="nrect" x="291" y="71" width="44" height="30" rx="8"/>
+                  <text class="nlabel" x="313" y="90.5" text-anchor="middle">QC</text>
+                </g>
+
+                <line class="conn" x1="336" y1="86" x2="357" y2="86" marker-end="url(#ah-ink)"/>
+                <text class="hashglyph" x="347" y="80" text-anchor="middle">#</text>
+                <g class="pnode" data-stage="annotate" tabindex="0" role="button" aria-pressed="false" aria-label="annotate">
+                  <rect class="hit" x="349" y="63" width="97" height="46"/>
+                  <rect class="ring" x="355" y="67" width="85" height="38" rx="11"/>
+                  <rect class="nrect" x="359" y="71" width="77" height="30" rx="8"/>
+                  <text class="nlabel" x="397.5" y="90.5" text-anchor="middle">annotate</text>
+                </g>
+
+                <line class="conn" x1="437" y1="86" x2="458" y2="86" marker-end="url(#ah-ink)"/>
+                <text class="hashglyph" x="448" y="80" text-anchor="middle">#</text>
+                <g class="pnode" data-stage="select" tabindex="0" role="button" aria-pressed="false" aria-label="select">
+                  <rect class="hit" x="450" y="63" width="84" height="46"/>
+                  <rect class="ring" x="456" y="67" width="72" height="38" rx="11"/>
+                  <rect class="nrect" x="460" y="71" width="64" height="30" rx="8"/>
+                  <text class="nlabel" x="492" y="90.5" text-anchor="middle">select</text>
+                </g>
+
+                <line class="conn" x1="525" y1="86" x2="546" y2="86" marker-end="url(#ah-ink)"/>
+                <text class="hashglyph" x="536" y="80" text-anchor="middle">#</text>
+                <g class="pnode" data-stage="pair" tabindex="0" role="button" aria-pressed="false" aria-label="pair">
+                  <rect class="hit" x="538" y="63" width="70" height="46"/>
+                  <rect class="ring" x="544" y="67" width="58" height="38" rx="11"/>
+                  <rect class="nrect" x="548" y="71" width="50" height="30" rx="8"/>
+                  <text class="nlabel" x="573" y="90.5" text-anchor="middle">pair</text>
+                </g>
+
+                <line class="conn" x1="599" y1="86" x2="620" y2="86" marker-end="url(#ah-ink)"/>
+                <text class="hashglyph" x="610" y="80" text-anchor="middle">#</text>
+                <g class="pnode" data-stage="score" tabindex="0" role="button" aria-pressed="false" aria-label="score">
+                  <rect class="hit" x="612" y="63" width="77" height="46"/>
+                  <rect class="ring" x="618" y="67" width="65" height="38" rx="11"/>
+                  <rect class="nrect" x="622" y="71" width="57" height="30" rx="8"/>
+                  <text class="nlabel" x="650.5" y="90.5" text-anchor="middle">score</text>
+                </g>
+
+                <line class="conn" x1="680" y1="86" x2="701" y2="86" marker-end="url(#ah-ink)"/>
+                <text class="hashglyph" x="691" y="80" text-anchor="middle">#</text>
+                <g class="pnode" data-stage="rank" tabindex="0" role="button" aria-pressed="false" aria-label="rank">
+                  <rect class="hit" x="693" y="63" width="70" height="46"/>
+                  <rect class="ring" x="699" y="67" width="58" height="38" rx="11"/>
+                  <rect class="nrect" x="703" y="71" width="50" height="30" rx="8"/>
+                  <text class="nlabel" x="728" y="90.5" text-anchor="middle">rank</text>
+                </g>
+
+                <!-- phenotype branch, joining at rank -->
+                <text class="rowlabel" x="28" y="161">phenotype branch</text>
+                <g class="branch">
+                  <rect class="nrect" x="184" y="143" width="83" height="30" rx="8"/>
+                  <text class="nlabel" x="225.5" y="162.5" text-anchor="middle">phenotype</text>
+                  <line class="conn" x1="268" y1="158" x2="289" y2="158" marker-end="url(#ah-ink)"/>
+                  <rect class="nrect" x="291" y="143" width="70" height="30" rx="8"/>
+                  <text class="nlabel" x="326" y="162.5" text-anchor="middle">profile</text>
+                  <line class="conn" x1="362" y1="158" x2="383" y2="158" marker-end="url(#ah-ink)"/>
+                  <rect class="nrect" x="385" y="143" width="156" height="30" rx="8"/>
+                  <text class="nlabel" x="463" y="162.5" text-anchor="middle">gene-phenotype match</text>
+                </g>
+                <path class="conn" d="M543,158 H712 A16,16 0 0 0 728,142 V108" marker-end="url(#ah-ink)"/>
+                <text class="rowlabel" x="636" y="150" text-anchor="middle">joins at rank</text>
+
+                <!-- fork -->
+                <line class="conn" x1="754" y1="86" x2="780" y2="86"/>
+                <path class="conn" d="M790,78 L798,86 L790,94 L782,86 Z" fill="var(--card)"/>
+                <text class="rowlabel" x="774" y="60" text-anchor="end">ranked pair</text>
+              </g>
+
+              <!-- Track 1 exit -->
+              <g class="limb limb-t1">
+                <path class="conn t1line" d="M798,86 H806 Q820,86 820,72 V60 Q820,46 834,46 H838" marker-end="url(#ah-t1)"/>
+                <text class="lbl-t1" x="846" y="24">TRACK 1 EXIT</text>
+                <g class="t1pill">
+                  <rect class="nrect" x="842" y="31" width="158" height="30" rx="8"/>
+                  <text class="nlabel" x="921" y="50.5" text-anchor="middle">submission + dossier</text>
+                </g>
+              </g>
+
+              <!-- Track 2 limb -->
+              <g class="limb limb-t2 t2">
+                <path class="conn t2line" d="M790,94 V122" marker-end="url(#ah-t2)"/>
+                <text class="lbl-t2" x="804" y="126">continues below</text>
+
+                <g class="pnode" data-stage="mechanism" tabindex="0" role="button" aria-pressed="false" aria-label="mechanism">
+                  <rect class="hit" x="18" y="239" width="103" height="46"/>
+                  <rect class="ring" x="24" y="243" width="91" height="38" rx="11"/>
+                  <rect class="nrect" x="28" y="247" width="83" height="30" rx="8"/>
+                  <text class="nlabel" x="69.5" y="266.5" text-anchor="middle">mechanism</text>
+                </g>
+                <line class="conn t2line" x1="112" y1="262" x2="165" y2="262" marker-end="url(#ah-t2)"/>
+                <text class="hashglyph" x="138" y="256" text-anchor="middle">#</text>
+
+                <g class="pnode" data-stage="intervention" tabindex="0" role="button" aria-pressed="false" aria-label="intervention">
+                  <rect class="hit" x="157" y="239" width="123" height="46"/>
+                  <rect class="ring" x="163" y="243" width="111" height="38" rx="11"/>
+                  <rect class="nrect" x="167" y="247" width="103" height="30" rx="8"/>
+                  <text class="nlabel" x="218.5" y="266.5" text-anchor="middle">intervention</text>
+                </g>
+                <line class="conn t2line" x1="271" y1="262" x2="324" y2="262" marker-end="url(#ah-t2)"/>
+                <text class="hashglyph" x="297" y="256" text-anchor="middle">#</text>
+
+                <g class="pnode" data-stage="direction check" tabindex="0" role="button" aria-pressed="false" aria-label="direction check">
+                  <rect class="hit" x="316" y="239" width="143" height="46"/>
+                  <rect class="ring" x="322" y="243" width="131" height="38" rx="11"/>
+                  <rect class="nrect" x="326" y="247" width="123" height="30" rx="8"/>
+                  <text class="nlabel" x="387.5" y="266.5" text-anchor="middle">direction check</text>
+                </g>
+                <line class="conn t2line" x1="450" y1="262" x2="503" y2="262" marker-end="url(#ah-t2)"/>
+                <text class="hashglyph" x="476" y="256" text-anchor="middle">#</text>
+
+                <g class="pnode" data-stage="safety filter" tabindex="0" role="button" aria-pressed="false" aria-label="safety filter">
+                  <rect class="hit" x="495" y="239" width="130" height="46"/>
+                  <rect class="ring" x="501" y="243" width="118" height="38" rx="11"/>
+                  <rect class="nrect" x="505" y="247" width="110" height="30" rx="8"/>
+                  <text class="nlabel" x="560" y="266.5" text-anchor="middle">safety filter</text>
+                </g>
+                <line class="conn t2line" x1="616" y1="262" x2="669" y2="262" marker-end="url(#ah-t2)"/>
+                <text class="hashglyph" x="642" y="256" text-anchor="middle">#</text>
+
+                <g class="t2term">
+                  <rect class="nrect" x="671" y="247" width="117" height="30" rx="8"/>
+                  <text class="nlabel" x="729.5" y="266.5" text-anchor="middle">Track 2 report</text>
+                </g>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <div class="grid g-7-5" style="margin-top:14px">
+          <div class="card rolepanel" id="rolepanel" aria-live="polite">
+            <h3>Stage role</h3>
+            <div id="roleout">
+              <p class="rhint">Click a stage, or Tab to one and press <kbd>Enter</kbd>, to read its role. Twelve stages carry a role line.</p>
+              <p class="rhint">Both tracks run the same spine, so highlighting a track changes only what happens after <code>rank</code>. Track 1 leaves at the ranked pair; Track 2 keeps going.</p>
+            </div>
+          </div>
+          <div class="grid" style="gap:14px">
+            <div class="card">
+              <h3>Holds on every arrow</h3>
+              <ul class="facts">
+                <li>Every arrow writes a hashed artifact with provenance.</li>
+                <li>Every claim along the way becomes an <code>EvidenceItem</code>.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>Why one codebase</h3>
+              <blockquote class="quote">There is no separate Track 2 codebase, because a drug hypothesis that is not anchored to the ranked variant pair is not grounded in anything.</blockquote>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 2 · LAYERS ────────────────────────────────────────── -->
+      <section class="screen" id="s-layers" hidden>
+        <div class="grid g-7-5">
+          <div class="card">
+            <h3>Nine layers · select one to see what it may import</h3>
+            <div class="axis"><span>8 · top</span><span>height = import permission</span><span>0 · bottom</span></div>
+            <div class="stackwrap">
+              <div class="rail" id="rail"></div>
+              <div class="stack" id="stack"></div>
+            </div>
+            <div class="verdict" id="verdict">Imports go down, never up. Select a layer to mark every layer it may import, and every layer it may not.</div>
+          </div>
+
+          <div class="grid" style="gap:14px;align-content:start">
+            <div class="card">
+              <h3>Enforcement</h3>
+              <ul class="facts">
+                <li>Peer stages never import each other. They compose only in <code>src/mva/pipeline.py</code> <span class="tag acc">GP-03</span></li>
+                <li>Both rules are enforced by AST-walking tests in <code>tests/unit/test_architecture.py</code>.</li>
+                <li>Those failure messages carry their own remediation, because the reader is often an agent whose only view of the rule is that string.</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>What the test caught</h3>
+              <blockquote class="quote">This layering was not free: the first run of the layering test caught <code>config</code> importing <code>determinism</code>, which is why foundation utilities sit <em>below</em> config rather than above it.</blockquote>
+            </div>
+            <div class="card">
+              <h3>Layer 3 is the interesting one</h3>
+              <p style="font-size:13px;color:var(--ink-2)"><code>privacy</code> is cross-cutting, so any stage can call it, while it stays structurally unable to import upward.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 3 · CONTRACTS ─────────────────────────────────────── -->
+      <section class="screen" id="s-contracts" hidden>
+        <div class="tabs" role="tablist" aria-label="Contracts">
+          <button role="tab" id="tab-vr" aria-controls="p-vr" aria-selected="true">VariantRecord</button>
+          <button role="tab" id="tab-ei" aria-controls="p-ei" aria-selected="false">EvidenceItem</button>
+          <button role="tab" id="tab-cp" aria-controls="p-cp" aria-selected="false">CandidatePair</button>
+        </div>
+
+        <div class="grid g-7-5">
+          <div>
+            <div class="card" role="tabpanel" id="p-vr" aria-labelledby="tab-vr">
+              <h3>VariantRecord</h3>
+              <ul class="facts">
+                <li>A build-anchored coordinate.</li>
+                <li>A genotype with its analytical evidence.</li>
+                <li><em>Lists</em> of transcript consequences and population frequencies.</li>
+              </ul>
+              <p style="margin-top:12px;font-size:13px;color:var(--ink-2)">Immutable and additive: annotation returns a new record, so ingested and annotated are separately hashable artifacts.</p>
+            </div>
+
+            <div class="card" role="tabpanel" id="p-ei" aria-labelledby="tab-ei" hidden>
+              <h3>EvidenceItem</h3>
+              <p style="font-size:13px;color:var(--ink-2)">One structured, attributable, falsifiable claim, with mandatory <code>limitations</code>.</p>
+              <ul class="facts" style="margin-top:10px">
+                <li>Content-derived IDs mean the same conclusion drawn twice is one piece of evidence, so the ID is stable across runs.</li>
+                <li>The <em>record</em> is not byte-identical across runs under a real clock: <code>timestamp</code> is excluded from the ID but is still written to <code>evidence_items.parquet</code>.</li>
+              </ul>
+              <p style="margin-top:12px"><span class="tag">docs/handoff-integrity.md §4</span></p>
+            </div>
+
+            <div class="card" role="tabpanel" id="p-cp" aria-labelledby="tab-cp" hidden>
+              <h3>CandidatePair · the score is a vector, not a scalar</h3>
+              <p style="font-size:13px;color:var(--ink-2)">The Track 1 unit of prediction. Eight component scores stay visible into the report, so &ldquo;why is this ranked first?&rdquo; is answerable without re-running anything.</p>
+              <div class="illus" style="margin-top:14px">
+                <span class="tag no">illustrative</span>
+                <span class="legend">Placeholder values. Not from any run.</span>
+              </div>
+              <div class="vec">
+                <div class="vrow"><span class="vname">analytical validity</span><span class="vbar"><span style="width:82%"></span></span><span class="vval">0.82</span></div>
+                <div class="vrow"><span class="vname">rarity</span><span class="vbar"><span style="width:95%"></span></span><span class="vval">0.95</span></div>
+                <div class="vrow"><span class="vname">consequence</span><span class="vbar"><span style="width:71%"></span></span><span class="vval">0.71</span></div>
+                <div class="vrow"><span class="vname">inheritance</span><span class="vbar"><span style="width:40%"></span></span><span class="vval">0.40</span></div>
+                <div class="vrow"><span class="vname">phenotype</span><span class="vbar"><span style="width:63%"></span></span><span class="vval">0.63</span></div>
+                <div class="vrow"><span class="vname">mechanism</span><span class="vbar"><span style="width:55%"></span></span><span class="vval">0.55</span></div>
+                <div class="vrow"><span class="vname">evidence quality</span><span class="vbar"><span style="width:48%"></span></span><span class="vval">0.48</span></div>
+                <div class="vrow pen"><span class="vname">contradiction penalty</span><span class="vbar"><span style="width:12%"></span></span><span class="vval">0.12</span></div>
+              </div>
+              <p class="nototal">The eight components stay separate all the way into the report, so there is no total on this screen to show you. Ranking uses a total ordering over them: score, then genomic position.</p>
+            </div>
+          </div>
+
+          <div class="grid" style="gap:14px;align-content:start">
+            <div class="card">
+              <h3>Related principles</h3>
+              <ul class="facts">
+                <li><span class="tag acc">GP-10 / GP-17</span> No claim without an <code>EvidenceItem</code>; every item states its limitations.</li>
+                <li><span class="tag acc">GP-15</span> Phase is never assumed; <code>UNKNOWN</code> survives end to end.</li>
+                <li><span class="tag acc">GP-11</span> A genomic coordinate without a genome build is invalid.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 4 · ADAPTERS ──────────────────────────────────────── -->
+      <section class="screen" id="s-adapters" hidden>
+        <div class="grid g-7-5">
+          <div class="card">
+            <h3>Nine boundaries</h3>
+            <div class="scroll-x">
+              <table>
+                <thead><tr><th>Boundary</th><th>Today</th><th>Future</th></tr></thead>
+                <tbody>
+                  <tr><td class="k">VCF reading</td><td><code>cyvcf2</code> backend + pure-Python fallback</td><td>—</td></tr>
+                  <tr><td class="k">Normalisation</td><td>in-process trim/left-align</td><td><code>bcftools norm</code></td></tr>
+                  <tr><td class="k">Consequence</td><td>local TSV</td><td>VEP / SnpEff</td></tr>
+                  <tr><td class="k">Frequency</td><td>local TSV</td><td>gnomAD sites-only</td></tr>
+                  <tr><td class="k">Clinical</td><td>null adapter (returns nothing, honestly)</td><td>ClinVar release VCF</td></tr>
+                  <tr><td class="k">Splice</td><td>column on the consequence table</td><td>SpliceAI</td></tr>
+                  <tr><td class="k">Phenotype ranking</td><td>local gene&rarr;HPO index</td><td>Exomiser / LIRICAL</td></tr>
+                  <tr><td class="k">SV / CNV</td><td><span class="tag no">not implemented</span></td><td>dedicated callers</td></tr>
+                  <tr><td class="k">Drugs / literature</td><td>local TSV</td><td>DrugBank / ChEMBL / PubMed</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p style="margin-top:13px;font-size:13px;color:var(--ink-2)"><code>docs/maturity-ledger.md</code> grades each of these <code>real</code>, <code>synthetic-substitute</code> or <code>stub</code>. A synthetic substitute is never described as biologically valid. <span class="tag acc">GP-20</span></p>
+          </div>
+
+          <div class="grid" style="gap:14px;align-content:start">
+            <div class="card deny-card">
+              <h3>The hard constraint</h3>
+              <blockquote class="quote">A real remote adapter may never live on the sensitive path.</blockquote>
+              <ul class="refuse">
+                <li><span class="x">no network client</span><span>A structural test forbids importing one anywhere under <code>ingestion</code>, <code>annotation</code>, <code>phenotype</code> or <code>prioritization</code>.</span></li>
+                <li><span class="x">public only</span><span>Reference data is acquired in a separate, public-only step.</span></li>
+                <li><span class="x">never sent</span><span>Proband coordinates are never transmitted.</span></li>
+              </ul>
+            </div>
+            <div class="card">
+              <h3>Storage <span class="tag acc" style="margin-left:4px">ADR 0002</span></h3>
+              <ul class="facts">
+                <li>DuckDB for querying.</li>
+                <li>Parquet for large typed artifacts.</li>
+                <li>No server.</li>
+              </ul>
+              <p style="margin-top:13px;font-size:13px;color:var(--ink-2)">The graph structure is stored <em>relationally</em> in a <code>graph_edges</code> subject/predicate/object table.</p>
+              <p class="chain" style="margin-top:9px">variant &rarr; gene &rarr; mechanism &rarr; drug</p>
+              <div class="triple"><span>subject</span><span>predicate</span><span>object</span></div>
+              <p style="margin-top:11px;font-size:12.5px;color:var(--muted)">The domain is a graph, but the queries are shallow and the data is small. Keeping edges relational avoids a second system to secure and delete, and leaves the export path open.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 5 · DETERMINISM ───────────────────────────────────── -->
+      <section class="screen" id="s-determinism" hidden>
+        <div class="grid g-7-5">
+          <div class="grid" style="gap:14px;align-content:start">
+            <div class="card">
+              <h3>Repeat two runs, compare the hashes</h3>
+              <div class="seg" role="group" aria-label="Which clock">
+                <button id="clk-fixed" data-clock="fixed" aria-pressed="true">Fixed clock · <code style="background:none;border:0;padding:0">config.synthetic</code></button>
+                <button id="clk-real" data-clock="real" aria-pressed="false">Real case · <code style="background:none;border:0;padding:0">SystemClock</code></button>
+              </div>
+              <div class="cmp" id="cmp"></div>
+              <p id="clknote" style="margin-top:12px;font-size:12.5px;color:var(--muted)"></p>
+            </div>
+            <div class="card">
+              <h3>How it is checked</h3>
+              <div class="cmd">just demo-determinism</div>
+              <p style="margin-top:10px;font-size:13px;color:var(--ink-2)">Runs the <strong>demo</strong> twice and compares artifact hashes, skipping <code>provenance.json</code> and the DuckDB container by filename.</p>
+              <blockquote class="quote" style="margin-top:13px">Nothing has ever run it against a non-synthetic config, and pointed at one it would report a failure on the eleven time-bearing artifacts.</blockquote>
+            </div>
+          </div>
+
+          <div class="grid" style="gap:14px;align-content:start">
+            <div class="card">
+              <h3>Five mechanisms</h3>
+              <ol class="mech">
+                <li>All timestamps come from an injected <code>Clock</code>; a lint forbids <code>datetime.now()</code>.</li>
+                <li>Evidence and pair IDs are content-derived.</li>
+                <li>Every sort key is total: score, then genomic position.</li>
+                <li>Parquet writes are sorted by primary key with pinned compression and row-group size, and the <em>writer</em> embeds no timestamp of its own, though <code>evidence_items</code> carries the evidence timestamp as data.</li>
+                <li>Canonical JSON for every hash.</li>
+              </ol>
+            </div>
+            <div class="card">
+              <h3>Workflow <span class="tag acc" style="margin-left:4px">ADR 0001</span></h3>
+              <p style="font-size:13px;color:var(--ink-2)">Snakemake expresses the DAG, but the rules are thin: they shell out to <code>mva</code> subcommands so the logic stays in tested Python.</p>
+              <p style="margin-top:9px;font-size:13px;color:var(--ink-2)">The same DAG runs without Snakemake via <code>mva run all</code>, so the workflow engine is a convenience rather than a dependency.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 6 · PRIVACY ───────────────────────────────────────── -->
+      <section class="screen" id="s-privacy" hidden>
+        <div class="grid g-7-5">
+          <div class="grid" style="gap:14px;align-content:start">
+            <div class="card">
+              <h3>The asymmetry</h3>
+              <blockquote class="quote strong">The deliberate asymmetry: this repo is built to be maximally legible to an agent, <em>except</em> for the patient-data path, which is built to be illegible to one.<cite>ADR 0008</cite></blockquote>
+            </div>
+            <div class="card">
+              <h3>Workspace boundary</h3>
+              <div class="boundary">
+                <div class="bside">
+                  <h4>repo</h4>
+                  <p>Patient data never enters it.</p>
+                  <p style="margin-top:7px"><span class="tag acc">GP-40</span></p>
+                </div>
+                <div class="bgate">
+                  <span class="gl">config layer</span>
+                  <span class="bar" aria-hidden="true"></span>
+                  <span class="gl">validates first</span>
+                </div>
+                <div class="bside">
+                  <h4>external workspace</h4>
+                  <p>Validated before any file is read.</p>
+                  <p style="margin-top:7px"><span class="tag acc">ADR 0006</span></p>
+                </div>
+              </div>
+              <ul class="refuse">
+                <li><span class="x">refused</span><span>A workspace path resolving inside the repo tree, symlinks resolved.</span></li>
+                <li><span class="x">refused</span><span>A path under a cloud-synced root.</span></li>
+              </ul>
+              <p style="margin-top:11px;font-size:12.5px;color:var(--muted)">On macOS <code>~/Desktop</code> and <code>~/Documents</code> are iCloud-synced by default, which is the likeliest silent disclosure path on this platform.</p>
+            </div>
+          </div>
+
+          <div class="grid" style="gap:14px;align-content:start">
+            <div class="card">
+              <h3>Public export is gated twice</h3>
+              <div class="gates">
+                <div class="gatebox"><span class="gn">gate 1</span><span class="gt">allowlist</span></div>
+                <span class="garrow" aria-hidden="true">&rarr;</span>
+                <div class="gatebox"><span class="gn">gate 2</span><span class="gt">post-render content re-scan</span></div>
+                <span class="garrow" aria-hidden="true">&rarr;</span>
+                <div class="gatebox"><span class="gn">result</span><span class="gt">public export</span></div>
+              </div>
+              <p style="margin-top:12px;font-size:13px;color:var(--ink-2)">Classification is a claim and the scan is the verification. <span class="tag acc">GP-43</span></p>
+            </div>
+            <div class="card">
+              <h3>Rules on the privacy package</h3>
+              <ul class="facts">
+                <li>The <code>privacy</code> package sits at layer 3, so any stage can call it while it stays unable to import upward. <button class="xlink" data-goto-layer="3">See it on Layers</button></li>
+                <li>Privacy tooling reports paths and counts, never matched content. <span class="tag acc">GP-41</span></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 7 · OPEN QUESTIONS ────────────────────────────────── -->
+      <section class="screen" id="s-open" hidden>
+        <div class="card">
+          <h3>The list</h3>
+          <div class="oq">
+            <div class="oqrow"><span class="oqid">TD-02</span><span class="oqt"><b>No known-answer validation.</b> The synthetic case proves the machinery, not the calibration. No real-world sensitivity claim is supportable yet.</span></div>
+            <div class="oqrow"><span class="oqid">TD-03</span><span class="oqt"><b>No structural or copy-number variant calling.</b> In a chromosomal-instability disorder that is a material gap, not a rounding error.</span></div>
+            <div class="oqrow"><span class="oqid">TD-07</span><span class="oqt"><b>Proband-only.</b> No segregation, no de-novo detection, no trio phasing, so phase stays <code>UNKNOWN</code> for every pair and the inheritance component is capped.</span></div>
+            <div class="oqrow"><span class="oqid">TD-04</span><span class="oqt"><b>Phenotype matching is flat term overlap.</b> No ontology-graph propagation, so true matches are under-scored.</span></div>
+            <div class="oqrow"><span class="oqid">TD-06</span><span class="oqt"><b>Network denial is a tripwire, not a boundary.</b> C extensions and subprocesses bypass the Python guard.</span></div>
+            <div class="oqrow"><span class="oqid">TD-21</span><span class="oqt"><b>Determinism is verified under a fixed clock only.</b> Eleven artifacts are time-bearing under a real clock.</span></div>
+            <div class="oqrow"><span class="oqid">TD-09</span><span class="oqt"><b>No human domain-expert review.</b> Adversarial model review is a filter, not a substitute, and treating model fluency as evidence quality is the exact failure this project exists to resist.</span></div>
+            <div class="oqrow"><span class="oqid none">no id</span><span class="oqt"><b>Every scoring weight is heuristic</b>, calibrated against no labelled dataset. No composite score is a probability.</span></div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ── theme ──────────────────────────────────────────────────────────── */
+var root=document.documentElement, tbtn=document.getElementById('themebtn'), tlbl=document.getElementById('themelbl');
+var MOON='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20.3 14.4A8.6 8.6 0 1 1 9.6 3.7a6.9 6.9 0 0 0 10.7 10.7z"/></svg>';
+var SUN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6"/></svg>';
+function paintTheme(t){
+  root.setAttribute('data-theme',t);
+  var dark = t==='dark';
+  /* the button names the theme it switches TO, matching its aria-label */
+  tbtn.innerHTML = (dark?SUN:MOON)+'<span id="themelbl">'+(dark?'Light':'Dark')+'</span>';
+  tbtn.setAttribute('aria-label', dark?'Switch to light theme':'Switch to dark theme');
+}
+var stored=null;
+try{ stored=localStorage.getItem('mva-arch-theme'); }catch(e){}
+/* light by default; the toggle (and only the toggle) opts into dark */
+paintTheme(stored==='dark' ? 'dark' : 'light');
+tbtn.addEventListener('click',function(){
+  var next = root.getAttribute('data-theme')==='dark' ? 'light' : 'dark';
+  paintTheme(next);
+  try{ localStorage.setItem('mva-arch-theme',next); }catch(e){}
+});
+
+/* ── screens ────────────────────────────────────────────────────────── */
+var HEAD={
+  pipeline:['topology','One pipeline, two exits.','Track 1 leaves after ranking. Track 2 continues from the ranked pair.'],
+  layers:['import rules','Imports go down, never up.','Enforced by AST-walking tests in <code>tests/unit/test_architecture.py</code>, not by convention.'],
+  contracts:['types','Three types carry the whole system.','<code>VariantRecord</code>, <code>EvidenceItem</code>, <code>CandidatePair</code>. The score is a vector, not a scalar.'],
+  adapters:['boundaries','Every external tool sits behind a Protocol.','A local hash-pinned implementation today, and a documented slot for the real thing.'],
+  determinism:['reproducibility','Byte-identical repeat runs are an acceptance criterion, not an aspiration.','<span class="tag acc">GP-30</span> &mdash; under a fixed clock, which is what <code>config.synthetic</code> selects and what every determinism check in this repo runs under.'],
+  privacy:['boundary','The workspace is external and validated before any file is read.','<span class="tag acc">ADR 0006</span> Public export is gated twice, because classification is a claim and the scan is the verification.'],
+  open:['limits','Open questions','Eight items, each stated in the repo. Seven carry a tech-debt id.']
+};
+var navBtns=[].slice.call(document.querySelectorAll('#nav button[data-screen]'));
+var eyebrow=document.getElementById('eyebrow'), htitle=document.getElementById('htitle'), hlede=document.getElementById('hlede');
+var bodyEl=document.getElementById('body');
+function show(name){
+  navBtns.forEach(function(b){
+    var on = b.getAttribute('data-screen')===name;
+    b.setAttribute('aria-current', on?'true':'false');
+  });
+  [].slice.call(document.querySelectorAll('.screen')).forEach(function(s){
+    s.hidden = (s.id !== 's-'+name);
+  });
+  var h=HEAD[name];
+  eyebrow.textContent=h[0]; htitle.textContent=h[1]; hlede.innerHTML=h[2];
+  bodyEl.scrollTop=0;
+}
+navBtns.forEach(function(b){
+  b.addEventListener('click',function(){ show(b.getAttribute('data-screen')); });
+});
+
+/* ── pipeline ───────────────────────────────────────────────────────── */
+var ROLES={
+  'ingest':['read the VCF, build-anchored, bare contig names','shared spine'],
+  'normalise':['trim and left-align; in-process today, <code>bcftools norm</code> later','shared spine'],
+  'QC':['analytical validity evidence per genotype','shared spine'],
+  'annotate':['consequence, frequency, clinical, splice lookups; all local','shared spine'],
+  'select':['the annotation relevance bar; drops write a discard-ledger row','shared spine'],
+  'pair':['construct candidate pairs; phase stays <code>UNKNOWN</code>','shared spine'],
+  'score':['eight visible component scores, no scalar collapse','shared spine'],
+  'rank':['total ordering: score, then genomic position','shared spine'],
+  'mechanism':['characterise the disrupted mechanism as a chain','Track 2'],
+  'intervention':['discover candidate agents against that chain','Track 2'],
+  'direction check':['the signed gate; <code>WRONG_DIRECTION</code> refuses construction','Track 2'],
+  'safety filter':['compensatory-node rule and safety context detectors','Track 2']
+};
+var pipe=document.getElementById('pipe');
+var rolepanel=document.getElementById('rolepanel'), roleout=document.getElementById('roleout');
+var pnodes=[].slice.call(pipe.querySelectorAll('.pnode'));
+
+function selectStage(stage){
+  pnodes.forEach(function(g){
+    g.setAttribute('aria-pressed', g.getAttribute('data-stage')===stage ? 'true':'false');
+  });
+  var r=ROLES[stage]; if(!r) return;
+  var isT2 = r[1]==='Track 2';
+  rolepanel.classList.toggle('is-t2', isT2);
+  roleout.innerHTML =
+    '<div><span class="rname">'+stage+'</span>'+
+    '<span class="rwhere tag '+(isT2?'t2':'acc')+'">'+r[1]+'</span></div>'+
+    '<p class="rrole">'+r[0]+'</p>';
+}
+pnodes.forEach(function(g){
+  var stage=g.getAttribute('data-stage');
+  g.addEventListener('click',function(){ selectStage(stage); });
+  g.addEventListener('keydown',function(ev){
+    if(ev.key==='Enter'||ev.key===' '||ev.key==='Spacebar'){ ev.preventDefault(); selectStage(stage); }
+  });
+});
+
+var segBtns=[].slice.call(document.querySelectorAll('.seg button[data-track]'));
+segBtns.forEach(function(b){
+  b.addEventListener('click',function(){
+    var t=b.getAttribute('data-track');
+    segBtns.forEach(function(o){ o.setAttribute('aria-pressed', o===b ? 'true':'false'); });
+    pipe.setAttribute('data-track',t);
+  });
+});
+
+/* ── layers ─────────────────────────────────────────────────────────── */
+var LAYERS=[
+ {n:8,mods:'cli, pipeline',role:'composition root — the only layer that knows everything',
+  verdict:'<span class="mono">cli, pipeline</span> may import layers 0&ndash;7. Nothing sits above the composition root.'},
+ {n:7,mods:'reporting',role:'rendering, assertion checking',
+  verdict:'<span class="mono">reporting</span> may import layers 0&ndash;6. Layer 8 is forbidden.'},
+ {n:6,mods:'evidence',role:'DuckDB + Parquet persistence',
+  verdict:'<span class="mono">evidence</span> may import layers 0&ndash;5. Layers 7&ndash;8 are forbidden.'},
+ {n:5,mods:'prioritization, mechanisms, interventions',role:'analysis',peers:true,
+  verdict:'<span class="mono">prioritization, mechanisms, interventions</span> may import layers 0&ndash;4. Layers 6&ndash;8 are forbidden.'},
+ {n:4,mods:'ingestion, annotation, phenotype',role:'data in',peers:true,
+  verdict:'<span class="mono">ingestion, annotation, phenotype</span> may import layers 0&ndash;3. Layers 5&ndash;8 are forbidden.'},
+ {n:3,mods:'privacy',role:'cross-cutting; imports layers 0–2 only',
+  verdict:'<span class="mono">privacy</span> may import layers 0&ndash;2 only. Any stage above it may call it, while it stays structurally unable to import upward.'},
+ {n:2,mods:'config',role:'typed settings + the workspace boundary',
+  verdict:'<span class="mono">config</span> may import layers 0&ndash;1. Layers 3&ndash;8 are forbidden. The layering test caught this one importing <span class="mono">determinism</span> when determinism sat above it.'},
+ {n:1,mods:'errors, determinism, clock',role:'foundation utilities',
+  verdict:'<span class="mono">errors, determinism, clock</span> may import layer 0 only. Layers 2&ndash;8 are forbidden.'},
+ {n:0,mods:'models',role:'the shared vocabulary; imports nothing',
+  verdict:'<span class="mono">models</span> imports nothing. It is the shared vocabulary every layer above it speaks.'}
+];
+var stack=document.getElementById('stack'), rail=document.getElementById('rail'), verdict=document.getElementById('verdict');
+var PEER='<span class="peer">Peers inside this layer never import each other. They compose only in <span class="mono">src/mva/pipeline.py</span> (GP-03).</span>';
+LAYERS.forEach(function(L){
+  var b=document.createElement('button');
+  b.className='lrow'; b.setAttribute('data-layer',String(L.n));
+  b.setAttribute('data-state','idle');
+  b.setAttribute('aria-pressed','false');
+  b.innerHTML='<span class="lnum">'+L.n+'</span><span class="lmods">'+L.mods+'</span>'+
+              '<span class="lrole">'+L.role+'</span><span class="lstate"></span>';
+  stack.appendChild(b);
+});
+var lrows=[].slice.call(stack.querySelectorAll('.lrow'));
+function permitted(n){ return n===3 ? [0,1,2] : (n===0 ? [] : rangeTo(n-1)); }
+function rangeTo(m){ var a=[],i; for(i=0;i<=m;i++){a.push(i);} return a; }
+function selectLayer(n){
+  var ok=permitted(n);
+  lrows.forEach(function(r){
+    var k=parseInt(r.getAttribute('data-layer'),10);
+    var st = k===n ? 'sel' : (ok.indexOf(k)>-1 ? 'ok' : 'no');
+    r.setAttribute('data-state',st);
+    r.setAttribute('aria-pressed', k===n ? 'true':'false');
+    var chip = st==='sel' ? '<span class="tag acc">selected</span>'
+             : st==='ok'  ? '<span class="tag acc">may import</span>'
+             : '<span class="tag no">forbidden</span>';
+    r.querySelector('.lstate').innerHTML=chip;
+  });
+  var L=LAYERS.filter(function(x){return x.n===n;})[0];
+  verdict.innerHTML = L.verdict + (L.peers?PEER:'');
+  // rail spans the permitted block
+  if(ok.length){
+    var first=stack.querySelector('.lrow[data-layer="'+ok[ok.length-1]+'"]'); // lowest layer = last in DOM
+    var last=stack.querySelector('.lrow[data-layer="'+ok[0]+'"]');            // highest permitted = earlier in DOM
+    var top=Math.min(first.offsetTop,last.offsetTop);
+    var bottom=Math.max(first.offsetTop+first.offsetHeight,last.offsetTop+last.offsetHeight);
+    rail.style.top=top+'px'; rail.style.height=(bottom-top)+'px';
+    rail.classList.add('on');
+  }else{
+    rail.classList.remove('on');
+  }
+}
+lrows.forEach(function(r){
+  r.addEventListener('click',function(){ selectLayer(parseInt(r.getAttribute('data-layer'),10)); });
+});
+[].slice.call(document.querySelectorAll('[data-goto-layer]')).forEach(function(b){
+  b.addEventListener('click',function(){
+    show('layers');
+    var n=parseInt(b.getAttribute('data-goto-layer'),10);
+    selectLayer(n);
+    var r=stack.querySelector('.lrow[data-layer="'+n+'"]');
+    if(r){ r.focus(); }
+  });
+});
+
+/* ── contracts tabs ─────────────────────────────────────────────────── */
+var tabs=[].slice.call(document.querySelectorAll('.tabs [role="tab"]'));
+function selectTab(t){
+  tabs.forEach(function(o){
+    var on=o===t;
+    o.setAttribute('aria-selected', on?'true':'false');
+    document.getElementById(o.getAttribute('aria-controls')).hidden = !on;
+  });
+}
+tabs.forEach(function(t,i){
+  t.addEventListener('click',function(){ selectTab(t); });
+  t.addEventListener('keydown',function(ev){
+    var j = ev.key==='ArrowRight' ? i+1 : ev.key==='ArrowLeft' ? i-1 : -1;
+    if(j<0||j>=tabs.length) return;
+    ev.preventDefault(); tabs[j].focus(); selectTab(tabs[j]);
+  });
+});
+
+/* ── determinism clock ──────────────────────────────────────────────── */
+var cmp=document.getElementById('cmp'), clknote=document.getElementById('clknote');
+var clkBtns=[].slice.call(document.querySelectorAll('.seg button[data-clock]'));
+function paintClock(which){
+  clkBtns.forEach(function(b){ b.setAttribute('aria-pressed', b.getAttribute('data-clock')===which ? 'true':'false'); });
+  if(which==='fixed'){
+    cmp.innerHTML=
+      '<div class="cmprow"><span class="what">scientific content</span><span class="val"><span class="eq">=</span> identical</span></div>'+
+      '<div class="cmprow"><span class="what">recorded time</span><span class="val"><span class="eq">=</span> identical</span></div>'+
+      '<div class="cmprow"><span class="what">artifact hashes</span><span class="val"><span class="eq">=</span> byte-identical</span></div>';
+    clknote.innerHTML='Every determinism check in this repo runs under this clock.';
+  }else{
+    cmp.innerHTML=
+      '<div class="cmprow"><span class="what">scientific content</span><span class="val"><span class="eq">=</span> identical</span></div>'+
+      '<div class="cmprow diff"><span class="what">recorded time</span><span class="val"><span class="fig">11</span> artifacts differ in recorded time only</span></div>'+
+      '<div class="cmprow diff"><span class="what">artifact hashes</span><span class="val">not byte-identical on those eleven</span></div>';
+    clknote.innerHTML='The clock is <code>SystemClock</code> (<code>pipeline.py:450</code>). The artifact-by-artifact map is in <code>docs/handoff-integrity.md</code> §4; the fix is <span class="tag no">TD-21</span>';
+  }
+}
+clkBtns.forEach(function(b){ b.addEventListener('click',function(){ paintClock(b.getAttribute('data-clock')); }); });
+
+/* ── init ───────────────────────────────────────────────────────────── */
+show('pipeline');
+paintClock('fixed');
+selectTab(tabs[0]);
+})();
+</script>
+</body>
+</html>
